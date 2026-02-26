@@ -28,30 +28,34 @@ struct NovaEngineCore: Sendable {
         DebugLog.d("[Flow] entered generateResponse")
         let trimmedInput = newInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let input = trimmedInput.lowercased()
+        let strippedQuery = stripWakeWords(from: input)
+        NovaLogger.info("[Router] normalized=\"\(strippedQuery)\"")
+
         if input.isEmpty {
             return "I didn't catch that. Say something and I'll respond."
         }
 
         // Compound: greeting + local intent → greet first, then answer
-        if hasGreetingWord(input) && hasLocalIntent(input: input, trimmedInput: trimmedInput, messages: messages) {
-            let intentResponse = generateLocalIntentResponse(messages: messages, newInput: newInput, input: input, trimmedInput: trimmedInput, now: now)
+        if hasGreetingWord(input) && hasLocalIntent(input: input, trimmedInput: strippedQuery, messages: messages) {
+            let intentResponse = generateLocalIntentResponse(messages: messages, newInput: newInput, input: input, trimmedInput: strippedQuery.isEmpty ? trimmedInput : strippedQuery, now: now)
             if let response = intentResponse {
+                let intentLabel = intentLabelForLog(intent: IntentDetector.detect(from: strippedQuery))
+                NovaLogger.info("[Router] local compound: greeting + \(intentLabel)")
                 let briefGreeting = briefGreetingFromInput(input)
-                #if DEBUG
-                DebugLog.d("[Nova] compound intent: greeting+local -> \(response.prefix(40))...")
-                #endif
                 return "\(briefGreeting) \(response)"
             }
         }
 
         // Pure greeting: greeting only, no substantive question (otherwise let OpenAI handle)
         if isGreetingPhrase(input) && !hasSubstantiveQuestion(input: input) {
+            NovaLogger.info("[Router] local.intent=greeting")
             let priorGreetings = messages.dropLast().filter { $0.role == .user }.filter { isGreetingPhrase($0.content) }
             return greetingResponse(priorGreetings: priorGreetings, now: now)
         }
 
-        let intent = IntentDetector.detect(from: newInput)
+        let intent = IntentDetector.detect(from: strippedQuery.isEmpty ? newInput : strippedQuery)
         if intent != .unknown {
+            NovaLogger.info("[Router] local.intent=\(intentLabelForLog(intent: intent))")
             switch intent {
             case .getDate:
                 return responseForDateIntent(input: input, now: now)
@@ -110,10 +114,13 @@ struct NovaEngineCore: Sendable {
             return "I don't set timed reminders yet, but I can summarize what we've discussed if you'd like."
         }
 
-        if let mathResult = evaluateSimpleMath(input: trimmedInput) {
+        if let mathResult = evaluateSimpleMath(input: strippedQuery.isEmpty ? trimmedInput : strippedQuery) {
+            NovaLogger.info("[Router] local.intent=math")
             return mathResult
         }
 
+        // OpenAI fallback: no local intent matched
+        NovaLogger.info("[Router] fallback to OpenAI")
         // OpenAI fallback: config passed in (no ProcessInfo access here).
         guard let cfg = llmConfig else {
             return "I'm missing my API key setup."
@@ -255,6 +262,40 @@ struct NovaEngineCore: Sendable {
         return hasGreetingWord(c)
     }
 
+    /// Strip leading wake words and greetings. Used for routing (intent detection on stripped query).
+    private nonisolated func stripWakeWords(from input: String) -> String {
+        let words = input.split(separator: " ").map { String($0) }
+        var remaining = words
+        for _ in 0..<6 {
+            if remaining.isEmpty { break }
+            let first = remaining[0]
+            if first == "nova" {
+                remaining.removeFirst()
+            } else if first == "hi" || first == "hello" || first == "hey" {
+                remaining.removeFirst()
+            } else if first == "good" && remaining.count >= 2 {
+                let second = remaining[1]
+                if second == "morning" || second == "afternoon" || second == "evening" {
+                    remaining.removeFirst()
+                    remaining.removeFirst()
+                } else { break }
+            } else if first == "morning" || first == "afternoon" || first == "evening" {
+                remaining.removeFirst()
+            } else {
+                break
+            }
+        }
+        return remaining.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+    }
+
+    private nonisolated func intentLabelForLog(intent: IntentType) -> String {
+        switch intent {
+        case .getTime: return "time"
+        case .getDate, .getDayOfWeek: return "date"
+        case .unknown: return "unknown"
+        }
+    }
+
     private nonisolated func hasLocalIntent(input: String, trimmedInput: String, messages: [Message]) -> Bool {
         if IntentDetector.detect(from: trimmedInput) != .unknown { return true }
         if input.contains("what did i just say") || input.contains("what did i say") { return true }
@@ -266,7 +307,7 @@ struct NovaEngineCore: Sendable {
     }
 
     private nonisolated func generateLocalIntentResponse(messages: [Message], newInput: String, input: String, trimmedInput: String, now: Date) -> String? {
-        let intent = IntentDetector.detect(from: newInput)
+        let intent = IntentDetector.detect(from: trimmedInput.isEmpty ? newInput : trimmedInput)
         if intent != .unknown {
             switch intent {
             case .getDate: return responseForDateIntent(input: input, now: now)

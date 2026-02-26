@@ -125,7 +125,6 @@ final class ChatViewModel: ObservableObject {
         #endif
 
         let messageSnapshot = messages
-        let systemPrompt = NovaPersonality.systemPrompt()
 
         // Build cfg on MainActor (ProcessInfo blocks from background).
         let apiKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? ""
@@ -136,17 +135,15 @@ final class ChatViewModel: ObservableObject {
             temperature: 0.7
         )
 
-        // Run OpenAI call OFF main actor — no engine, no streaming, no TaskGroup.
-        Task.detached(priority: .userInitiated) { [cfg, messageSnapshot, systemPrompt] in
+        // Run engine OFF main actor — engine routes local intents first, OpenAI only when no match.
+        let engineRef = engine
+        Task.detached(priority: .userInitiated) { [cfg, messageSnapshot, text] in
             do {
-                print("[OPENAI] O1 starting detached request")
-                let resp = try await LLMClient.generateResponse(
-                    config: cfg,
+                let resp = try await engineRef.generateResponse(
                     messages: messageSnapshot,
-                    systemPrompt: systemPrompt
+                    newInput: text,
+                    llmConfig: cfg
                 )
-                print("[OPENAI] O2 got response len=\(resp.count)")
-
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.appendAssistant(resp)
