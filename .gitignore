@@ -2,3 +2,6 @@
 # Xcode user state
 **/xcuserdata/
 **/*.xcuserstate
+
+# Xcode user-specific state
+**/xcuserdata/
