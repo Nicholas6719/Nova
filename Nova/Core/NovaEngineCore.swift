@@ -1,18 +1,6 @@
-//
-//  NovaEngineCore.swift
-//  Nova
-//
-//  Pure non-actor core for response generation. Safe to call from any context.
-//
-//  Compound intent verification (DEBUG):
-//  1. "Hi Nova, what time is it right now?" -> compound, time (local)
-//  2. "Hello, what's the date tomorrow?" -> compound, date (local)
-//  3. "Hey Nova, explain quantum computing in one sentence" -> OpenAI (unknown, no local intent)
-//
-
 import Foundation
 
-/// Pure struct for response generation.
+/// Pure struct for response generation. Safe to call from any context.
 struct NovaEngineCore: Sendable {
 
     func generateResponse(
@@ -24,88 +12,69 @@ struct NovaEngineCore: Sendable {
         onStreamStart: (@Sendable () async -> Void)? = nil,
         onStreamDelta: (@Sendable (String) -> Void)? = nil
     ) async throws -> String {
-        let _gid = UUID().uuidString.prefix(6)
-        print("[Engine] ENTER generateResponse gid=\(_gid)")
-        defer { print("[Engine] EXIT generateResponse gid=\(_gid)") }
         let trimmedInput = newInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let input = trimmedInput.lowercased()
         let strippedQuery = stripWakeWords(from: input)
-        print("[Router] normalized=\"\(strippedQuery)\"")
-        print("[OPENAI] A0 normalized done")
 
         if input.isEmpty {
             return "I didn't catch that. Say something and I'll respond."
         }
-        print("[OPENAI] A1 before local checks")
 
-        let mathNormalized = Self.normalizeMathSymbols(input)
+        // MARK: Local math (normalize → binary → chain → mathy guard)
+        let mathNormalized = Self.normalizeMathOperators(input)
 
-        // --- Math fast-path: single binary op (8-2, 300*2, 12/3) ---
-        print("[LocalChecks] P0 begin gid=\(_gid) input=\(input) mathNorm=\(mathNormalized)")
-        if let mathReply = Self.tryLocalMathFastPath(mathNormalized, gid: _gid) {
-            print("[LocalChecks] P0a math fast-path HIT gid=\(_gid)")
+        if let mathReply = Self.tryEvaluateSimpleBinaryMath(mathNormalized) {
             return mathReply
         }
-        print("[LocalChecks] P0b math fast-path MISS gid=\(_gid)")
 
-        // --- Plus/minus chain: "300-200+2", "-5+2" ---
-        if let chainReply = Self.tryLocalPlusMinusChain(mathNormalized) {
-            print("[MathChain] hit result=\(chainReply.prefix(60))")
+        if let chainReply = Self.tryEvaluateChainedMath(mathNormalized) {
             return chainReply
         }
 
-        // --- Guard: anything mathy that wasn't handled locally skips intent detection → OpenAI ---
+        // If input looks like a math expression we can't handle, skip intent detection → OpenAI
         localChecks: do {
             if Self.looksLikeMathExpression(mathNormalized) {
-                print("[LocalChecks] mathy but unsupported; skipping to OpenAI gid=\(_gid)")
                 break localChecks
             }
 
-            print("[LocalChecks] P1 before compound gid=\(_gid)")
             // Compound: greeting + local intent → greet first, then answer
             if hasGreetingWord(input) && hasLocalIntent(input: input, trimmedInput: strippedQuery, messages: messages) {
                 let intentResponse = generateLocalIntentResponse(messages: messages, newInput: newInput, input: input, trimmedInput: strippedQuery.isEmpty ? trimmedInput : strippedQuery, now: now)
                 if let response = intentResponse {
-                    let intentLabel = intentLabelForLog(intent: IntentDetector.detect(from: strippedQuery))
-                    print("[Router] local compound: greeting + \(intentLabel)")
                     let briefGreeting = briefGreetingFromInput(input)
                     return "\(briefGreeting) \(response)"
                 }
             }
 
-            // Pure greeting: greeting only, no substantive question (otherwise let OpenAI handle)
+            // Pure greeting (no substantive question)
             if isGreetingPhrase(input) && !hasSubstantiveQuestion(input: input) {
-                print("[Router] local.intent=greeting")
                 let priorGreetings = messages.dropLast().filter { $0.role == .user }.filter { isGreetingPhrase($0.content) }
                 return greetingResponse(priorGreetings: priorGreetings, now: now)
             }
 
-            print("[LocalChecks] P2 before intent detect gid=\(_gid)")
+            // Intent detection (time, date, day of week)
             let intent = IntentDetector.detect(from: strippedQuery.isEmpty ? newInput : strippedQuery)
             if intent != .unknown {
-                print("[Router] local.intent=\(intentLabelForLog(intent: intent))")
                 switch intent {
                 case .getDate:
                     return responseForDateIntent(input: input, now: now)
-
                 case .getTime:
                     let formatter = DateFormatter()
                     formatter.locale = Locale.current
                     formatter.timeStyle = .short
                     let timeString = formatter.string(from: now)
                     return "The current time is \(timeString)."
-
                 case .getDayOfWeek:
                     let formatter = DateFormatter()
                     formatter.locale = Locale.current
                     formatter.dateFormat = "EEEE"
                     return formatter.string(from: now)
-
                 case .unknown:
                     break
                 }
             }
 
+            // Recall: what did I say / what did you say
             if input.contains("what did i just say") || input.contains("what did i say") {
                 let userMessages = messages.filter { $0.role == .user }
                 let previousUserMessages = userMessages.dropLast()
@@ -143,20 +112,13 @@ struct NovaEngineCore: Sendable {
             }
         }
 
-        print("[LocalChecks] P3 before OpenAI fallback gid=\(_gid)")
-        print("[OPENAI] A2 local checks complete; no match -> OpenAI")
-
-        // OpenAI fallback: config passed in (no ProcessInfo access here).
-        print("[OPENAI] A3 before reading apiKey")
+        // MARK: OpenAI fallback — DO NOT MODIFY this section's concurrency structure
         guard let cfg = llmConfig else {
             return "I'm missing my API key setup."
         }
         guard !cfg.apiKey.isEmpty else {
-            print("[OPENAI] A_KEY_MISSING")
             return "I'm missing my OpenAI API key configuration."
         }
-        print("[OPENAI] A4 apiKey.len=\(cfg.apiKey.count)")
-        print("[OPENAI] A5 before LLMClient call")
 
         let fallbackMsg = "Sorry — my online brain is taking too long right now. Please try again."
         let resp: String
@@ -178,70 +140,134 @@ struct NovaEngineCore: Sendable {
         } catch {
             throw error
         }
-        if resp == fallbackMsg {
-            print("[OPENAI] A_TIMEOUT fired")
-        }
-        print("[OPENAI] A6 after LLMClient resp.len=\(resp.count)")
         return resp
     }
 
-    // MARK: - Cache key (model + canonical query; greetings/wake word stripped at start only)
+    // MARK: - Math Helpers (static, pure — no self, no MainActor)
 
-    /// Safe, deterministic O(n) cache key builder. No regex, no while loops, no String.Index.
-    /// Strips leading wake word + greetings so "Hi Nova, explain X" and "Explain X" map to same key.
-    private nonisolated func makeOpenAICacheKey(rawQuery: String) -> String {
-        let capped = rawQuery.unicodeScalars.prefix(500)
-        // Single pass over scalars: A-Z -> a-z, keep a-z/0-9, collapse whitespace
-        var normalized = ""
-        var lastWasSpace = true
-        for scalar in capped {
-            let v = scalar.value
-            if v >= 65 && v <= 90 {
-                normalized.unicodeScalars.append(Unicode.Scalar(v + 32)!)
-                lastWasSpace = false
-            } else if (v >= 97 && v <= 122) || (v >= 48 && v <= 57) {
-                normalized.unicodeScalars.append(scalar)
-                lastWasSpace = false
-            } else if v == 32 || v == 9 || v == 10 || v == 13 {
-                if !lastWasSpace {
-                    normalized.unicodeScalars.append(Unicode.Scalar(32)!)
-                    lastWasSpace = true
-                }
+    /// Normalize Unicode math symbols from speech recognition (×→*, ÷→/, •→*, ·→*).
+    private static func normalizeMathOperators(_ s: String) -> String {
+        s.replacingOccurrences(of: "\u{00D7}", with: "*")
+         .replacingOccurrences(of: "\u{00F7}", with: "/")
+         .replacingOccurrences(of: "\u{2022}", with: "*")
+         .replacingOccurrences(of: "\u{00B7}", with: "*")
+    }
+
+    /// Evaluate a single binary operation: "8-2", "300*2", "12/3".
+    /// Returns nil for multi-op expressions, non-numeric input, or divide-by-zero.
+    private static func tryEvaluateSimpleBinaryMath(_ normalized: String) -> String? {
+        let s = normalized.replacingOccurrences(of: " ", with: "")
+        guard s.rangeOfCharacter(from: .decimalDigits) != nil else { return nil }
+
+        let ops: [Character] = ["+", "-", "*", "/"]
+        var found: (Character, Int)? = nil
+        for (i, ch) in s.enumerated() {
+            if ops.contains(ch) {
+                if i == 0 { return nil }
+                if found != nil { return nil }
+                found = (ch, i)
             }
         }
-        let trimmed = normalized.trimmingCharacters(in: .whitespaces)
-        let words = trimmed.split(separator: " ").map { String($0) }
+        guard let (op, idx) = found else { return nil }
 
-        // Drop leading greeting/wake words: max 6 iterations, no while
-        var remaining = words
-        for _ in 0..<6 {
-            if remaining.isEmpty { break }
-            let first = remaining[0]
-            if first == "nova" {
-                remaining.removeFirst()
-            } else if first == "hi" || first == "hello" || first == "hey" {
-                remaining.removeFirst()
-            } else if first == "good" && remaining.count >= 2 {
-                let second = remaining[1]
-                if second == "morning" || second == "afternoon" || second == "evening" {
-                    remaining.removeFirst()
-                    remaining.removeFirst()
-                } else { break }
-            } else if first == "morning" || first == "afternoon" || first == "evening" {
-                remaining.removeFirst()
-            } else {
+        let lhs = String(s.prefix(idx))
+        let rhs = String(s.suffix(s.count - idx - 1))
+        guard let a = Double(lhs), let b = Double(rhs) else { return nil }
+
+        let result: Double
+        switch op {
+        case "+": result = a + b
+        case "-": result = a - b
+        case "*": result = a * b
+        case "/":
+            if b == 0 { return nil }
+            result = a / b
+        default: return nil
+        }
+
+        func fmt(_ x: Double) -> String {
+            x.rounded() == x && abs(x) < 1e15 ? String(Int(x)) : String(x)
+        }
+
+        let spokenOp: String
+        switch op {
+        case "+": spokenOp = "plus"
+        case "-": spokenOp = "minus"
+        case "*": spokenOp = "times"
+        case "/": spokenOp = "divided by"
+        default: spokenOp = "?"
+        }
+        return "\(fmt(a)) \(spokenOp) \(fmt(b)) equals \(fmt(result))."
+    }
+
+    /// Evaluate chained +/− expressions: "300-200+2", "-5+2", "calculate 10+5-3".
+    /// Strips common prefixes. Rejects input containing *, /, parens, or letters.
+    private static func tryEvaluateChainedMath(_ raw: String) -> String? {
+        var s = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+
+        for prefix in ["nova ", "what is ", "what's ", "whats ", "calculate ", "solve "] {
+            if s.hasPrefix(prefix) {
+                s = String(s.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
                 break
             }
         }
 
-        let s: String
-        if remaining.count > 50 {
-            s = remaining.prefix(50).joined(separator: " ")
-        } else {
-            s = remaining.joined(separator: " ")
+        s = s.replacingOccurrences(of: " ", with: "")
+
+        for ch in s {
+            guard ch.isNumber || ch == "." || ch == "+" || ch == "-" else { return nil }
         }
-        let finalNorm = s.count > 200 ? String(s.prefix(200)) : s
-        return "gpt-4o-mini|\(finalNorm)"
+        guard !s.isEmpty else { return nil }
+
+        let inner = s.first == "-" ? String(s.dropFirst()) : s
+        guard inner.contains("+") || inner.contains("-") else { return nil }
+
+        var result = 0.0
+        var currentNum = ""
+        var pendingOp: Character = "+"
+        var isFirst = true
+
+        for ch in s {
+            if (ch == "+" || ch == "-") && !currentNum.isEmpty {
+                guard let val = Double(currentNum) else { return nil }
+                result = pendingOp == "+" ? result + val : result - val
+                currentNum = ""
+                pendingOp = ch
+                isFirst = false
+            } else if ch == "-" && currentNum.isEmpty && isFirst {
+                currentNum.append(ch)
+            } else if ch.isNumber || ch == "." {
+                currentNum.append(ch)
+            } else {
+                return nil
+            }
+        }
+
+        guard !currentNum.isEmpty, let val = Double(currentNum) else { return nil }
+        result = pendingOp == "+" ? result + val : result - val
+
+        let formatted: String
+        if result.truncatingRemainder(dividingBy: 1) == 0 && abs(result) < 1e15 {
+            formatted = String(Int(result))
+        } else {
+            formatted = String(result)
+        }
+        return "That equals \(formatted)."
+    }
+
+    /// True if input (after stripping spaces) contains digits + math operators but NO letters.
+    /// Used to skip compound/intent detection for expressions we can't evaluate locally.
+    private static func looksLikeMathExpression(_ normalized: String) -> Bool {
+        let s = normalized.replacingOccurrences(of: " ", with: "")
+        var hasDigit = false
+        var hasOp = false
+        let mathChars: Set<Character> = ["+", "-", "*", "/", "(", ")"]
+        for ch in s {
+            if ch.isNumber || ch == "." { hasDigit = true }
+            else if mathChars.contains(ch) { hasOp = true }
+            else if ch.isLetter { return false }
+        }
+        return hasDigit && hasOp
     }
 
     // MARK: - Helpers
@@ -314,7 +340,7 @@ struct NovaEngineCore: Sendable {
         return hasGreetingWord(c)
     }
 
-    /// Strip leading wake words and greetings. Used for routing (intent detection on stripped query).
+    /// Strip leading wake words and greetings for intent detection.
     private nonisolated func stripWakeWords(from input: String) -> String {
         let words = input.split(separator: " ").map { String($0) }
         var remaining = words
@@ -338,14 +364,6 @@ struct NovaEngineCore: Sendable {
             }
         }
         return remaining.joined(separator: " ").trimmingCharacters(in: .whitespaces)
-    }
-
-    private nonisolated func intentLabelForLog(intent: IntentType) -> String {
-        switch intent {
-        case .getTime: return "time"
-        case .getDate, .getDayOfWeek: return "date"
-        case .unknown: return "unknown"
-        }
     }
 
     private nonisolated func hasLocalIntent(input: String, trimmedInput: String, messages: [Message]) -> Bool {
@@ -407,7 +425,6 @@ struct NovaEngineCore: Sendable {
         return nil
     }
 
-    /// Matches the user's greeting phrase (no double-greet). Order matters: longer phrases first.
     private nonisolated func briefGreetingFromInput(_ input: String) -> String {
         let padded = " \(input) "
         if padded.contains(" good morning ") { return "Good morning!" }
@@ -416,7 +433,6 @@ struct NovaEngineCore: Sendable {
         return "Hi!"
     }
 
-    /// True if input contains question-like phrases (explain, what is, how, tell me, etc.).
     private nonisolated func hasSubstantiveQuestion(input: String) -> Bool {
         let phrases = ["explain", "what is", "whats", "what's", "how ", "how do", "why ", "tell me", "define", "describe"]
         return phrases.contains { input.contains($0) }
@@ -440,135 +456,11 @@ struct NovaEngineCore: Sendable {
         return "Hello again. " + greeting
     }
 
-    /// Normalize Unicode math symbols that speech recognition may produce.
-    private static func normalizeMathSymbols(_ s: String) -> String {
-        s.replacingOccurrences(of: "\u{00D7}", with: "*")  // ×
-         .replacingOccurrences(of: "\u{00F7}", with: "/")  // ÷
-         .replacingOccurrences(of: "\u{2022}", with: "*")  // •
-         .replacingOccurrences(of: "\u{00B7}", with: "*")  // ·
-    }
-
-    /// True if input (after stripping spaces) contains digits + math operators but NO letters.
-    /// Used to skip compound/intent detection for expressions we can't evaluate locally.
-    private static func looksLikeMathExpression(_ normalized: String) -> Bool {
-        let s = normalized.replacingOccurrences(of: " ", with: "")
-        var hasDigit = false
-        var hasOp = false
-        let mathChars: Set<Character> = ["+", "-", "*", "/", "(", ")"]
-        for ch in s {
-            if ch.isNumber || ch == "." { hasDigit = true }
-            else if mathChars.contains(ch) { hasOp = true }
-            else if ch.isLetter { return false }
-        }
-        return hasDigit && hasOp
-    }
-
-    /// Evaluate +/− chains like "300-200+2", "calculate 10+5-3", "-5+2".
-    /// Strips common prefixes, rejects anything with *, /, parens, or letters.
-    private static func tryLocalPlusMinusChain(_ raw: String) -> String? {
-        var s = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-
-        for prefix in ["nova ", "what is ", "what's ", "whats ", "calculate ", "solve "] {
-            if s.hasPrefix(prefix) {
-                s = String(s.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                break
-            }
-        }
-
-        s = s.replacingOccurrences(of: " ", with: "")
-
-        for ch in s {
-            guard ch.isNumber || ch == "." || ch == "+" || ch == "-" else { return nil }
-        }
-        guard !s.isEmpty else { return nil }
-
-        let inner = s.first == "-" ? String(s.dropFirst()) : s
-        guard inner.contains("+") || inner.contains("-") else { return nil }
-
-        var result = 0.0
-        var currentNum = ""
-        var pendingOp: Character = "+"
-        var isFirst = true
-
-        for ch in s {
-            if (ch == "+" || ch == "-") && !currentNum.isEmpty {
-                guard let val = Double(currentNum) else { return nil }
-                result = pendingOp == "+" ? result + val : result - val
-                currentNum = ""
-                pendingOp = ch
-                isFirst = false
-            } else if ch == "-" && currentNum.isEmpty && isFirst {
-                currentNum.append(ch)
-            } else if ch.isNumber || ch == "." {
-                currentNum.append(ch)
-            } else {
-                return nil
-            }
-        }
-
-        guard !currentNum.isEmpty, let val = Double(currentNum) else { return nil }
-        result = pendingOp == "+" ? result + val : result - val
-
-        let formatted: String
-        if result.truncatingRemainder(dividingBy: 1) == 0 && abs(result) < 1e15 {
-            formatted = String(Int(result))
-        } else {
-            formatted = String(result)
-        }
-        return "That equals \(formatted)."
-    }
-
-    private static func tryLocalMathFastPath(_ normalized: String, gid: Substring) -> String? {
-        let s = normalized.replacingOccurrences(of: " ", with: "")
-        guard s.rangeOfCharacter(from: .decimalDigits) != nil else { return nil }
-
-        let ops: [Character] = ["+", "-", "*", "/"]
-        var found: (Character, Int)? = nil
-        for (i, ch) in s.enumerated() {
-            if ops.contains(ch) {
-                if i == 0 { return nil }
-                if found != nil { return nil }
-                found = (ch, i)
-            }
-        }
-        guard let (op, idx) = found else { return nil }
-
-        let lhs = String(s.prefix(idx))
-        let rhs = String(s.suffix(s.count - idx - 1))
-        guard let a = Double(lhs), let b = Double(rhs) else { return nil }
-
-        let result: Double
-        switch op {
-        case "+": result = a + b
-        case "-": result = a - b
-        case "*": result = a * b
-        case "/":
-            if b == 0 { return "You can't divide by zero." }
-            result = a / b
-        default: return nil
-        }
-
-        func fmt(_ x: Double) -> String {
-            x.rounded() == x && abs(x) < 1e15 ? String(Int(x)) : String(x)
-        }
-
-        let spokenOp: String
-        switch op {
-        case "+": spokenOp = "plus"
-        case "-": spokenOp = "minus"
-        case "*": spokenOp = "times"
-        case "/": spokenOp = "divided by"
-        default: spokenOp = "?"
-        }
-        return "\(fmt(a)) \(spokenOp) \(fmt(b)) equals \(fmt(result))."
-    }
-
-    /// Pure, fast math evaluator. No regex, NSExpression, DateFormatter, DispatchQueue, or actor hops.
-    /// Handles: "8-2", "8 - 2", "what's 8+8", "whats 8-2", "what is 12 / 3", "calculate 10*5".
+    /// Instance math evaluator used by compound greeting+math detection (hasLocalIntent/generateLocalIntentResponse).
+    /// Strips common prefixes ("what's", "calculate", etc.), parses single binary op.
     private nonisolated func evaluateSimpleMath(input: String) -> String? {
         let candidate = mathCandidate(from: input)
         guard let candidate, !candidate.isEmpty else { return nil }
-        print("[Math] hit candidate=\"\(candidate)\"")
 
         let ops: [(Character, String, (Double, Double) -> Double)] = [
             ("+", "plus", +),
@@ -584,20 +476,14 @@ struct NovaEngineCore: Sendable {
             if sym == "/" && b == 0 { return nil }
             let res = fn(a, b)
             if res.isNaN || res.isInfinite { return nil }
-            print("[Math] result=\(res)")
-            print("[Math] about to build response string")
             let aStr = a == a.rounded() && abs(a) < 1e7 ? "\(Int(a))" : "\(a)"
             let bStr = b == b.rounded() && abs(b) < 1e7 ? "\(Int(b))" : "\(b)"
             let rStr = res == res.rounded() && abs(res) < 1e7 ? "\(Int(res))" : String(format: "%.2g", res)
-            let response = "\(aStr) \(word) \(bStr) equals \(rStr)."
-            print("[Math] about to return local math response")
-            print("[Math] returning NOW")
-            return response
+            return "\(aStr) \(word) \(bStr) equals \(rStr)."
         }
         return nil
     }
 
-    /// Strip prefixes, normalize apostrophes, keep only digits/ops/dot/spaces, collapse whitespace.
     private nonisolated func mathCandidate(from input: String) -> String? {
         var s = input
             .replacingOccurrences(of: "\u{2019}", with: "'")
