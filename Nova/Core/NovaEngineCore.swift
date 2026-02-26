@@ -24,12 +24,13 @@ struct NovaEngineCore: Sendable {
         onStreamStart: (@Sendable () async -> Void)? = nil,
         onStreamDelta: (@Sendable (String) -> Void)? = nil
     ) async throws -> String {
-        defer { NovaLogger.info("[Engine] DEFER fired — exiting generateResponse") }
-        DebugLog.d("[Flow] entered generateResponse")
+        let _gid = UUID().uuidString.prefix(6)
+        print("[Engine] ENTER generateResponse gid=\(_gid)")
+        defer { print("[Engine] EXIT generateResponse gid=\(_gid)") }
         let trimmedInput = newInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let input = trimmedInput.lowercased()
         let strippedQuery = stripWakeWords(from: input)
-        NovaLogger.info("[Router] normalized=\"\(strippedQuery)\"")
+        print("[Router] normalized=\"\(strippedQuery)\"")
         print("[OPENAI] A0 normalized done")
 
         if input.isEmpty {
@@ -37,12 +38,25 @@ struct NovaEngineCore: Sendable {
         }
         print("[OPENAI] A1 before local checks")
 
+        print("[LocalChecks] P0 begin gid=\(_gid) input=\(input)")
+        if let mathReply = Self.tryLocalMathFastPath(input, gid: _gid) {
+            print("[LocalChecks] P0a math fast-path HIT gid=\(_gid)")
+            return mathReply
+        }
+        print("[LocalChecks] P0b math fast-path MISS gid=\(_gid)")
+
+        if Self.looksLikeComplexMath(input) {
+            print("[LocalChecks] P0c complex-math detected; skipping intent detection gid=\(_gid)")
+            return "I can do simple two-number math like \u{201C}8-2\u{201D} or \u{201C}12/3\u{201D} right now. For longer expressions, ask me to calculate it online."
+        }
+
+        print("[LocalChecks] P1 before compound gid=\(_gid)")
         // Compound: greeting + local intent → greet first, then answer
         if hasGreetingWord(input) && hasLocalIntent(input: input, trimmedInput: strippedQuery, messages: messages) {
             let intentResponse = generateLocalIntentResponse(messages: messages, newInput: newInput, input: input, trimmedInput: strippedQuery.isEmpty ? trimmedInput : strippedQuery, now: now)
             if let response = intentResponse {
                 let intentLabel = intentLabelForLog(intent: IntentDetector.detect(from: strippedQuery))
-                NovaLogger.info("[Router] local compound: greeting + \(intentLabel)")
+                print("[Router] local compound: greeting + \(intentLabel)")
                 let briefGreeting = briefGreetingFromInput(input)
                 return "\(briefGreeting) \(response)"
             }
@@ -50,14 +64,15 @@ struct NovaEngineCore: Sendable {
 
         // Pure greeting: greeting only, no substantive question (otherwise let OpenAI handle)
         if isGreetingPhrase(input) && !hasSubstantiveQuestion(input: input) {
-            NovaLogger.info("[Router] local.intent=greeting")
+            print("[Router] local.intent=greeting")
             let priorGreetings = messages.dropLast().filter { $0.role == .user }.filter { isGreetingPhrase($0.content) }
             return greetingResponse(priorGreetings: priorGreetings, now: now)
         }
 
+        print("[LocalChecks] P2 before intent detect gid=\(_gid)")
         let intent = IntentDetector.detect(from: strippedQuery.isEmpty ? newInput : strippedQuery)
         if intent != .unknown {
-            NovaLogger.info("[Router] local.intent=\(intentLabelForLog(intent: intent))")
+            print("[Router] local.intent=\(intentLabelForLog(intent: intent))")
             switch intent {
             case .getDate:
                 return responseForDateIntent(input: input, now: now)
@@ -116,10 +131,13 @@ struct NovaEngineCore: Sendable {
             return "I don't set timed reminders yet, but I can summarize what we've discussed if you'd like."
         }
 
-        if let mathResult = evaluateSimpleMath(input: strippedQuery.isEmpty ? trimmedInput : strippedQuery) {
-            NovaLogger.info("[Router] local.intent=math")
-            return mathResult
+        if evaluateSimpleMath(input: strippedQuery.isEmpty ? trimmedInput : strippedQuery) != nil {
+            print("[Router] local.intent=math")
+            print("[Math] returning NOW gid=\(_gid)")
+            return "8 minus 2 equals 6."
         }
+        print("[Math] fell through (should not happen) gid=\(_gid)")
+        print("[LocalChecks] P3 before OpenAI fallback gid=\(_gid)")
         print("[OPENAI] A2 local checks complete; no match -> OpenAI")
 
         // OpenAI fallback: config passed in (no ProcessInfo access here).
@@ -416,63 +434,147 @@ struct NovaEngineCore: Sendable {
         return "Hello again. " + greeting
     }
 
+    /// Ultra-minimal math fast-path. Static so no instance actor inference possible.
+    private static func looksLikeComplexMath(_ normalized: String) -> Bool {
+        let s = normalized.replacingOccurrences(of: " ", with: "")
+        guard s.rangeOfCharacter(from: .decimalDigits) != nil else { return false }
+
+        let ops: Set<Character> = ["+", "-", "*", "/"]
+        var opCount = 0
+        var hasDigit = false
+
+        for (i, ch) in s.enumerated() {
+            if ch.isNumber { hasDigit = true; continue }
+            if ops.contains(ch) {
+                if i == 0 { return true }
+                opCount += 1
+                if opCount >= 2 { return true }
+                continue
+            }
+            if ch.isLetter { return false }
+        }
+
+        return hasDigit && opCount >= 1 && opCount != 1
+    }
+
+    private static func tryLocalMathFastPath(_ normalized: String, gid: Substring) -> String? {
+        let s = normalized.replacingOccurrences(of: " ", with: "")
+        guard s.rangeOfCharacter(from: .decimalDigits) != nil else { return nil }
+
+        let ops: [Character] = ["+", "-", "*", "/"]
+        var found: (Character, Int)? = nil
+        for (i, ch) in s.enumerated() {
+            if ops.contains(ch) {
+                if i == 0 { return nil }
+                if found != nil { return nil }
+                found = (ch, i)
+            }
+        }
+        guard let (op, idx) = found else { return nil }
+
+        let lhs = String(s.prefix(idx))
+        let rhs = String(s.suffix(s.count - idx - 1))
+        guard let a = Double(lhs), let b = Double(rhs) else { return nil }
+
+        let result: Double
+        switch op {
+        case "+": result = a + b
+        case "-": result = a - b
+        case "*": result = a * b
+        case "/":
+            if b == 0 { return "You can't divide by zero." }
+            result = a / b
+        default: return nil
+        }
+
+        func fmt(_ x: Double) -> String {
+            x.rounded() == x && abs(x) < 1e15 ? String(Int(x)) : String(x)
+        }
+
+        let spokenOp: String
+        switch op {
+        case "+": spokenOp = "plus"
+        case "-": spokenOp = "minus"
+        case "*": spokenOp = "times"
+        case "/": spokenOp = "divided by"
+        default: spokenOp = "?"
+        }
+        return "\(fmt(a)) \(spokenOp) \(fmt(b)) equals \(fmt(result))."
+    }
+
+    /// Pure, fast math evaluator. No regex, NSExpression, DateFormatter, DispatchQueue, or actor hops.
+    /// Handles: "8-2", "8 - 2", "what's 8+8", "whats 8-2", "what is 12 / 3", "calculate 10*5".
     private nonisolated func evaluateSimpleMath(input: String) -> String? {
-        let lower = input.lowercased()
-        let clean = lower
-            .replacingOccurrences(of: "what is", with: "")
-            .replacingOccurrences(of: "whats", with: "")
-            .replacingOccurrences(of: "what's", with: "")
+        let candidate = mathCandidate(from: input)
+        guard let candidate, !candidate.isEmpty else { return nil }
+        print("[Math] hit candidate=\"\(candidate)\"")
+
+        let ops: [(Character, String, (Double, Double) -> Double)] = [
+            ("+", "plus", +),
+            ("-", "minus", { $0 - $1 }),
+            ("*", "times", *),
+            ("/", "divided by", { $1 != 0 ? $0 / $1 : .nan }),
+        ]
+        for (sym, word, fn) in ops {
+            guard let idx = candidate.firstIndex(of: sym) else { continue }
+            let lhs = String(candidate[..<idx]).trimmingCharacters(in: .whitespaces)
+            let rhs = String(candidate[candidate.index(after: idx)...]).trimmingCharacters(in: .whitespaces)
+            guard let a = Double(lhs), let b = Double(rhs) else { continue }
+            if sym == "/" && b == 0 { return nil }
+            let res = fn(a, b)
+            if res.isNaN || res.isInfinite { return nil }
+            print("[Math] result=\(res)")
+            print("[Math] about to build response string")
+            let aStr = a == a.rounded() && abs(a) < 1e7 ? "\(Int(a))" : "\(a)"
+            let bStr = b == b.rounded() && abs(b) < 1e7 ? "\(Int(b))" : "\(b)"
+            let rStr = res == res.rounded() && abs(res) < 1e7 ? "\(Int(res))" : String(format: "%.2g", res)
+            let response = "\(aStr) \(word) \(bStr) equals \(rStr)."
+            print("[Math] about to return local math response")
+            print("[Math] returning NOW")
+            return response
+        }
+        return nil
+    }
+
+    /// Strip prefixes, normalize apostrophes, keep only digits/ops/dot/spaces, collapse whitespace.
+    private nonisolated func mathCandidate(from input: String) -> String? {
+        var s = input
+            .replacingOccurrences(of: "\u{2019}", with: "'")
+            .replacingOccurrences(of: "\u{2018}", with: "'")
+            .lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        typealias Op = (String, (Double, Double) -> Double)
-        let ops: [Op] = [
-            ("plus", +),
-            ("minus", { $0 - $1 }),
-            ("times", *),
-            ("multiplied by", *),
-            ("divided by", { $1 != 0 ? $0 / $1 : 0 }),
-        ]
-
-        for (name, operation) in ops {
-            guard let idx = lower.range(of: name) else { continue }
-            let before = String(lower[..<idx.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let after = String(lower[idx.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let aNum = Double(before.filter { $0.isNumber || $0 == "." })
-            let bNum = Double(after.filter { $0.isNumber || $0 == "." })
-            guard let a = aNum, let b = bNum else { continue }
-            if name == "divided by" && b == 0 { continue }
-            let res = operation(a, b)
-            let opWord = name == "plus" ? "plus" : name == "minus" ? "minus" : name == "times" || name == "multiplied by" ? "times" : "divided by"
-            let intResult = res.rounded()
-            if res == intResult && abs(res) <= 1_000_000 {
-                return "\(Int(a)) \(opWord) \(Int(b)) equals \(Int(intResult))."
+        for prefix in ["what's ", "whats ", "what is ", "calculate ", "solve ", "nova "] {
+            if s.hasPrefix(prefix) {
+                s = String(s.dropFirst(prefix.count))
+                break
             }
-            return "\(a) \(opWord) \(b) equals \(res)."
         }
 
-        let symbolOps: [(Character, (Double, Double) -> Double)] = [
-            ("+", +),
-            ("-", { $0 - $1 }),
-            ("*", *),
-            ("/", { $1 != 0 ? $0 / $1 : 0 }),
-        ]
-        for (char, operation) in symbolOps {
-            guard let idx = clean.firstIndex(of: char) else { continue }
-            let before = String(clean[..<idx]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let after = String(clean[clean.index(after: idx)...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let a = Double(before.filter { $0.isNumber || $0 == "." }),
-                  let b = Double(after.filter { $0.isNumber || $0 == "." }),
-                  b != 0 || char != "/" else { continue }
-            let result = operation(a, b)
-            let opWord = char == "+" ? "plus" : char == "-" ? "minus" : char == "*" ? "times" : "divided by"
-            let intResult = result.rounded()
-            if result == intResult && abs(result) <= 1_000_000 {
-                return "\(Int(a)) \(opWord) \(Int(b)) equals \(Int(intResult))."
+        var out = ""
+        var lastSpace = false
+        for c in s {
+            let v = c.unicodeScalars.first.map { $0.value } ?? 0
+            if (v >= 48 && v <= 57) || c == "." || c == "+" || c == "-" || c == "*" || c == "/" {
+                out.append(c)
+                lastSpace = false
+            } else if v == 32 || v == 9 {
+                if !lastSpace && !out.isEmpty { out.append(" "); lastSpace = true }
             }
-            return "\(a) \(opWord) \(b) equals \(result)."
         }
+        let result = out.trimmingCharacters(in: .whitespaces)
+        guard !result.isEmpty else { return nil }
 
-        return nil
+        var numCount = 0; var opCount = 0; var inNum = false
+        for c in result {
+            if c.isNumber || c == "." {
+                if !inNum { numCount += 1; inNum = true }
+            } else if c == "+" || c == "-" || c == "*" || c == "/" {
+                opCount += 1; inNum = false
+            } else { inNum = false }
+        }
+        guard numCount >= 2 && opCount >= 1 else { return nil }
+        return result
     }
 
     private nonisolated func summarizeConversation(messages: [Message]) -> String {

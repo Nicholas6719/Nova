@@ -73,9 +73,9 @@ final class SpeechManager: ObservableObject {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
             try session.setActive(true)
-            DebugLog.d("[AudioSession] activated for TTS playback")
+            print("[AudioSession] activated for TTS playback")
         } catch {
-            DebugLog.d("[AudioSession] activate for TTS failed: \(error.localizedDescription)")
+            print("[AudioSession] activate for TTS failed: \(error.localizedDescription)")
         }
         #endif
         engine.speak(trimmed)
@@ -201,9 +201,9 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
         #if os(iOS)
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-            DebugLog.d("[AudioSession] deactivated after TTS stop")
+            print("[AudioSession] deactivated after TTS stop")
         } catch {
-            DebugLog.d("[AudioSession] deactivate after TTS failed: \(error.localizedDescription)")
+            print("[AudioSession] deactivate after TTS failed: \(error.localizedDescription)")
         }
         #endif
         onSpeakingStateChanged?(false)
@@ -235,9 +235,9 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
                 #if os(iOS)
                 do {
                     try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-                    DebugLog.d("[AudioSession] deactivated after TTS finish")
+                    print("[AudioSession] deactivated after TTS finish")
                 } catch {
-                    DebugLog.d("[AudioSession] deactivate after TTS failed: \(error.localizedDescription)")
+                    print("[AudioSession] deactivate after TTS failed: \(error.localizedDescription)")
                 }
                 #endif
                 self.onSpeakingStateChanged?(false)
@@ -251,9 +251,9 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
             #if os(iOS)
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-                DebugLog.d("[AudioSession] deactivated after TTS cancel")
+                print("[AudioSession] deactivated after TTS cancel")
             } catch {
-                DebugLog.d("[AudioSession] deactivate after TTS failed: \(error.localizedDescription)")
+                print("[AudioSession] deactivate after TTS failed: \(error.localizedDescription)")
             }
             #endif
             self.onSpeakingStateChanged?(false)

@@ -50,6 +50,10 @@ final class ChatViewModel: ObservableObject {
     private var streamingFlushTask: Task<Void, Never>?
     private var streamingPlaceholderId: UUID?
 
+    /// Debounce: prevent double-commit of the same transcript within 0.5s.
+    private var lastCommittedTranscript = ""
+    private var lastCommittedTime: CFAbsoluteTime = 0
+
     init() {
         // SpeechRecognizer updates @Published on MainActor; no receive(on:) needed.
         speechRecognizer.$transcript
@@ -85,10 +89,11 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Microphone
 
     func toggleRecording() {
-        if !isMicEnabled {
+        guard !isProcessing else {
             errorMessage = "One sec — I'm finishing my response."
             return
         }
+        if !isMicEnabled { return }
         if isRecording {
             speechRecognizer.stopListening()
         } else {
@@ -98,9 +103,11 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Called when speech stops. Capture transcript, clear immediately, then process in one place.
+    /// Called when speech stops. Clear live bubble synchronously, then commit user message.
     private func handleRecordingStopped(with text: String) {
         let finalText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        liveTranscript = ""
         speechRecognizer.clearTranscript()
 
         guard !finalText.isEmpty else {
@@ -108,10 +115,17 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        let now = CFAbsoluteTimeGetCurrent()
+        if finalText == lastCommittedTranscript && (now - lastCommittedTime) < 0.5 {
+            return
+        }
+        lastCommittedTranscript = finalText
+        lastCommittedTime = now
+
+        print("[Chat] commit transcript: \(finalText.prefix(60))")
         processUserInput(text: finalText)
     }
 
-    /// EMERGENCY: Bypass engine — call LLMClient directly. No streaming, no cache, no throttle.
     private func processUserInput(text: String) {
         guard !text.isEmpty else { return }
         guard !isProcessing else { return }
@@ -120,9 +134,7 @@ final class ChatViewModel: ObservableObject {
 
         let userMessage = Message(role: .user, content: text)
         messages.append(userMessage)
-        #if DEBUG
-        DebugLog.d("[Chat] append user: \(text.prefix(60))\(text.count > 60 ? "…" : "")")
-        #endif
+        print("[Chat] append user: \(text.prefix(60))\(text.count > 60 ? "…" : "")")
 
         let messageSnapshot = messages
 
@@ -135,23 +147,40 @@ final class ChatViewModel: ObservableObject {
             temperature: 0.7
         )
 
-        // Run engine OFF main actor — engine routes local intents first, OpenAI only when no match.
+        // Watchdog: force-reset isProcessing after 3s if still stuck (temporary debug aid).
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard let self, self.isProcessing else { return }
+            print("[Chat] WATCHDOG fired: forcing isProcessing=false")
+            self.isProcessing = false
+        }
+
+        // Run engine OFF main actor — double-detach to guarantee no MainActor inference.
         let engineRef = engine
         Task.detached(priority: .userInitiated) { [cfg, messageSnapshot, text] in
             do {
-                let resp = try await engineRef.generateResponse(
-                    messages: messageSnapshot,
-                    newInput: text,
-                    llmConfig: cfg
-                )
+                print("[Chat] before await engine (outer detach)")
+                let resp = try await Task.detached(priority: .userInitiated) {
+                    print("[Chat] inside inner detach — calling engine")
+                    return try await engineRef.generateResponse(
+                        messages: messageSnapshot,
+                        newInput: text,
+                        llmConfig: cfg
+                    )
+                }.value
+                print("[Chat] after await engine resp.len=\(resp.count)")
+                print("[Chat] scheduling UI append (assistant)")
                 await MainActor.run { [weak self] in
                     guard let self else { return }
+                    print("[Chat] UI append start")
                     self.appendAssistant(resp)
                     self.speechManager.speak(resp)
+                    print("[Chat] UI append done")
                     self.isProcessing = false
+                    print("[Chat] isProcessing=false")
                 }
             } catch {
-                print("[OPENAI] OX error: \(error)")
+                print("[Chat] engine error: \(error)")
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.appendAssistant("Sorry — I couldn't reach my online brain. Please try again.")

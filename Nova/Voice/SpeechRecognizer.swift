@@ -225,7 +225,7 @@ final class SpeechRecognizer: ObservableObject {
                         Task { @MainActor [weak self] in
                             guard let self else { return }
                             self.isRecording = true
-                            DebugLog.d("[SpeechRecognizer] speech start")
+                            print("[SpeechRecognizer] speech start")
                         }
                     },
                     onStartFailed: { [weak self] message in
@@ -256,15 +256,15 @@ final class SpeechRecognizer: ObservableObject {
             #if os(iOS)
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-                DebugLog.d("[AudioSession] deactivated after stopListening")
+                print("[AudioSession] deactivated after stopListening")
             } catch {
-                DebugLog.d("[AudioSession] deactivate failed: \(error.localizedDescription)")
+                print("[AudioSession] deactivate failed: \(error.localizedDescription)")
             }
             #endif
             await stateGuardRef.didFinishStop()
             await MainActor.run {
                 self.isRecording = false
-                DebugLog.d("[SpeechRecognizer] speech stop")
+                print("[SpeechRecognizer] speech stop")
                 self.onRecordingDidStop?(finalText)
             }
         }

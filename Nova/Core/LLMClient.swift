@@ -142,7 +142,7 @@ struct LLMClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = bodyData
 
-        DebugLog.d("[LLMClient] stream start")
+        print("[LLMClient] stream start")
 
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
 
@@ -175,7 +175,7 @@ struct LLMClient {
             }
         }
 
-        DebugLog.d("[LLMClient] stream end")
+        print("[LLMClient] stream end")
         let trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw LLMClientError.emptyContent
