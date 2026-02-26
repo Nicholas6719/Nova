@@ -30,10 +30,12 @@ struct NovaEngineCore: Sendable {
         let input = trimmedInput.lowercased()
         let strippedQuery = stripWakeWords(from: input)
         NovaLogger.info("[Router] normalized=\"\(strippedQuery)\"")
+        print("[OPENAI] A0 normalized done")
 
         if input.isEmpty {
             return "I didn't catch that. Say something and I'll respond."
         }
+        print("[OPENAI] A1 before local checks")
 
         // Compound: greeting + local intent → greet first, then answer
         if hasGreetingWord(input) && hasLocalIntent(input: input, trimmedInput: strippedQuery, messages: messages) {
@@ -118,18 +120,44 @@ struct NovaEngineCore: Sendable {
             NovaLogger.info("[Router] local.intent=math")
             return mathResult
         }
+        print("[OPENAI] A2 local checks complete; no match -> OpenAI")
 
-        // OpenAI fallback: no local intent matched
-        NovaLogger.info("[Router] fallback to OpenAI")
         // OpenAI fallback: config passed in (no ProcessInfo access here).
+        print("[OPENAI] A3 before reading apiKey")
         guard let cfg = llmConfig else {
             return "I'm missing my API key setup."
         }
-        NovaLogger.info("[Engine] E0 openai path entered")
-        NovaLogger.info("[Engine] E0.1 apiKey.len=\(cfg.apiKey.count)")
-        NovaLogger.info("[Engine] E1 before LLMClient.generateResponse")
-        let resp = try await LLMClient.generateResponse(config: cfg, messages: messages, systemPrompt: systemPrompt)
-        NovaLogger.info("[Engine] E2 after LLMClient.generateResponse len=\(resp.count)")
+        guard !cfg.apiKey.isEmpty else {
+            print("[OPENAI] A_KEY_MISSING")
+            return "I'm missing my OpenAI API key configuration."
+        }
+        print("[OPENAI] A4 apiKey.len=\(cfg.apiKey.count)")
+        print("[OPENAI] A5 before LLMClient call")
+
+        let fallbackMsg = "Sorry — my online brain is taking too long right now. Please try again."
+        let resp: String
+        do {
+            resp = try await withThrowingTaskGroup(of: String.self) { group in
+                group.addTask {
+                    try await Task.detached(priority: .userInitiated) {
+                        try await LLMClient.generateResponse(config: cfg, messages: messages, systemPrompt: systemPrompt)
+                    }.value
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    return fallbackMsg
+                }
+                let first = try await group.next()!
+                group.cancelAll()
+                return first
+            }
+        } catch {
+            throw error
+        }
+        if resp == fallbackMsg {
+            print("[OPENAI] A_TIMEOUT fired")
+        }
+        print("[OPENAI] A6 after LLMClient resp.len=\(resp.count)")
         return resp
     }
 
