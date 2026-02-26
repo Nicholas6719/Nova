@@ -22,11 +22,8 @@
 		6FCF572E2F45303400109380 /* NovaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF572C2F45303400109380 /* NovaTests.swift */; };
 		6FCF57322F45303E00109380 /* NovaUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF572F2F45303E00109380 /* NovaUITests.swift */; };
 		6FCF57332F45303E00109380 /* NovaUITestsLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57302F45303E00109380 /* NovaUITestsLaunchTests.swift */; };
-		6FCF57342F45302900109380 /* Log.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57352F45302900109380 /* Log.swift */; };
 		6FCF57362F45302900109380 /* NovaEngineCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57372F45302900109380 /* NovaEngineCore.swift */; };
 		6FCF57382F45302900109380 /* DebugLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57392F45302900109380 /* DebugLog.swift */; };
-		6FCF573A2F45302900109380 /* LLMResponseCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF573B2F45302900109380 /* LLMResponseCache.swift */; };
-		6FCF573C2F45302900109380 /* NovaBackgroundActor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF573D2F45302900109380 /* NovaBackgroundActor.swift */; };
 		6FCF573E2F45302900109380 /* FeatureFlags.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF573F2F45302900109380 /* FeatureFlags.swift */; };
 		6FCF57402F45302900109380 /* NovaLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57412F45302900109380 /* NovaLogger.swift */; };
 /* End PBXBuildFile section */
@@ -67,11 +64,8 @@
 		6FCF572C2F45303400109380 /* NovaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaTests.swift; sourceTree = "<group>"; };
 		6FCF572F2F45303E00109380 /* NovaUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaUITests.swift; sourceTree = "<group>"; };
 		6FCF57302F45303E00109380 /* NovaUITestsLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaUITestsLaunchTests.swift; sourceTree = "<group>"; };
-		6FCF57352F45302900109380 /* Log.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Log.swift; sourceTree = "<group>"; };
 		6FCF57372F45302900109380 /* NovaEngineCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaEngineCore.swift; sourceTree = "<group>"; };
 		6FCF57392F45302900109380 /* DebugLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLog.swift; sourceTree = "<group>"; };
-		6FCF573B2F45302900109380 /* LLMResponseCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMResponseCache.swift; sourceTree = "<group>"; };
-		6FCF573D2F45302900109380 /* NovaBackgroundActor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaBackgroundActor.swift; sourceTree = "<group>"; };
 		6FCF573F2F45302900109380 /* FeatureFlags.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureFlags.swift; sourceTree = "<group>"; };
 		6FCF57412F45302900109380 /* NovaLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaLogger.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -129,9 +123,6 @@
 				6FCF57392F45302900109380 /* DebugLog.swift */,
 				6FCF573F2F45302900109380 /* FeatureFlags.swift */,
 				6FCF57412F45302900109380 /* NovaLogger.swift */,
-				6FCF573B2F45302900109380 /* LLMResponseCache.swift */,
-				6FCF573D2F45302900109380 /* NovaBackgroundActor.swift */,
-				6FCF57352F45302900109380 /* Log.swift */,
 				6FCF57112F45302900109380 /* NovaEngine.swift */,
 				6FCF57372F45302900109380 /* NovaEngineCore.swift */,
 				6FCF57122F45302900109380 /* NovaPersonality.swift */,
@@ -341,11 +332,8 @@
 				6FCF57272F45302900109380 /* SpeechSynthesizer.swift in Sources */,
 				6FCF57282F45302900109380 /* Message.swift in Sources */,
 				6FCF57292F45302900109380 /* LLMClient.swift in Sources */,
-				6FCF57342F45302900109380 /* Log.swift in Sources */,
 				6FCF57362F45302900109380 /* NovaEngineCore.swift in Sources */,
 				6FCF57382F45302900109380 /* DebugLog.swift in Sources */,
-				6FCF573A2F45302900109380 /* LLMResponseCache.swift in Sources */,
-				6FCF573C2F45302900109380 /* NovaBackgroundActor.swift in Sources */,
 				6FCF573E2F45302900109380 /* FeatureFlags.swift in Sources */,
 				6FCF57402F45302900109380 /* NovaLogger.swift in Sources */,
 				6FCF572A2F45302900109380 /* ContentView.swift in Sources */,
