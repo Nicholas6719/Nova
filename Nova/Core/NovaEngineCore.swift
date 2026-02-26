@@ -38,105 +38,111 @@ struct NovaEngineCore: Sendable {
         }
         print("[OPENAI] A1 before local checks")
 
-        print("[LocalChecks] P0 begin gid=\(_gid) input=\(input)")
-        if let mathReply = Self.tryLocalMathFastPath(input, gid: _gid) {
+        let mathNormalized = Self.normalizeMathSymbols(input)
+
+        // --- Math fast-path: single binary op (8-2, 300*2, 12/3) ---
+        print("[LocalChecks] P0 begin gid=\(_gid) input=\(input) mathNorm=\(mathNormalized)")
+        if let mathReply = Self.tryLocalMathFastPath(mathNormalized, gid: _gid) {
             print("[LocalChecks] P0a math fast-path HIT gid=\(_gid)")
             return mathReply
         }
         print("[LocalChecks] P0b math fast-path MISS gid=\(_gid)")
 
-        if Self.looksLikeComplexMath(input) {
-            print("[LocalChecks] P0c complex-math detected; skipping intent detection gid=\(_gid)")
-            return "I can do simple two-number math like \u{201C}8-2\u{201D} or \u{201C}12/3\u{201D} right now. For longer expressions, ask me to calculate it online."
+        // --- Plus/minus chain: "300-200+2", "-5+2" ---
+        if let chainReply = Self.tryLocalPlusMinusChain(mathNormalized) {
+            print("[MathChain] hit result=\(chainReply.prefix(60))")
+            return chainReply
         }
 
-        print("[LocalChecks] P1 before compound gid=\(_gid)")
-        // Compound: greeting + local intent → greet first, then answer
-        if hasGreetingWord(input) && hasLocalIntent(input: input, trimmedInput: strippedQuery, messages: messages) {
-            let intentResponse = generateLocalIntentResponse(messages: messages, newInput: newInput, input: input, trimmedInput: strippedQuery.isEmpty ? trimmedInput : strippedQuery, now: now)
-            if let response = intentResponse {
-                let intentLabel = intentLabelForLog(intent: IntentDetector.detect(from: strippedQuery))
-                print("[Router] local compound: greeting + \(intentLabel)")
-                let briefGreeting = briefGreetingFromInput(input)
-                return "\(briefGreeting) \(response)"
+        // --- Guard: anything mathy that wasn't handled locally skips intent detection → OpenAI ---
+        localChecks: do {
+            if Self.looksLikeMathExpression(mathNormalized) {
+                print("[LocalChecks] mathy but unsupported; skipping to OpenAI gid=\(_gid)")
+                break localChecks
             }
-        }
 
-        // Pure greeting: greeting only, no substantive question (otherwise let OpenAI handle)
-        if isGreetingPhrase(input) && !hasSubstantiveQuestion(input: input) {
-            print("[Router] local.intent=greeting")
-            let priorGreetings = messages.dropLast().filter { $0.role == .user }.filter { isGreetingPhrase($0.content) }
-            return greetingResponse(priorGreetings: priorGreetings, now: now)
-        }
-
-        print("[LocalChecks] P2 before intent detect gid=\(_gid)")
-        let intent = IntentDetector.detect(from: strippedQuery.isEmpty ? newInput : strippedQuery)
-        if intent != .unknown {
-            print("[Router] local.intent=\(intentLabelForLog(intent: intent))")
-            switch intent {
-            case .getDate:
-                return responseForDateIntent(input: input, now: now)
-
-            case .getTime:
-                let formatter = DateFormatter()
-                formatter.locale = Locale.current
-                formatter.timeStyle = .short
-                let timeString = formatter.string(from: now)
-                return "The current time is \(timeString)."
-
-            case .getDayOfWeek:
-                let formatter = DateFormatter()
-                formatter.locale = Locale.current
-                formatter.dateFormat = "EEEE"
-                return formatter.string(from: now)
-
-            case .unknown:
-                break
-            }
-        }
-
-        if input.contains("what did i just say") || input.contains("what did i say") {
-            let userMessages = messages.filter { $0.role == .user }
-            let previousUserMessages = userMessages.dropLast()
-            if let previous = previousUserMessages.last {
-                let text = previous.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                if text.isEmpty {
-                    return "You spoke just before this, but it was very short."
+            print("[LocalChecks] P1 before compound gid=\(_gid)")
+            // Compound: greeting + local intent → greet first, then answer
+            if hasGreetingWord(input) && hasLocalIntent(input: input, trimmedInput: strippedQuery, messages: messages) {
+                let intentResponse = generateLocalIntentResponse(messages: messages, newInput: newInput, input: input, trimmedInput: strippedQuery.isEmpty ? trimmedInput : strippedQuery, now: now)
+                if let response = intentResponse {
+                    let intentLabel = intentLabelForLog(intent: IntentDetector.detect(from: strippedQuery))
+                    print("[Router] local compound: greeting + \(intentLabel)")
+                    let briefGreeting = briefGreetingFromInput(input)
+                    return "\(briefGreeting) \(response)"
                 }
-                let snippet = text.prefix(120)
-                let suffix = text.count > 120 ? "…" : ""
-                return "You just said something like: \"\(snippet)\(suffix)\"."
             }
-            return "You haven't said anything prior to that."
-        }
 
-        if input.contains("what was your last response") || input.contains("what did you last say") || input.contains("what did you say") {
-            let assistantMessages = messages.filter { $0.role == .assistant }
-            if let last = assistantMessages.last {
-                let text = last.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                if text.isEmpty {
-                    return "My last response was extremely short."
+            // Pure greeting: greeting only, no substantive question (otherwise let OpenAI handle)
+            if isGreetingPhrase(input) && !hasSubstantiveQuestion(input: input) {
+                print("[Router] local.intent=greeting")
+                let priorGreetings = messages.dropLast().filter { $0.role == .user }.filter { isGreetingPhrase($0.content) }
+                return greetingResponse(priorGreetings: priorGreetings, now: now)
+            }
+
+            print("[LocalChecks] P2 before intent detect gid=\(_gid)")
+            let intent = IntentDetector.detect(from: strippedQuery.isEmpty ? newInput : strippedQuery)
+            if intent != .unknown {
+                print("[Router] local.intent=\(intentLabelForLog(intent: intent))")
+                switch intent {
+                case .getDate:
+                    return responseForDateIntent(input: input, now: now)
+
+                case .getTime:
+                    let formatter = DateFormatter()
+                    formatter.locale = Locale.current
+                    formatter.timeStyle = .short
+                    let timeString = formatter.string(from: now)
+                    return "The current time is \(timeString)."
+
+                case .getDayOfWeek:
+                    let formatter = DateFormatter()
+                    formatter.locale = Locale.current
+                    formatter.dateFormat = "EEEE"
+                    return formatter.string(from: now)
+
+                case .unknown:
+                    break
                 }
-                let snippet = text.prefix(120)
-                let suffix = text.count > 120 ? "…" : ""
-                return "My last response was roughly: \"\(snippet)\(suffix)\"."
             }
-            return "I haven't responded yet in this conversation."
+
+            if input.contains("what did i just say") || input.contains("what did i say") {
+                let userMessages = messages.filter { $0.role == .user }
+                let previousUserMessages = userMessages.dropLast()
+                if let previous = previousUserMessages.last {
+                    let text = previous.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if text.isEmpty {
+                        return "You spoke just before this, but it was very short."
+                    }
+                    let snippet = text.prefix(120)
+                    let suffix = text.count > 120 ? "…" : ""
+                    return "You just said something like: \"\(snippet)\(suffix)\"."
+                }
+                return "You haven't said anything prior to that."
+            }
+
+            if input.contains("what was your last response") || input.contains("what did you last say") || input.contains("what did you say") {
+                let assistantMessages = messages.filter { $0.role == .assistant }
+                if let last = assistantMessages.last {
+                    let text = last.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if text.isEmpty {
+                        return "My last response was extremely short."
+                    }
+                    let snippet = text.prefix(120)
+                    let suffix = text.count > 120 ? "…" : ""
+                    return "My last response was roughly: \"\(snippet)\(suffix)\"."
+                }
+                return "I haven't responded yet in this conversation."
+            }
+
+            if input.contains("remind me what we discussed") || input.contains("what we discussed") || (input.contains("remind me") && input.contains("discussed")) {
+                return summarizeConversation(messages: messages)
+            }
+            if input.contains("set a reminder") || (input.contains("remind me") && !input.contains("discussed")) {
+                return "I don't set timed reminders yet, but I can summarize what we've discussed if you'd like."
+            }
         }
 
-        if input.contains("remind me what we discussed") || input.contains("what we discussed") || (input.contains("remind me") && input.contains("discussed")) {
-            return summarizeConversation(messages: messages)
-        }
-        if input.contains("set a reminder") || (input.contains("remind me") && !input.contains("discussed")) {
-            return "I don't set timed reminders yet, but I can summarize what we've discussed if you'd like."
-        }
-
-        if evaluateSimpleMath(input: strippedQuery.isEmpty ? trimmedInput : strippedQuery) != nil {
-            print("[Router] local.intent=math")
-            print("[Math] returning NOW gid=\(_gid)")
-            return "8 minus 2 equals 6."
-        }
-        print("[Math] fell through (should not happen) gid=\(_gid)")
         print("[LocalChecks] P3 before OpenAI fallback gid=\(_gid)")
         print("[OPENAI] A2 local checks complete; no match -> OpenAI")
 
@@ -434,27 +440,82 @@ struct NovaEngineCore: Sendable {
         return "Hello again. " + greeting
     }
 
-    /// Ultra-minimal math fast-path. Static so no instance actor inference possible.
-    private static func looksLikeComplexMath(_ normalized: String) -> Bool {
+    /// Normalize Unicode math symbols that speech recognition may produce.
+    private static func normalizeMathSymbols(_ s: String) -> String {
+        s.replacingOccurrences(of: "\u{00D7}", with: "*")  // ×
+         .replacingOccurrences(of: "\u{00F7}", with: "/")  // ÷
+         .replacingOccurrences(of: "\u{2022}", with: "*")  // •
+         .replacingOccurrences(of: "\u{00B7}", with: "*")  // ·
+    }
+
+    /// True if input (after stripping spaces) contains digits + math operators but NO letters.
+    /// Used to skip compound/intent detection for expressions we can't evaluate locally.
+    private static func looksLikeMathExpression(_ normalized: String) -> Bool {
         let s = normalized.replacingOccurrences(of: " ", with: "")
-        guard s.rangeOfCharacter(from: .decimalDigits) != nil else { return false }
-
-        let ops: Set<Character> = ["+", "-", "*", "/"]
-        var opCount = 0
         var hasDigit = false
+        var hasOp = false
+        let mathChars: Set<Character> = ["+", "-", "*", "/", "(", ")"]
+        for ch in s {
+            if ch.isNumber || ch == "." { hasDigit = true }
+            else if mathChars.contains(ch) { hasOp = true }
+            else if ch.isLetter { return false }
+        }
+        return hasDigit && hasOp
+    }
 
-        for (i, ch) in s.enumerated() {
-            if ch.isNumber { hasDigit = true; continue }
-            if ops.contains(ch) {
-                if i == 0 { return true }
-                opCount += 1
-                if opCount >= 2 { return true }
-                continue
+    /// Evaluate +/− chains like "300-200+2", "calculate 10+5-3", "-5+2".
+    /// Strips common prefixes, rejects anything with *, /, parens, or letters.
+    private static func tryLocalPlusMinusChain(_ raw: String) -> String? {
+        var s = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+
+        for prefix in ["nova ", "what is ", "what's ", "whats ", "calculate ", "solve "] {
+            if s.hasPrefix(prefix) {
+                s = String(s.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                break
             }
-            if ch.isLetter { return false }
         }
 
-        return hasDigit && opCount >= 1 && opCount != 1
+        s = s.replacingOccurrences(of: " ", with: "")
+
+        for ch in s {
+            guard ch.isNumber || ch == "." || ch == "+" || ch == "-" else { return nil }
+        }
+        guard !s.isEmpty else { return nil }
+
+        let inner = s.first == "-" ? String(s.dropFirst()) : s
+        guard inner.contains("+") || inner.contains("-") else { return nil }
+
+        var result = 0.0
+        var currentNum = ""
+        var pendingOp: Character = "+"
+        var isFirst = true
+
+        for ch in s {
+            if (ch == "+" || ch == "-") && !currentNum.isEmpty {
+                guard let val = Double(currentNum) else { return nil }
+                result = pendingOp == "+" ? result + val : result - val
+                currentNum = ""
+                pendingOp = ch
+                isFirst = false
+            } else if ch == "-" && currentNum.isEmpty && isFirst {
+                currentNum.append(ch)
+            } else if ch.isNumber || ch == "." {
+                currentNum.append(ch)
+            } else {
+                return nil
+            }
+        }
+
+        guard !currentNum.isEmpty, let val = Double(currentNum) else { return nil }
+        result = pendingOp == "+" ? result + val : result - val
+
+        let formatted: String
+        if result.truncatingRemainder(dividingBy: 1) == 0 && abs(result) < 1e15 {
+            formatted = String(Int(result))
+        } else {
+            formatted = String(result)
+        }
+        return "That equals \(formatted)."
     }
 
     private static func tryLocalMathFastPath(_ normalized: String, gid: Substring) -> String? {
