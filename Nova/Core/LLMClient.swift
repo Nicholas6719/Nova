@@ -107,13 +107,15 @@ struct LLMClient {
         return trimmed
     }
 
-    // MARK: - Streaming (not used in current OpenAI path; kept for future use)
+    // MARK: - Streaming
 
-    /// Stream OpenAI chat completions; call onDelta as chunks arrive; return full text.
+    /// Stream OpenAI chat completions via SSE. Calls onStreamStart once after HTTP 200,
+    /// then onDelta for each content chunk. Returns the full assembled text.
     static func streamResponse(
         config: LLMConfig,
         systemPrompt: String,
         messages: [Message],
+        onStreamStart: @escaping @Sendable () -> Void,
         onDelta: @escaping @Sendable (String) -> Void
     ) async throws -> String {
         guard !config.apiKey.isEmpty else {
@@ -137,12 +139,12 @@ struct LLMClient {
 
         var request = URLRequest(url: config.endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 30
+        request.timeoutInterval = 60
         request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = bodyData
 
-        print("[LLMClient] stream start")
+        DebugLog.d("[LLMClient] stream start")
 
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
 
@@ -155,6 +157,8 @@ struct LLMClient {
             let bodyString = String(data: bodyData, encoding: .utf8)
             throw LLMClientError.serverError(statusCode: http.statusCode, body: bodyString)
         }
+
+        onStreamStart()
 
         var buffer = ""
         var fullText = ""
@@ -175,7 +179,7 @@ struct LLMClient {
             }
         }
 
-        print("[LLMClient] stream end")
+        DebugLog.d("[LLMClient] stream end len=\(fullText.count)")
         let trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw LLMClientError.emptyContent

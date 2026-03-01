@@ -9,7 +9,7 @@ struct NovaEngineCore: Sendable {
         systemPrompt: String,
         llmConfig: LLMConfig?,
         now: Date = Date(),
-        onStreamStart: (@Sendable () async -> Void)? = nil,
+        onStreamStart: (@Sendable () -> Void)? = nil,
         onStreamDelta: (@Sendable (String) -> Void)? = nil
     ) async throws -> String {
         let trimmedInput = newInput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -112,7 +112,7 @@ struct NovaEngineCore: Sendable {
             }
         }
 
-        // MARK: OpenAI fallback — DO NOT MODIFY this section's concurrency structure
+        // MARK: OpenAI fallback
         guard let cfg = llmConfig else {
             return "I'm missing my API key setup."
         }
@@ -121,6 +121,38 @@ struct NovaEngineCore: Sendable {
         }
 
         let fallbackMsg = "Sorry — my online brain is taking too long right now. Please try again."
+
+        // Streaming path: if caller provided streaming callbacks, use SSE streaming.
+        if let streamStart = onStreamStart, let streamDelta = onStreamDelta {
+            let resp: String
+            do {
+                resp = try await withThrowingTaskGroup(of: String.self) { group in
+                    group.addTask {
+                        try await Task.detached(priority: .userInitiated) {
+                            try await LLMClient.streamResponse(
+                                config: cfg,
+                                systemPrompt: systemPrompt,
+                                messages: messages,
+                                onStreamStart: streamStart,
+                                onDelta: streamDelta
+                            )
+                        }.value
+                    }
+                    group.addTask {
+                        try await Task.sleep(nanoseconds: 60_000_000_000)
+                        return fallbackMsg
+                    }
+                    let first = try await group.next()!
+                    group.cancelAll()
+                    return first
+                }
+            } catch {
+                throw error
+            }
+            return resp
+        }
+
+        // Non-streaming path: original behavior.
         let resp: String
         do {
             resp = try await withThrowingTaskGroup(of: String.self) { group in

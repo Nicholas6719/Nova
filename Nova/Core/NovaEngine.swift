@@ -1,11 +1,3 @@
-//
-//  NovaEngine.swift
-//  Nova
-//
-//  Nova: context-aware, rule-based responses using conversation history.
-//  Delegates to NovaEngineCore for the actual logic.
-//
-
 import Foundation
 
 /// Generates assistant responses from conversation history and new input.
@@ -20,7 +12,7 @@ struct NovaEngine {
         messages: [Message],
         newInput: String,
         llmConfig: LLMConfig?,
-        onStreamStart: (@Sendable () async -> Void)? = nil,
+        onStreamStart: (@Sendable () -> Void)? = nil,
         onStreamDelta: (@Sendable (String) -> Void)? = nil
     ) async throws -> String {
         return try await core.generateResponse(
