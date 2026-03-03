@@ -39,6 +39,8 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Streaming UI state (MainActor-owned)
 
+    /// Invalidated on barge-in so late deltas/completion become no-ops.
+    private var activeStreamToken: UUID?
     private var streamingFullText = ""
     private var streamingShownCount = 0
     private var streamingMessageId: UUID?
@@ -104,17 +106,14 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Microphone
 
     func toggleRecording() {
-        if speechManager.isSpeaking {
-            speechManager.stopSpeaking()
+        // Barge-in: tap during speech, streaming, or processing → stop + start listening (1 tap).
+        if speechManager.isSpeaking || activeStreamToken != nil || isProcessing {
+            speechManager.prepareForBargeIn()
             cancelStreamingState()
             isProcessing = false
             errorMessage = nil
             speechRecognizer.clearTranscript()
             speechRecognizer.startListening()
-            return
-        }
-        guard !isProcessing else {
-            errorMessage = "One sec — I'm finishing my response."
             return
         }
         if !isMicEnabled { return }
@@ -158,6 +157,9 @@ final class ChatViewModel: ObservableObject {
 
         cancelStreamingState()
 
+        let token = UUID()
+        activeStreamToken = token
+
         let userMessage = Message(role: .user, content: text)
         messages.append(userMessage)
         DebugLog.d("[Chat] append user: \(text.prefix(60))\(text.count > 60 ? "…" : "")")
@@ -174,18 +176,18 @@ final class ChatViewModel: ObservableObject {
 
         let onStreamStart: @Sendable () -> Void = { [weak self] in
             Task { @MainActor [weak self] in
-                self?.beginStreaming()
+                self?.beginStreaming(token: token)
             }
         }
 
         let onStreamDelta: @Sendable (String) -> Void = { [weak self] chunk in
             Task { @MainActor [weak self] in
-                self?.receiveStreamDelta(chunk)
+                self?.receiveStreamDelta(chunk, token: token)
             }
         }
 
         let engineRef = engine
-        Task.detached(priority: .userInitiated) { [cfg, messageSnapshot, text, onStreamStart, onStreamDelta] in
+        Task.detached(priority: .userInitiated) { [cfg, messageSnapshot, text, onStreamStart, onStreamDelta, token] in
             do {
                 let resp = try await Task.detached(priority: .userInitiated) {
                     try await engineRef.generateResponse(
@@ -198,13 +200,13 @@ final class ChatViewModel: ObservableObject {
                 }.value
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    self.onEngineComplete(fullText: resp)
+                    self.onEngineComplete(fullText: resp, token: token)
                 }
             } catch {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     DebugLog.d("[Chat] engine error: \(error)")
-                    self.onEngineComplete(fullText: "Sorry — I couldn't reach my online brain. Please try again.")
+                    self.onEngineComplete(fullText: "Sorry — I couldn't reach my online brain. Please try again.", token: token)
                 }
             }
         }
@@ -213,7 +215,8 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Streaming: start / delta / ticker
 
     @MainActor
-    private func beginStreaming() {
+    private func beginStreaming(token: UUID) {
+        guard activeStreamToken == token else { return }
         let pid = UUID()
         streamingMessageId = pid
         streamingFullText = ""
@@ -224,11 +227,12 @@ final class ChatViewModel: ObservableObject {
         isSpeakingStreamChunk = false
         hasSpokenAnyStreamChunk = false
         messages.append(Message(id: pid, role: .assistant, content: ""))
-        startTicker()
+        startTicker(token: token)
     }
 
     @MainActor
-    private func receiveStreamDelta(_ delta: String) {
+    private func receiveStreamDelta(_ delta: String, token: UUID) {
+        guard activeStreamToken == token else { return }
         streamingFullText += delta
         speechBuffer += delta
         trySpeakNextSentence()
@@ -236,7 +240,7 @@ final class ChatViewModel: ObservableObject {
 
     /// Continuous ticker: reveals 5 characters every 120ms (~41 chars/sec).
     @MainActor
-    private func startTicker() {
+    private func startTicker(token: UUID) {
         streamingTickerTask?.cancel()
         streamingTickerTask = Task { @MainActor [weak self] in
             let step = 5
@@ -244,15 +248,16 @@ final class ChatViewModel: ObservableObject {
 
             while !Task.isCancelled {
                 guard let self else { return }
+                guard self.activeStreamToken == token else { return }
 
                 let available = self.streamingFullText.count
                 if self.streamingShownCount < available {
                     self.streamingShownCount = min(self.streamingShownCount + step, available)
-                    self.updateBubble(charCount: self.streamingShownCount)
+                    self.updateBubble(charCount: self.streamingShownCount, token: token)
                 }
 
                 if !self.streamingIsActive && self.streamingShownCount >= self.streamingFullText.count {
-                    self.commitFinalStreamedResponse()
+                    self.commitFinalStreamedResponse(token: token)
                     return
                 }
 
@@ -262,7 +267,8 @@ final class ChatViewModel: ObservableObject {
     }
 
     @MainActor
-    private func updateBubble(charCount: Int) {
+    private func updateBubble(charCount: Int, token: UUID) {
+        guard activeStreamToken == token else { return }
         guard let pid = streamingMessageId,
               let idx = messages.lastIndex(where: { $0.id == pid }) else { return }
         let text = String(streamingFullText.prefix(charCount))
@@ -276,6 +282,7 @@ final class ChatViewModel: ObservableObject {
     /// the end of the buffer when the stream has finished.
     @MainActor
     private func trySpeakNextSentence() {
+        guard activeStreamToken != nil else { return }
         guard !isSpeakingStreamChunk else { return }
         guard let sentence = extractFirstSentence() else { return }
         isSpeakingStreamChunk = true
@@ -316,6 +323,7 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func onSpeechFinished() {
         guard isSpeakingStreamChunk else { return }
+        guard activeStreamToken != nil else { return }
         isSpeakingStreamChunk = false
 
         if streamingMessageId == nil {
@@ -339,7 +347,8 @@ final class ChatViewModel: ObservableObject {
 
     /// Called by the ticker when all text has been revealed in the UI.
     @MainActor
-    private func commitFinalStreamedResponse() {
+    private func commitFinalStreamedResponse(token: UUID) {
+        guard activeStreamToken == token else { return }
         streamingTickerTask?.cancel()
         streamingTickerTask = nil
 
@@ -353,6 +362,7 @@ final class ChatViewModel: ObservableObject {
         DebugLog.d("[Chat] append assistant: \(fullText.prefix(60))\(fullText.count > 60 ? "…" : "")")
 
         // Clear UI streaming state; speech state may survive briefly for onSpeechFinished.
+        activeStreamToken = nil
         streamingMessageId = nil
         streamingFullText = ""
         streamingShownCount = 0
@@ -373,8 +383,9 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Engine completion
 
     @MainActor
-    private func onEngineComplete(fullText: String) {
+    private func onEngineComplete(fullText: String, token: UUID) {
         if streamingMessageId != nil {
+            guard activeStreamToken == token else { return }
             streamingFinalText = fullText
             streamingFullText = fullText
             streamingIsActive = false
@@ -383,7 +394,8 @@ final class ChatViewModel: ObservableObject {
                 trySpeakNextSentence()
             }
         } else {
-            // Non-streaming (local response): append and speak immediately.
+            // Non-streaming (local) OR invalidated streaming (barge-in before placeholder).
+            guard activeStreamToken == token else { return }
             messages.append(Message(role: .assistant, content: fullText))
             DebugLog.d("[Chat] append assistant: \(fullText.prefix(60))\(fullText.count > 60 ? "…" : "")")
             speechManager.speak(fullText)
@@ -395,6 +407,7 @@ final class ChatViewModel: ObservableObject {
 
     @MainActor
     private func cancelStreamingState() {
+        activeStreamToken = nil
         streamingTickerTask?.cancel()
         streamingTickerTask = nil
         speechManager.stop()

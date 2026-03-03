@@ -67,17 +67,8 @@ final class SpeechManager: ObservableObject {
     func speak(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        prepareForSpeak()
         isSpeaking = true
-        #if os(iOS)
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-            try session.setActive(true)
-            print("[AudioSession] activated for TTS playback")
-        } catch {
-            print("[AudioSession] activate for TTS failed: \(error.localizedDescription)")
-        }
-        #endif
         engine.speak(trimmed)
     }
 
@@ -94,6 +85,45 @@ final class SpeechManager: ObservableObject {
         #endif
         isSpeaking = false
         engine.stop()
+    }
+
+    /// Call before mic starts (barge-in). Stops TTS and configures session for recording.
+    func prepareForBargeIn() {
+        stopSpeaking()
+        engine.stop()
+        #if os(iOS)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+            try session.setActive(false, options: .notifyOthersOnDeactivation)
+            #if DEBUG
+            DebugLog.d("[TTS] prepareForBargeIn category=playAndRecord mode=voiceChat active=false")
+            #endif
+        } catch {
+            #if DEBUG
+            DebugLog.d("[TTS] prepareForBargeIn failed: \(error.localizedDescription)")
+            #endif
+        }
+        #endif
+    }
+
+    /// Call right before speaking. Ensures playback session and rebuilds engine if needed.
+    func prepareForSpeak() {
+        #if os(iOS)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            try session.setActive(true)
+            #if DEBUG
+            DebugLog.d("[TTS] prepareForSpeak category=playback mode=spokenAudio active=true")
+            #endif
+        } catch {
+            #if DEBUG
+            DebugLog.d("[TTS] prepareForSpeak failed: \(error.localizedDescription)")
+            #endif
+        }
+        #endif
+        (engine as? AVSpeechTTSEngine)?.ensureReadyForPlayback()
     }
 }
 
@@ -124,19 +154,36 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
 
     // MARK: - State
 
-    private let synthesizer = AVSpeechSynthesizer()
+    private var synthesizer: AVSpeechSynthesizer
     private let selectedVoice: AVSpeechSynthesisVoice?
     /// Pending sentences to speak sequentially after the current utterance finishes.
-    /// All access is on MainActor; no lock needed.
     private var sentenceQueue: [String] = []
+    /// Recent stop timestamps for barge-in recovery (rebuild after 3 stops in 5s).
+    private var stopTimestamps: [CFAbsoluteTime] = []
 
     // MARK: - Init & preload
 
     override init() {
         self.selectedVoice = AVSpeechSynthesisVoice(identifier: Self.avaPremiumIdentifier)
+        self.synthesizer = AVSpeechSynthesizer()
         super.init()
         synthesizer.delegate = self
         preloadVoice()
+    }
+
+    /// Rebuild synthesizer after repeated barge-ins. Called before playback.
+    func ensureReadyForPlayback() {
+        let now = CFAbsoluteTimeGetCurrent()
+        let cutoff = now - 5.0
+        stopTimestamps.removeAll { $0 < cutoff }
+        if stopTimestamps.count >= 3 {
+            #if DEBUG
+            DebugLog.d("[TTS] rebuild synthesizer (3+ stops in 5s)")
+            #endif
+            synthesizer = AVSpeechSynthesizer()
+            synthesizer.delegate = self
+            stopTimestamps.removeAll()
+        }
     }
 
     /// Warm the synthesizer to reduce first-speech delay (caching).
@@ -208,13 +255,11 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
     func stop() {
         sentenceQueue = []
         synthesizer.stopSpeaking(at: .immediate)
+        stopTimestamps.append(CFAbsoluteTimeGetCurrent())
         #if os(iOS)
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-            print("[AudioSession] deactivated after TTS stop")
-        } catch {
-            print("[AudioSession] deactivate after TTS failed: \(error.localizedDescription)")
-        }
+        } catch { }
         #endif
         onSpeakingStateChanged?(false)
     }
