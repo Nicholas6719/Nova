@@ -85,6 +85,16 @@ final class SpeechManager: ObservableObject {
     func stop() {
         engine.stop()
     }
+
+    /// Stop current speech immediately (barge-in). Idempotent.
+    func stopSpeaking() {
+        guard isSpeaking else { return }
+        #if DEBUG
+        DebugLog.d("[TTS] stopSpeaking (barge-in)")
+        #endif
+        isSpeaking = false
+        engine.stop()
+    }
 }
 
 // MARK: - AVSpeechTTSEngine (default implementation of TTSEngine)

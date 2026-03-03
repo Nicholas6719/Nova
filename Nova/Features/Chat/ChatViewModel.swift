@@ -25,7 +25,9 @@ final class ChatViewModel: ObservableObject {
         return .idle
     }
 
-    var isMicEnabled: Bool { !isProcessing && !speechManager.isSpeaking }
+    /// Mic enabled when not processing, or when Nova is speaking (barge-in).
+    /// Disabled only while waiting on OpenAI/engine (and not yet speaking).
+    var isMicEnabled: Bool { !isProcessing || speechManager.isSpeaking }
 
     // MARK: - Dependencies
 
@@ -102,6 +104,15 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Microphone
 
     func toggleRecording() {
+        if speechManager.isSpeaking {
+            speechManager.stopSpeaking()
+            cancelStreamingState()
+            isProcessing = false
+            errorMessage = nil
+            speechRecognizer.clearTranscript()
+            speechRecognizer.startListening()
+            return
+        }
         guard !isProcessing else {
             errorMessage = "One sec — I'm finishing my response."
             return
