@@ -64,6 +64,8 @@ final class ChatViewModel: ObservableObject {
 
     /// Hands-free: auto-start listening after TTS completes; cancel after timeout.
     private var autoListenTask: Task<Void, Never>?
+    /// Scheduled auto-listen start (300ms after TTS finished). Cancelled when a new one is scheduled.
+    private var scheduledAutoListenTask: Task<Void, Never>?
     private let hardTimeoutManual: TimeInterval = 15
     private let hardTimeoutAuto: TimeInterval = 6
 
@@ -227,6 +229,8 @@ final class ChatViewModel: ObservableObject {
         errorMessage = nil
         autoListenTask?.cancel()
         autoListenTask = nil
+        scheduledAutoListenTask?.cancel()
+        scheduledAutoListenTask = nil
         endOfSpeechTask?.cancel()
         endOfSpeechTask = nil
 
@@ -352,19 +356,12 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Sentence-by-sentence TTS
 
-    /// Single entry point for TTS: arms auto-listen, logs, speaks, and starts 400ms fallback if TTS never starts.
+    /// Single entry point for TTS: arms auto-listen and speaks. No fallback — auto-listen starts only from TTS-finished signal.
     @MainActor
     private func speakWithAutoListen(_ text: String, source: String) {
         allowAutoListen = true
+        DebugLog.d("[TTS] enqueue len=\(text.count) prefix=\(text.prefix(30))...")
         speechManager.speak(text)
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            guard let self else { return }
-            if self.allowAutoListen, !self.speechManager.isSpeaking, !self.isProcessing, !self.isRecording {
-                self.allowAutoListen = false
-                self.beginRecordingSession(mode: .auto)
-            }
-        }
     }
 
     /// Extract the first complete sentence from speechBuffer and speak it.
@@ -406,33 +403,37 @@ final class ChatViewModel: ObservableObject {
             }
             i = nextIdx
         }
+        if !streamingIsActive {
+            let remainder = speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            speechBuffer = ""
+            return remainder.isEmpty ? nil : remainder
+        }
         return nil
     }
 
     /// Called via Combine when speechManager.isSpeaking transitions to false.
     @MainActor
     private func onSpeechFinished() {
-        if isSpeakingStreamChunk, activeStreamToken != nil {
+        if isSpeakingStreamChunk {
             isSpeakingStreamChunk = false
-            if streamingMessageId == nil {
-                speakRemainingBuffer()
-            } else {
+            if activeStreamToken != nil, streamingMessageId != nil {
                 trySpeakNextSentence()
+            } else {
+                speakRemainingBuffer()
             }
         }
-        if allowAutoListen, !speechManager.isSpeaking, !isProcessing, !isRecording {
-            allowAutoListen = false
-            beginRecordingSession(mode: .auto)
-        }
+        scheduleAutoListenStart(source: "onSpeechFinished")
     }
 
     @MainActor
     private func speakRemainingBuffer() {
         let remaining = speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        DebugLog.d("[TTS] streamEnd speakRemainingBuffer beforeFlush pendingLen=\(speechBuffer.count) remaining=\(remaining.count)")
         clearSpeechState()
         if !remaining.isEmpty {
             speakWithAutoListen(remaining, source: "openai")
         }
+        DebugLog.d("[TTS] streamEnd speakRemainingBuffer afterFlush pendingLen=\(speechBuffer.count)")
     }
 
     // MARK: - Finalize streaming response
@@ -460,6 +461,8 @@ final class ChatViewModel: ObservableObject {
         streamingShownCount = 0
         streamingFinalText = nil
         streamingIsActive = false
+
+        DebugLog.d("[TTS] commitFinalStreamedResponse speechBufferLen=\(speechBuffer.count) hasSpokenAny=\(hasSpokenAnyStreamChunk) isSpeakingChunk=\(isSpeakingStreamChunk)")
 
         if !hasSpokenAnyStreamChunk {
             clearSpeechState()
@@ -526,6 +529,13 @@ final class ChatViewModel: ObservableObject {
 
     @MainActor
     private func beginRecordingSession(mode: RecordingMode) {
+        if mode == .auto {
+            let hasUnspoken = !speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if speechManager.isSpeaking || speechManager.hasPendingSpeech || hasUnspoken {
+                DebugLog.d("[AutoListen] beginRecordingSession(.auto) refused isSpeaking=\(speechManager.isSpeaking) hasPendingSpeech=\(speechManager.hasPendingSpeech) hasUnspoken=\(hasUnspoken)")
+                return
+            }
+        }
         recordingSessionId = UUID()
         recordingMode = mode
         recordingStartedAt = Date()
@@ -538,6 +548,8 @@ final class ChatViewModel: ObservableObject {
         endOfSpeechTask = nil
         autoListenTask?.cancel()
         autoListenTask = nil
+        scheduledAutoListenTask?.cancel()
+        scheduledAutoListenTask = nil
         errorMessage = nil
         speechRecognizer.clearTranscript()
         speechRecognizer.startListening()
@@ -582,6 +594,8 @@ final class ChatViewModel: ObservableObject {
         endOfSpeechTask = nil
         autoListenTask?.cancel()
         autoListenTask = nil
+        scheduledAutoListenTask?.cancel()
+        scheduledAutoListenTask = nil
 
         let text = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         speechRecognizer.stopListening()
@@ -649,8 +663,32 @@ final class ChatViewModel: ObservableObject {
     /// Called by SpeechManager when TTS fully completes (all utterances done).
     @MainActor
     private func handleSpeechFinished() {
-        guard allowAutoListen, !speechManager.isSpeaking, !isProcessing, !isRecording else { return }
-        allowAutoListen = false
-        beginRecordingSession(mode: .auto)
+        scheduleAutoListenStart(source: "handleSpeechFinished")
+    }
+
+    /// Schedules auto-listen start after 300ms. Rechecks all conditions; aborts if TTS still active.
+    @MainActor
+    private func scheduleAutoListenStart(source: String) {
+        guard allowAutoListen else { return }
+        scheduledAutoListenTask?.cancel()
+        scheduledAutoListenTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard let self else { return }
+            guard !Task.isCancelled else { return }
+            self.scheduledAutoListenTask = nil
+            let hasUnspoken = !self.speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let ok = self.allowAutoListen && !self.isProcessing && !self.isRecording
+                && !self.speechManager.isSpeaking && !self.speechManager.hasPendingSpeech
+                && !hasUnspoken
+            DebugLog.d("[AutoListen] attempt source=\(source) allowAutoListen=\(self.allowAutoListen) isProcessing=\(self.isProcessing) isRecording=\(self.isRecording) isSpeaking=\(self.speechManager.isSpeaking) hasPendingSpeech=\(self.speechManager.hasPendingSpeech) hasUnspoken=\(hasUnspoken) ok=\(ok)")
+            if !ok {
+                if self.speechManager.isSpeaking || self.speechManager.hasPendingSpeech || hasUnspoken {
+                    DebugLog.d("[AutoListen] aborted TTS still active or pending buffer")
+                }
+                return
+            }
+            self.allowAutoListen = false
+            self.beginRecordingSession(mode: .auto)
+        }
     }
 }

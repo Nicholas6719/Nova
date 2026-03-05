@@ -236,7 +236,7 @@ final class SpeechRecognizer: ObservableObject {
             }
             do {
                 let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.record, mode: .measurement, options: .duckOthers)
+                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
             } catch {
                 self.errorMessage = "Could not configure audio: \(error.localizedDescription)"

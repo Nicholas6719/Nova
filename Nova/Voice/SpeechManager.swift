@@ -23,11 +23,14 @@ protocol TTSEngine: AnyObject {
     func speak(_ text: String)
     func stop()
     var isSpeaking: Bool { get }
+    /// True if synthesizer is speaking or queue has pending utterances.
+    var hasPendingSpeech: Bool { get }
 }
 
 /// Optional: engines can expose a display name for debug logging.
 extension TTSEngine {
     var engineTypeName: String { "TTS" }
+    var hasPendingSpeech: Bool { isSpeaking }
 }
 
 // MARK: - SpeechManager (orchestrator, engine-agnostic)
@@ -40,6 +43,9 @@ final class SpeechManager: ObservableObject {
     // MARK: - Published
 
     @Published private(set) var isSpeaking: Bool = false
+
+    /// True if TTS is speaking or has utterances queued. Use to avoid starting mic during TTS.
+    var hasPendingSpeech: Bool { engine.hasPendingSpeech }
 
     // MARK: - Engine (swap here for future neural TTS)
 
@@ -118,15 +124,15 @@ final class SpeechManager: ObservableObject {
         #endif
     }
 
-    /// Call right before speaking. Ensures playback session and rebuilds engine if needed.
+    /// Call right before speaking. Uses .playAndRecord so mic can start without interrupting.
     func prepareForSpeak() {
         #if os(iOS)
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
             try session.setActive(true)
             #if DEBUG
-            DebugLog.d("[TTS] prepareForSpeak category=playback mode=spokenAudio active=true")
+            DebugLog.d("[TTS] prepareForSpeak category=playAndRecord mode=voiceChat active=true")
             #endif
         } catch {
             #if DEBUG
@@ -282,6 +288,10 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
     var isSpeaking: Bool {
         synthesizer.isSpeaking
     }
+
+    var hasPendingSpeech: Bool {
+        synthesizer.isSpeaking || !sentenceQueue.isEmpty
+    }
 }
 
 // MARK: - AVSpeechSynthesizerDelegate (sequential sentence queue)
@@ -303,6 +313,9 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
             if let sentence = next {
                 self.speakOne(sentence)
             } else {
+                #if DEBUG
+                DebugLog.d("[TTS] finished queueEmpty=true sentenceQueueRemaining=0")
+                #endif
                 #if os(iOS)
                 do {
                     try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
