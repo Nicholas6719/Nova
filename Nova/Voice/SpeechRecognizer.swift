@@ -235,9 +235,7 @@ final class SpeechRecognizer: ObservableObject {
                 return
             }
             do {
-                let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
-                try session.setActive(true, options: .notifyOthersOnDeactivation)
+                try await AudioSessionQueue.configureForRecording()
             } catch {
                 self.errorMessage = "Could not configure audio: \(error.localizedDescription)"
                 return
@@ -307,12 +305,7 @@ final class SpeechRecognizer: ObservableObject {
             guard canStop else { return }
             await engineRef.stop()
             #if os(iOS)
-            do {
-                try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-                print("[AudioSession] deactivated after stopListening")
-            } catch {
-                print("[AudioSession] deactivate failed: \(error.localizedDescription)")
-            }
+            await AudioSessionQueue.deactivateAsync()
             #endif
             await stateGuardRef.didFinishStop()
             await MainActor.run {

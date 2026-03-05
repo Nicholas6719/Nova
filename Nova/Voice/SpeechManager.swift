@@ -84,9 +84,15 @@ final class SpeechManager: ObservableObject {
     func speak(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        prepareForSpeak()
-        isSpeaking = true
-        engine.speak(trimmed)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            #if os(iOS)
+            await AudioSessionQueue.configureForPlayback()
+            #endif
+            (self.engine as? AVSpeechTTSEngine)?.ensureReadyForPlayback()
+            self.isSpeaking = true
+            self.engine.speak(trimmed)
+        }
     }
 
     /// Stop current speech.
@@ -105,42 +111,13 @@ final class SpeechManager: ObservableObject {
     }
 
     /// Call before mic starts (barge-in). Stops TTS and configures session for recording.
+    /// Session config runs on audioSessionQueue; subsequent startListening will serialize after this.
     func prepareForBargeIn() {
         stopSpeaking()
         engine.stop()
         #if os(iOS)
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
-            try session.setActive(false, options: .notifyOthersOnDeactivation)
-            #if DEBUG
-            DebugLog.d("[TTS] prepareForBargeIn category=playAndRecord mode=voiceChat active=false")
-            #endif
-        } catch {
-            #if DEBUG
-            DebugLog.d("[TTS] prepareForBargeIn failed: \(error.localizedDescription)")
-            #endif
-        }
+        AudioSessionQueue.prepareForBargeIn()
         #endif
-    }
-
-    /// Call right before speaking. Uses .playAndRecord so mic can start without interrupting.
-    func prepareForSpeak() {
-        #if os(iOS)
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
-            try session.setActive(true)
-            #if DEBUG
-            DebugLog.d("[TTS] prepareForSpeak category=playAndRecord mode=voiceChat active=true")
-            #endif
-        } catch {
-            #if DEBUG
-            DebugLog.d("[TTS] prepareForSpeak failed: \(error.localizedDescription)")
-            #endif
-        }
-        #endif
-        (engine as? AVSpeechTTSEngine)?.ensureReadyForPlayback()
     }
 }
 
@@ -278,9 +255,7 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
         synthesizer.stopSpeaking(at: .immediate)
         stopTimestamps.append(CFAbsoluteTimeGetCurrent())
         #if os(iOS)
-        do {
-            try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-        } catch { }
+        AudioSessionQueue.deactivate()
         #endif
         onSpeakingStateChanged?(false)
     }
@@ -317,9 +292,7 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
                 DebugLog.d("[TTS] finished queueEmpty=true sentenceQueueRemaining=0")
                 #endif
                 #if os(iOS)
-                do {
-                    try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-                } catch { }
+                AudioSessionQueue.deactivate()
                 #endif
                 self.onSpeakingStateChanged?(false)
                 self.onSpeechFinished?()
@@ -328,16 +301,11 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        #if os(iOS)
+        AudioSessionQueue.deactivate()
+        #endif
         Task { @MainActor [weak self] in
             guard let self else { return }
-            #if os(iOS)
-            do {
-                try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-                print("[AudioSession] deactivated after TTS cancel")
-            } catch {
-                print("[AudioSession] deactivate after TTS failed: \(error.localizedDescription)")
-            }
-            #endif
             self.onSpeakingStateChanged?(false)
         }
     }
