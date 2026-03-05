@@ -26,6 +26,8 @@ private actor SpeechRecognitionEngine {
     func start(
         recognizer: SFSpeechRecognizer,
         onTranscript: @Sendable @escaping (String) -> Void,
+        onPartial: @Sendable @escaping (String) -> Void,
+        onFinal: @Sendable @escaping (String) -> Void,
         onError: @Sendable @escaping (String?) -> Void,
         onStarted: @Sendable @escaping () -> Void,
         onStartFailed: @Sendable @escaping (String) -> Void
@@ -71,7 +73,13 @@ private actor SpeechRecognitionEngine {
                 }
             }
             if let result = result {
-                onTranscript(result.bestTranscription.formattedString)
+                let text = result.bestTranscription.formattedString
+                onTranscript(text)
+                if result.isFinal {
+                    onFinal(text)
+                } else {
+                    onPartial(text)
+                }
             }
         }
     }
@@ -128,6 +136,8 @@ final class SpeechRecognizer: ObservableObject {
     @Published private(set) var authorizationStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
 
     var onRecordingDidStop: ((String) -> Void)?
+    var onPartialTranscript: ((String) -> Void)?
+    var onFinalTranscript: ((String) -> Void)?
 
     // MARK: - Private
 
@@ -213,6 +223,16 @@ final class SpeechRecognizer: ObservableObject {
                         Task { @MainActor [weak self] in
                             guard let self else { return }
                             self.transcript = text
+                        }
+                    },
+                    onPartial: { [weak self] text in
+                        Task { @MainActor [weak self] in
+                            self?.onPartialTranscript?(text)
+                        }
+                    },
+                    onFinal: { [weak self] text in
+                        Task { @MainActor [weak self] in
+                            self?.onFinalTranscript?(text)
                         }
                     },
                     onError: { [weak self] message in
