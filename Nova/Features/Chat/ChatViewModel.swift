@@ -62,6 +62,10 @@ final class ChatViewModel: ObservableObject {
     private var lastCommittedTranscript = ""
     private var lastCommittedTime: CFAbsoluteTime = 0
 
+    /// Hands-free: auto-start listening after TTS completes; cancel after timeout.
+    private var autoListenTask: Task<Void, Never>?
+    private let autoListenTimeout: TimeInterval = 6
+
     // MARK: - Init
 
     init() {
@@ -95,6 +99,12 @@ final class ChatViewModel: ObservableObject {
             .filter { !$0 }
             .sink { [weak self] _ in self?.onSpeechFinished() }
             .store(in: &cancellables)
+
+        speechManager.onSpeechFinished = { [weak self] in
+            Task { @MainActor in
+                self?.handleSpeechFinished()
+            }
+        }
     }
 
     // MARK: - Permissions
@@ -108,6 +118,8 @@ final class ChatViewModel: ObservableObject {
     func toggleRecording() {
         // Barge-in: tap during speech, streaming, or processing → stop + start listening (1 tap).
         if speechManager.isSpeaking || activeStreamToken != nil || isProcessing {
+            autoListenTask?.cancel()
+            autoListenTask = nil
             speechManager.prepareForBargeIn()
             cancelStreamingState()
             isProcessing = false
@@ -117,6 +129,8 @@ final class ChatViewModel: ObservableObject {
             return
         }
         if !isMicEnabled { return }
+        autoListenTask?.cancel()
+        autoListenTask = nil
         if isRecording {
             speechRecognizer.stopListening()
         } else {
@@ -154,6 +168,8 @@ final class ChatViewModel: ObservableObject {
         guard !isProcessing else { return }
         isProcessing = true
         errorMessage = nil
+        autoListenTask?.cancel()
+        autoListenTask = nil
 
         cancelStreamingState()
 
@@ -428,5 +444,29 @@ final class ChatViewModel: ObservableObject {
 
     func clearError() {
         errorMessage = nil
+    }
+
+    // MARK: - Hands-free auto-listen
+
+    @MainActor
+    private func handleSpeechFinished() {
+        guard !speechManager.isSpeaking else { return }
+        guard !isProcessing else { return }
+        guard !isRecording else { return }
+
+        autoListenTask?.cancel()
+        errorMessage = nil
+        speechRecognizer.clearTranscript()
+        speechRecognizer.startListening()
+
+        autoListenTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((self?.autoListenTimeout ?? 6) * 1_000_000_000))
+            guard let self else { return }
+            guard !Task.isCancelled else { return }
+            if self.isRecording {
+                self.speechRecognizer.stopListening()
+            }
+            self.autoListenTask = nil
+        }
     }
 }

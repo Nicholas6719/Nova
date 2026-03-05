@@ -47,6 +47,9 @@ final class SpeechManager: ObservableObject {
     /// `SpeechManager(engine: OnDeviceNeuralTTSEngine())` or `SpeechManager(engine: CloudTTSEngine())`.
     private let engine: TTSEngine
 
+    /// Called when TTS fully completes (all utterances done). Used for hands-free auto-listen.
+    var onSpeechFinished: (() -> Void)?
+
     // MARK: - Init
 
     init(engine providedEngine: TTSEngine? = nil) {
@@ -57,6 +60,9 @@ final class SpeechManager: ObservableObject {
                 Task { @MainActor in
                     self?.isSpeaking = speaking
                 }
+            }
+            avEngine.onSpeechFinished = { [weak self] in
+                self?.onSpeechFinished?()
             }
         }
     }
@@ -141,6 +147,8 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
 
     /// Called when speech starts or stops. Invoked from delegate callbacks.
     var onSpeakingStateChanged: ((Bool) -> Void)?
+    /// Called when all speech is done (didFinish with empty queue). Used for hands-free auto-listen.
+    var onSpeechFinished: (() -> Void)?
 
     // MARK: - Configuration (Ava Premium, natural pacing and warmth)
 
@@ -290,12 +298,10 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
                 #if os(iOS)
                 do {
                     try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-                    print("[AudioSession] deactivated after TTS finish")
-                } catch {
-                    print("[AudioSession] deactivate after TTS failed: \(error.localizedDescription)")
-                }
+                } catch { }
                 #endif
                 self.onSpeakingStateChanged?(false)
+                self.onSpeechFinished?()
             }
         }
     }
