@@ -64,15 +64,33 @@ final class ChatViewModel: ObservableObject {
 
     /// Hands-free: auto-start listening after TTS completes; cancel after timeout.
     private var autoListenTask: Task<Void, Never>?
-    private let autoListenTimeout: TimeInterval = 6
+    private let hardTimeoutManual: TimeInterval = 15
+    private let hardTimeoutAuto: TimeInterval = 6
 
-    /// End-of-speech: stop listening ~0.9s after last transcript update.
+    /// End-of-speech: stop listening after last transcript update (manual: transcript-based only).
     private var endOfSpeechTask: Task<Void, Never>?
     private var lastTranscriptUpdate = Date()
-    private let endOfSpeechDelay: TimeInterval = 0.9
+    private let endOfSpeechDelay: TimeInterval = 1.2
+
+    /// Skip next handleRecordingStopped when we committed from partial (stopListeningAndCommitNow).
+    private var skipNextRecordingStopped = false
 
     /// Gate: auto-listen only after Nova has spoken (not on launch).
     private var allowAutoListen = false
+
+    private enum RecordingMode { case manual, auto }
+    private var recordingMode: RecordingMode = .manual
+    private var recordingSessionId: UUID = UUID()
+
+    /// VAD: unified for both manual and auto. Silence-based EOS; hard cap is safety only.
+    private var recordingStartedAt: Date = .init()
+    private var vadHeardSpeech = false
+    private var firstSpeechAt: Date?
+    private var lastSpeechOrTranscriptAt: Date?
+    private var vadDidTriggerStop = false
+    private let vadSpeechThreshold: Float = 0.012
+    private let vadSilenceDuration: TimeInterval = 1.0
+    private let vadMinSpeechBeforeStop: TimeInterval = 0.6
 
     // MARK: - Init
 
@@ -91,7 +109,7 @@ final class ChatViewModel: ObservableObject {
             .store(in: &cancellables)
 
         speechRecognizer.onRecordingDidStop = { [weak self] text in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.handleRecordingStopped(with: text)
             }
         }
@@ -108,24 +126,41 @@ final class ChatViewModel: ObservableObject {
             .sink { [weak self] _ in self?.onSpeechFinished() }
             .store(in: &cancellables)
 
+        speechManager.onSpeechStarted = { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.handleSpeechStarted()
+            }
+        }
         speechManager.onSpeechFinished = { [weak self] in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.handleSpeechFinished()
             }
         }
 
-        speechRecognizer.onPartialTranscript = { [weak self] _ in
-            Task { @MainActor in
-                self?.lastTranscriptUpdate = Date()
+        speechRecognizer.onPartialTranscript = { [weak self] text in
+            Task { @MainActor [weak self] in
+                guard let self, self.isRecording else { return }
+                self.lastTranscriptUpdate = Date()
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let now = Date()
+                    self.vadHeardSpeech = true
+                    if self.firstSpeechAt == nil { self.firstSpeechAt = now }
+                    self.lastSpeechOrTranscriptAt = now
+                }
             }
         }
 
         speechRecognizer.onFinalTranscript = { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.isRecording else { return }
-                self.endOfSpeechTask?.cancel()
-                self.endOfSpeechTask = nil
-                self.speechRecognizer.stopListening()
+                self.lastTranscriptUpdate = Date()
+                self.stopListeningAndCommitNow(reason: "final", sessionId: self.recordingSessionId)
+            }
+        }
+
+        speechRecognizer.onAudioEnergy = { [weak self] rms in
+            Task { @MainActor [weak self] in
+                self?.handleAudioEnergy(rms)
             }
         }
     }
@@ -141,33 +176,28 @@ final class ChatViewModel: ObservableObject {
     func toggleRecording() {
         // Barge-in: tap during speech, streaming, or processing → stop + start listening (1 tap).
         if speechManager.isSpeaking || activeStreamToken != nil || isProcessing {
-            autoListenTask?.cancel()
-            autoListenTask = nil
-            endOfSpeechTask?.cancel()
-            endOfSpeechTask = nil
             speechManager.prepareForBargeIn()
             cancelStreamingState()
             isProcessing = false
             errorMessage = nil
-            speechRecognizer.clearTranscript()
-            speechRecognizer.startListening()
+            beginRecordingSession(mode: .manual)
             return
         }
         if !isMicEnabled { return }
-        autoListenTask?.cancel()
-        autoListenTask = nil
-        endOfSpeechTask?.cancel()
-        endOfSpeechTask = nil
         if isRecording {
-            speechRecognizer.stopListening()
+            stopListeningAndCommitNow(reason: "manual tap", sessionId: recordingSessionId)
         } else {
-            errorMessage = nil
-            speechRecognizer.clearTranscript()
-            speechRecognizer.startListening()
+            beginRecordingSession(mode: .manual)
         }
     }
 
     private func handleRecordingStopped(with text: String) {
+        if skipNextRecordingStopped {
+            skipNextRecordingStopped = false
+            liveTranscript = ""
+            speechRecognizer.clearTranscript()
+            return
+        }
         let finalText = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         liveTranscript = ""
@@ -322,6 +352,21 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Sentence-by-sentence TTS
 
+    /// Single entry point for TTS: arms auto-listen, logs, speaks, and starts 400ms fallback if TTS never starts.
+    @MainActor
+    private func speakWithAutoListen(_ text: String, source: String) {
+        allowAutoListen = true
+        speechManager.speak(text)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard let self else { return }
+            if self.allowAutoListen, !self.speechManager.isSpeaking, !self.isProcessing, !self.isRecording {
+                self.allowAutoListen = false
+                self.beginRecordingSession(mode: .auto)
+            }
+        }
+    }
+
     /// Extract the first complete sentence from speechBuffer and speak it.
     /// A sentence boundary is a terminator (. ! ?) followed by whitespace, or at
     /// the end of the buffer when the stream has finished.
@@ -332,8 +377,7 @@ final class ChatViewModel: ObservableObject {
         guard let sentence = extractFirstSentence() else { return }
         isSpeakingStreamChunk = true
         hasSpokenAnyStreamChunk = true
-        allowAutoListen = true
-        speechManager.speak(sentence)
+        speakWithAutoListen(sentence, source: "openai")
     }
 
     @MainActor
@@ -368,15 +412,17 @@ final class ChatViewModel: ObservableObject {
     /// Called via Combine when speechManager.isSpeaking transitions to false.
     @MainActor
     private func onSpeechFinished() {
-        guard isSpeakingStreamChunk else { return }
-        guard activeStreamToken != nil else { return }
-        isSpeakingStreamChunk = false
-
-        if streamingMessageId == nil {
-            // Ticker already finished — speak any remaining buffer text.
-            speakRemainingBuffer()
-        } else {
-            trySpeakNextSentence()
+        if isSpeakingStreamChunk, activeStreamToken != nil {
+            isSpeakingStreamChunk = false
+            if streamingMessageId == nil {
+                speakRemainingBuffer()
+            } else {
+                trySpeakNextSentence()
+            }
+        }
+        if allowAutoListen, !speechManager.isSpeaking, !isProcessing, !isRecording {
+            allowAutoListen = false
+            beginRecordingSession(mode: .auto)
         }
     }
 
@@ -385,8 +431,7 @@ final class ChatViewModel: ObservableObject {
         let remaining = speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
         clearSpeechState()
         if !remaining.isEmpty {
-            allowAutoListen = true
-            speechManager.speak(remaining)
+            speakWithAutoListen(remaining, source: "openai")
         }
     }
 
@@ -418,8 +463,7 @@ final class ChatViewModel: ObservableObject {
 
         if !hasSpokenAnyStreamChunk {
             clearSpeechState()
-            allowAutoListen = true
-            speechManager.speak(fullText)
+            speakWithAutoListen(fullText, source: "openai")
         } else if !isSpeakingStreamChunk {
             speakRemainingBuffer()
         }
@@ -446,8 +490,7 @@ final class ChatViewModel: ObservableObject {
             guard activeStreamToken == token else { return }
             messages.append(Message(role: .assistant, content: fullText))
             DebugLog.d("[Chat] append assistant: \(fullText.prefix(60))\(fullText.count > 60 ? "…" : "")")
-            allowAutoListen = true
-            speechManager.speak(fullText)
+            speakWithAutoListen(fullText, source: "local")
             isProcessing = false
         }
     }
@@ -479,63 +522,135 @@ final class ChatViewModel: ObservableObject {
         errorMessage = nil
     }
 
-    // MARK: - Hands-free auto-listen
+    // MARK: - Recording session (session-scoped cancellation safety)
 
     @MainActor
-    private func handleSpeechFinished() {
-        guard allowAutoListen else { return }
-        guard !speechManager.isSpeaking else { return }
-        guard !isProcessing else { return }
-        guard !isRecording else { return }
-
-        allowAutoListen = false
-        autoListenTask?.cancel()
-        autoListenTask = nil
+    private func beginRecordingSession(mode: RecordingMode) {
+        recordingSessionId = UUID()
+        recordingMode = mode
+        recordingStartedAt = Date()
+        lastTranscriptUpdate = Date()
+        vadHeardSpeech = false
+        firstSpeechAt = nil
+        lastSpeechOrTranscriptAt = nil
+        vadDidTriggerStop = false
         endOfSpeechTask?.cancel()
         endOfSpeechTask = nil
+        autoListenTask?.cancel()
+        autoListenTask = nil
         errorMessage = nil
         speechRecognizer.clearTranscript()
-        lastTranscriptUpdate = Date()
         speechRecognizer.startListening()
+        DebugLog.d("[EOS] begin mode=\(recordingMode) sid=\(recordingSessionId)")
+        startEndOfSpeechMonitor(sessionId: recordingSessionId)
+        startHardTimeout(sessionId: recordingSessionId, mode: mode)
+    }
 
-        DebugLog.d("[AutoListen] auto-listen start")
-
-        startEndOfSpeechMonitor()
-
-        autoListenTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64((self?.autoListenTimeout ?? 6) * 1_000_000_000))
-            guard let self else { return }
-            guard !Task.isCancelled else { return }
-            self.endOfSpeechTask?.cancel()
-            self.endOfSpeechTask = nil
-            if self.isRecording {
-                DebugLog.d("[AutoListen] hard timeout triggered")
-                self.speechRecognizer.stopListening()
+    @MainActor
+    private func handleAudioEnergy(_ rms: Float) {
+        guard isRecording else { return }
+        guard !vadDidTriggerStop else { return }
+        let sessionId = recordingSessionId
+        let now = Date()
+        if rms > vadSpeechThreshold {
+            if !vadHeardSpeech {
+                vadHeardSpeech = true
+                firstSpeechAt = now
+                DebugLog.d("[VAD] speech start sid=\(sessionId)")
             }
-            self.autoListenTask = nil
+            lastSpeechOrTranscriptAt = now
+        } else if vadHeardSpeech, let lastAt = lastSpeechOrTranscriptAt, let firstAt = firstSpeechAt {
+            let silenceElapsed = now.timeIntervalSince(lastAt)
+            let elapsedSinceFirstSpeech = now.timeIntervalSince(firstAt)
+            guard elapsedSinceFirstSpeech >= vadMinSpeechBeforeStop else { return }
+            if silenceElapsed >= vadSilenceDuration {
+                vadDidTriggerStop = true
+                DebugLog.d("[VAD] stop sid=\(sessionId) mode=\(recordingMode) silence=\(String(format: "%.2f", silenceElapsed))s")
+                stopListeningAndCommitNow(reason: "vad-silence", sessionId: sessionId)
+            }
         }
     }
 
     @MainActor
-    private func startEndOfSpeechMonitor() {
+    private func stopListeningAndCommitNow(reason: String, sessionId: UUID) {
+        guard sessionId == recordingSessionId else {
+            DebugLog.d("[EOS] ignore stale stop reason=\(reason) staleSid=\(sessionId) currentSid=\(recordingSessionId)")
+            return
+        }
+        guard isRecording else { return }
+        endOfSpeechTask?.cancel()
+        endOfSpeechTask = nil
+        autoListenTask?.cancel()
+        autoListenTask = nil
+
+        let text = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        speechRecognizer.stopListening()
+        liveTranscript = ""
+        speechRecognizer.clearTranscript()
+        skipNextRecordingStopped = true
+
+        guard !text.isEmpty else {
+            if reason == "vad-silence" {
+                errorMessage = "No speech recognized. Try again."
+            }
+            return
+        }
+        DebugLog.d("[EOS] stop reason=\(reason) mode=\(recordingMode) sid=\(sessionId) text.len=\(text.count)")
+        processUserInput(text: text)
+    }
+
+    @MainActor
+    private func startEndOfSpeechMonitor(sessionId: UUID) {
         endOfSpeechTask?.cancel()
         endOfSpeechTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                try? await Task.sleep(nanoseconds: 150_000_000)
+                try? await Task.sleep(nanoseconds: 100_000_000)
                 guard !Task.isCancelled else { return }
+                guard sessionId == self.recordingSessionId else { return }
                 guard self.isRecording else { return }
                 let transcript = self.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !transcript.isEmpty else { continue }
 
                 if Date().timeIntervalSince(self.lastTranscriptUpdate) >= self.endOfSpeechDelay {
-                    DebugLog.d("[AutoListen] end-of-speech triggered (silence >= \(self.endOfSpeechDelay)s)")
                     self.endOfSpeechTask?.cancel()
                     self.endOfSpeechTask = nil
-                    self.speechRecognizer.stopListening()
+                    let reason = self.recordingMode == .manual ? "partial-silence" : "partial-silence"
+                    self.stopListeningAndCommitNow(reason: reason, sessionId: sessionId)
                     return
                 }
             }
         }
+    }
+
+    @MainActor
+    private func startHardTimeout(sessionId: UUID, mode: RecordingMode) {
+        let timeout: TimeInterval = mode == .manual ? hardTimeoutManual : hardTimeoutAuto
+        autoListenTask?.cancel()
+        autoListenTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard let self else { return }
+            guard !Task.isCancelled else { return }
+            guard sessionId == self.recordingSessionId else { return }
+            if self.isRecording {
+                self.stopListeningAndCommitNow(reason: "hard-timeout", sessionId: sessionId)
+            }
+            self.autoListenTask = nil
+        }
+    }
+
+    // MARK: - Hands-free auto-listen
+
+    @MainActor
+    private func handleSpeechStarted() {
+        // TTS actually started; fallback will no-op (isSpeaking true or we'll get onSpeechFinished).
+    }
+
+    /// Called by SpeechManager when TTS fully completes (all utterances done).
+    @MainActor
+    private func handleSpeechFinished() {
+        guard allowAutoListen, !speechManager.isSpeaking, !isProcessing, !isRecording else { return }
+        allowAutoListen = false
+        beginRecordingSession(mode: .auto)
     }
 }

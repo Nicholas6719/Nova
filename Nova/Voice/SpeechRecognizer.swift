@@ -23,6 +23,7 @@ private actor SpeechRecognitionEngine {
     private var recognitionTask: SFSpeechRecognitionTask?
 
     /// Start listening. Callbacks invoked via Task { @MainActor in } (no MainActor.run / unsafeForcedSync).
+    /// onEnergy: called from audio tap context (background), 0..~1 normalized RMS.
     func start(
         recognizer: SFSpeechRecognizer,
         onTranscript: @Sendable @escaping (String) -> Void,
@@ -30,7 +31,8 @@ private actor SpeechRecognitionEngine {
         onFinal: @Sendable @escaping (String) -> Void,
         onError: @Sendable @escaping (String?) -> Void,
         onStarted: @Sendable @escaping () -> Void,
-        onStartFailed: @Sendable @escaping (String) -> Void
+        onStartFailed: @Sendable @escaping (String) -> Void,
+        onEnergy: (@Sendable (Float) -> Void)?
     ) async throws {
         // Clean previous session (all on actor executor, not main)
         recognitionTask?.cancel()
@@ -50,6 +52,10 @@ private actor SpeechRecognitionEngine {
         let format = inputNode.outputFormat(forBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [request] buffer, _ in
             request.append(buffer)
+            if let onEnergy = onEnergy {
+                let rms = Self.computeRMS(buffer: buffer)
+                onEnergy(rms)
+            }
         }
 
         audioEngine.prepare()
@@ -82,6 +88,29 @@ private actor SpeechRecognitionEngine {
                 }
             }
         }
+    }
+
+    /// Compute RMS from audio buffer (0..~1). Call from tap context only.
+    private static func computeRMS(buffer: AVAudioPCMBuffer) -> Float {
+        let frameLength = Int(buffer.frameLength)
+        guard frameLength > 0 else { return 0 }
+        if let channelData = buffer.floatChannelData?[0] {
+            var sum: Float = 0
+            for i in 0..<frameLength {
+                let s = channelData[i]
+                sum += s * s
+            }
+            return sqrt(sum / Float(frameLength))
+        }
+        if let channelData = buffer.int16ChannelData?[0] {
+            var sum: Float = 0
+            for i in 0..<frameLength {
+                let s = Float(channelData[i]) / 32768
+                sum += s * s
+            }
+            return sqrt(sum / Float(frameLength))
+        }
+        return 0
     }
 
     /// Stop engine and recognition. Safe to call from any context; does not touch main.
@@ -138,6 +167,8 @@ final class SpeechRecognizer: ObservableObject {
     var onRecordingDidStop: ((String) -> Void)?
     var onPartialTranscript: ((String) -> Void)?
     var onFinalTranscript: ((String) -> Void)?
+    /// Called from audio tap (background). 0..~1 normalized RMS.
+    var onAudioEnergy: (@Sendable (Float) -> Void)?
 
     // MARK: - Private
 
@@ -217,6 +248,7 @@ final class SpeechRecognizer: ObservableObject {
             self.errorMessage = nil
 
             do {
+                let onEnergy = self.onAudioEnergy
                 try await engine.start(
                     recognizer: recognizer,
                     onTranscript: { [weak self] text in
@@ -253,7 +285,8 @@ final class SpeechRecognizer: ObservableObject {
                             guard let self else { return }
                             self.errorMessage = message
                         }
-                    }
+                    },
+                    onEnergy: onEnergy
                 )
             } catch {
                 // Already reported via onStartFailed

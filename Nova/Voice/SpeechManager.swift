@@ -47,6 +47,8 @@ final class SpeechManager: ObservableObject {
     /// `SpeechManager(engine: OnDeviceNeuralTTSEngine())` or `SpeechManager(engine: CloudTTSEngine())`.
     private let engine: TTSEngine
 
+    /// Called when TTS actually starts (didStart utterance). Used for fallback auto-listen.
+    var onSpeechStarted: (() -> Void)?
     /// Called when TTS fully completes (all utterances done). Used for hands-free auto-listen.
     var onSpeechFinished: (() -> Void)?
 
@@ -60,6 +62,9 @@ final class SpeechManager: ObservableObject {
                 Task { @MainActor in
                     self?.isSpeaking = speaking
                 }
+            }
+            avEngine.onSpeechStarted = { [weak self] in
+                self?.onSpeechStarted?()
             }
             avEngine.onSpeechFinished = { [weak self] in
                 self?.onSpeechFinished?()
@@ -147,6 +152,8 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
 
     /// Called when speech starts or stops. Invoked from delegate callbacks.
     var onSpeakingStateChanged: ((Bool) -> Void)?
+    /// Called when first utterance starts (didStart). Used for fallback auto-listen.
+    var onSpeechStarted: (() -> Void)?
     /// Called when all speech is done (didFinish with empty queue). Used for hands-free auto-listen.
     var onSpeechFinished: (() -> Void)?
 
@@ -284,6 +291,7 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         Task { @MainActor [weak self] in
             self?.onSpeakingStateChanged?(true)
+            self?.onSpeechStarted?()
         }
     }
 
