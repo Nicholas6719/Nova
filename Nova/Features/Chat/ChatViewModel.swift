@@ -360,7 +360,6 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func speakWithAutoListen(_ text: String, source: String) {
         allowAutoListen = true
-        DebugLog.d("[TTS] enqueue len=\(text.count) prefix=\(text.prefix(30))...")
         speechManager.speak(text)
     }
 
@@ -428,12 +427,10 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func speakRemainingBuffer() {
         let remaining = speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-        DebugLog.d("[TTS] streamEnd speakRemainingBuffer beforeFlush pendingLen=\(speechBuffer.count) remaining=\(remaining.count)")
         clearSpeechState()
         if !remaining.isEmpty {
             speakWithAutoListen(remaining, source: "openai")
         }
-        DebugLog.d("[TTS] streamEnd speakRemainingBuffer afterFlush pendingLen=\(speechBuffer.count)")
     }
 
     // MARK: - Finalize streaming response
@@ -461,8 +458,6 @@ final class ChatViewModel: ObservableObject {
         streamingShownCount = 0
         streamingFinalText = nil
         streamingIsActive = false
-
-        DebugLog.d("[TTS] commitFinalStreamedResponse speechBufferLen=\(speechBuffer.count) hasSpokenAny=\(hasSpokenAnyStreamChunk) isSpeakingChunk=\(isSpeakingStreamChunk)")
 
         if !hasSpokenAnyStreamChunk {
             clearSpeechState()
@@ -532,7 +527,6 @@ final class ChatViewModel: ObservableObject {
         if mode == .auto {
             let hasUnspoken = !speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if speechManager.isSpeaking || speechManager.hasPendingSpeech || hasUnspoken {
-                DebugLog.d("[AutoListen] beginRecordingSession(.auto) refused isSpeaking=\(speechManager.isSpeaking) hasPendingSpeech=\(speechManager.hasPendingSpeech) hasUnspoken=\(hasUnspoken)")
                 return
             }
         }
@@ -585,10 +579,7 @@ final class ChatViewModel: ObservableObject {
 
     @MainActor
     private func stopListeningAndCommitNow(reason: String, sessionId: UUID) {
-        guard sessionId == recordingSessionId else {
-            DebugLog.d("[EOS] ignore stale stop reason=\(reason) staleSid=\(sessionId) currentSid=\(recordingSessionId)")
-            return
-        }
+        guard sessionId == recordingSessionId else { return }
         guard isRecording else { return }
         endOfSpeechTask?.cancel()
         endOfSpeechTask = nil
@@ -680,13 +671,7 @@ final class ChatViewModel: ObservableObject {
             let ok = self.allowAutoListen && !self.isProcessing && !self.isRecording
                 && !self.speechManager.isSpeaking && !self.speechManager.hasPendingSpeech
                 && !hasUnspoken
-            DebugLog.d("[AutoListen] attempt source=\(source) allowAutoListen=\(self.allowAutoListen) isProcessing=\(self.isProcessing) isRecording=\(self.isRecording) isSpeaking=\(self.speechManager.isSpeaking) hasPendingSpeech=\(self.speechManager.hasPendingSpeech) hasUnspoken=\(hasUnspoken) ok=\(ok)")
-            if !ok {
-                if self.speechManager.isSpeaking || self.speechManager.hasPendingSpeech || hasUnspoken {
-                    DebugLog.d("[AutoListen] aborted TTS still active or pending buffer")
-                }
-                return
-            }
+            if !ok { return }
             self.allowAutoListen = false
             self.beginRecordingSession(mode: .auto)
         }

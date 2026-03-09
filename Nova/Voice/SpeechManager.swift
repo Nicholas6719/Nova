@@ -175,9 +175,6 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
         let cutoff = now - 5.0
         stopTimestamps.removeAll { $0 < cutoff }
         if stopTimestamps.count >= 3 {
-            #if DEBUG
-            DebugLog.d("[TTS] rebuild synthesizer (3+ stops in 5s)")
-            #endif
             synthesizer = AVSpeechSynthesizer()
             synthesizer.delegate = self
             stopTimestamps.removeAll()
@@ -288,9 +285,6 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
             if let sentence = next {
                 self.speakOne(sentence)
             } else {
-                #if DEBUG
-                DebugLog.d("[TTS] finished queueEmpty=true sentenceQueueRemaining=0")
-                #endif
                 #if os(iOS)
                 AudioSessionQueue.deactivate()
                 #endif

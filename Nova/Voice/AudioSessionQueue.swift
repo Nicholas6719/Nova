@@ -36,14 +36,7 @@ enum AudioSessionQueue {
                     let session = AVAudioSession.sharedInstance()
                     try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
                     try session.setActive(true)
-                    #if DEBUG
-                    DebugLog.d("[TTS] prepareForSpeak category=playAndRecord mode=voiceChat active=true")
-                    #endif
-                } catch {
-                    #if DEBUG
-                    DebugLog.d("[TTS] prepareForSpeak failed: \(error.localizedDescription)")
-                    #endif
-                }
+                } catch { }
                 cont.resume()
             }
         }
@@ -94,14 +87,7 @@ enum AudioSessionQueue {
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
                 try session.setActive(false, options: .notifyOthersOnDeactivation)
-                #if DEBUG
-                DebugLog.d("[TTS] prepareForBargeIn category=playAndRecord mode=voiceChat active=false")
-                #endif
-            } catch {
-                #if DEBUG
-                DebugLog.d("[TTS] prepareForBargeIn failed: \(error.localizedDescription)")
-                #endif
-            }
+            } catch { }
         }
     }
     #endif
