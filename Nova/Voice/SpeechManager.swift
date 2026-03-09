@@ -156,6 +156,8 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
     private let selectedVoice: AVSpeechSynthesisVoice?
     /// Pending sentences to speak sequentially after the current utterance finishes.
     private var sentenceQueue: [String] = []
+    /// Cached from delegate; avoids reading synthesizer.isSpeaking from MainActor (causes QoS priority inversion).
+    private var _synthesizerSpeaking: Bool = false
     /// Recent stop timestamps for barge-in recovery (rebuild after 3 stops in 5s).
     private var stopTimestamps: [CFAbsoluteTime] = []
 
@@ -237,6 +239,7 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
         guard !list.isEmpty else { return }
 
         sentenceQueue = []
+        _synthesizerSpeaking = true
         onSpeakingStateChanged?(true)
         if list.count == 1 {
             speakOne(list[0])
@@ -249,6 +252,7 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
 
     func stop() {
         sentenceQueue = []
+        _synthesizerSpeaking = false
         synthesizer.stopSpeaking(at: .immediate)
         stopTimestamps.append(CFAbsoluteTimeGetCurrent())
         #if os(iOS)
@@ -258,11 +262,11 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
     }
 
     var isSpeaking: Bool {
-        synthesizer.isSpeaking
+        _synthesizerSpeaking
     }
 
     var hasPendingSpeech: Bool {
-        synthesizer.isSpeaking || !sentenceQueue.isEmpty
+        _synthesizerSpeaking || !sentenceQueue.isEmpty
     }
 }
 
@@ -272,8 +276,10 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
 extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         Task { @MainActor [weak self] in
-            self?.onSpeakingStateChanged?(true)
-            self?.onSpeechStarted?()
+            guard let self else { return }
+            self._synthesizerSpeaking = true
+            self.onSpeakingStateChanged?(true)
+            self.onSpeechStarted?()
         }
     }
 
@@ -285,6 +291,7 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
             if let sentence = next {
                 self.speakOne(sentence)
             } else {
+                self._synthesizerSpeaking = false
                 #if os(iOS)
                 AudioSessionQueue.deactivate()
                 #endif
@@ -300,6 +307,7 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
         #endif
         Task { @MainActor [weak self] in
             guard let self else { return }
+            self._synthesizerSpeaking = false
             self.onSpeakingStateChanged?(false)
         }
     }
