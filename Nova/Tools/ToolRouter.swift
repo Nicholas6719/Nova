@@ -47,15 +47,6 @@ struct ToolRouter: Sendable {
             }
         }
 
-        // --- Quit / Close App (macOS) ---
-        if rest.hasPrefix("quit ") || rest.hasPrefix("close ") {
-            let after = rest.hasPrefix("quit ") ? String(rest.dropFirst(5)) : String(rest.dropFirst(6))
-            let target = after.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !target.isEmpty {
-                return .quitApp(name: target)
-            }
-        }
-
         // --- TOOL 2: Battery ---
         let chargingPhrases = ["am i charging", "is my battery charging", "are we charging"]
         let isChargingIntent = chargingPhrases.contains { rest == $0 || rest.hasPrefix($0 + " ") }

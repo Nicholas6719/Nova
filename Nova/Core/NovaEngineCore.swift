@@ -117,8 +117,8 @@ struct NovaEngineCore: Sendable {
         switch toolIntent {
         case .openApp(let name):
             return (await PlatformTools.executeOpenApp(name: name)).spokenResponse
-        case .quitApp(let name):
-            return PlatformTools.executeQuitApp(name: name).spokenResponse
+        case .quitApp:
+            return "Closing apps by name isn't available yet."
         case .batteryStatus(let chargingIntent):
             return (await PlatformTools.executeBatteryStatus(chargingIntent: chargingIntent)).spokenResponse
         case .webSearch(let query):
