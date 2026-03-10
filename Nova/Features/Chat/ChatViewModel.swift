@@ -6,9 +6,10 @@ import AVFoundation
 /// UI status for the header indicator.
 enum ChatStatus: String {
     case idle = "Idle"
-    case listening = "Listening…"
-    case processing = "Processing…"
-    case awake = "Awake"
+    case standby = "Standby"
+    case listening = "Listening"
+    case processing = "Processing"
+    case speaking = "Speaking"
 }
 
 @MainActor
@@ -23,9 +24,12 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var isProcessing: Bool = false
 
     var status: ChatStatus {
-        if isRecording { return .listening }
+        if speechManager.isSpeaking { return .speaking }
         if isProcessing { return .processing }
-        if isWakeTriggered { return .awake }
+        if isRecording {
+            return recordingMode == .wake ? .standby : .listening
+        }
+        if isWakeTriggered { return .listening }
         return .idle
     }
 
@@ -317,6 +321,13 @@ final class ChatViewModel: ObservableObject {
         processUserInput(text: finalText)
     }
 
+    // MARK: - Response text normalization
+
+    /// Fix common mojibake from UTF-8 misinterpreted as Latin-1 (e.g. "Iâ€™m" -> "I'm").
+    private func normalizeMojibake(_ text: String) -> String {
+        text.replacingOccurrences(of: "\u{00E2}\u{20AC}\u{2122}", with: "\u{2019}")
+    }
+
     // MARK: - Wake phrase stripping
 
     /// Strip "hey nova" or "nova" prefix (word boundary); return trimmed remainder.
@@ -477,7 +488,7 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func speakWithAutoListen(_ text: String, source: String) {
         allowAutoListen = true
-        speechManager.speak(text)
+        speechManager.speak(normalizeMojibake(text))
     }
 
     /// Extract the first complete sentence from speechBuffer and speak it.
@@ -538,7 +549,7 @@ final class ChatViewModel: ObservableObject {
                 speakRemainingBuffer()
             }
         }
-        scheduleAutoListenStart(source: "onSpeechFinished")
+        // Schedule only from handleSpeechFinished (engine callback) to avoid duplicate restart
     }
 
     @MainActor
@@ -559,7 +570,7 @@ final class ChatViewModel: ObservableObject {
         streamingTickerTask?.cancel()
         streamingTickerTask = nil
 
-        let fullText = streamingFinalText ?? streamingFullText
+        let fullText = normalizeMojibake(streamingFinalText ?? streamingFullText)
 
         if let pid = streamingMessageId,
            let idx = messages.lastIndex(where: { $0.id == pid }) {
@@ -603,9 +614,10 @@ final class ChatViewModel: ObservableObject {
         } else {
             // Non-streaming (local) OR invalidated streaming (barge-in before placeholder).
             guard activeStreamToken == token else { return }
-            messages.append(Message(role: .assistant, content: fullText))
-            DebugLog.d("[Chat] append assistant: \(fullText.prefix(60))\(fullText.count > 60 ? "…" : "")")
-            speakWithAutoListen(fullText, source: "local")
+            let normalized = normalizeMojibake(fullText)
+            messages.append(Message(role: .assistant, content: normalized))
+            DebugLog.d("[Chat] append assistant: \(normalized.prefix(60))\(normalized.count > 60 ? "…" : "")")
+            speakWithAutoListen(normalized, source: "local")
             isProcessing = false
         }
     }
@@ -807,13 +819,13 @@ final class ChatViewModel: ObservableObject {
         scheduleAutoListenStart(source: "handleSpeechFinished")
     }
 
-    /// Schedules auto-listen start after 300ms. Rechecks all conditions; aborts if TTS still active.
+    /// Schedules auto-listen start after stabilization delay. Single path from engine callback.
     @MainActor
     private func scheduleAutoListenStart(source: String) {
         guard allowAutoListen else { return }
         scheduledAutoListenTask?.cancel()
         scheduledAutoListenTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await Task.sleep(nanoseconds: 250_000_000)
             guard let self else { return }
             guard !Task.isCancelled else { return }
             self.scheduledAutoListenTask = nil
