@@ -27,6 +27,9 @@
 		6FCF573E2F45302900109380 /* FeatureFlags.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF573F2F45302900109380 /* FeatureFlags.swift */; };
 		6FCF57402F45302900109380 /* NovaLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57412F45302900109380 /* NovaLogger.swift */; };
 		6FCF57442F45302900109380 /* AudioSessionQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57452F45302900109380 /* AudioSessionQueue.swift */; };
+		6FCF5A012F45302900109380 /* NovaToolResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF5A022F45302900109380 /* NovaToolResult.swift */; };
+		6FCF5A032F45302900109380 /* ToolRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF5A042F45302900109380 /* ToolRouter.swift */; };
+		6FCF5A052F45302900109380 /* PlatformTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF5A062F45302900109380 /* PlatformTools.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -70,6 +73,9 @@
 		6FCF573F2F45302900109380 /* FeatureFlags.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureFlags.swift; sourceTree = "<group>"; };
 		6FCF57412F45302900109380 /* NovaLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaLogger.swift; sourceTree = "<group>"; };
 		6FCF57452F45302900109380 /* AudioSessionQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionQueue.swift; sourceTree = "<group>"; };
+		6FCF5A022F45302900109380 /* NovaToolResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaToolResult.swift; sourceTree = "<group>"; };
+		6FCF5A042F45302900109380 /* ToolRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolRouter.swift; sourceTree = "<group>"; };
+		6FCF5A062F45302900109380 /* PlatformTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformTools.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -149,6 +155,16 @@
 			path = Features;
 			sourceTree = "<group>";
 		};
+		6FCF5A072F45302900109380 /* Tools */ = {
+			isa = PBXGroup;
+			children = (
+				6FCF5A022F45302900109380 /* NovaToolResult.swift */,
+				6FCF5A042F45302900109380 /* ToolRouter.swift */,
+				6FCF5A062F45302900109380 /* PlatformTools.swift */,
+			);
+			path = Tools;
+			sourceTree = "<group>";
+		};
 		6FCF571B2F45302900109380 /* Voice */ = {
 			isa = PBXGroup;
 			children = (
@@ -165,6 +181,7 @@
 			children = (
 				6FCF57132F45302900109380 /* Core */,
 				6FCF57172F45302900109380 /* Features */,
+				6FCF5A072F45302900109380 /* Tools */,
 				6FCF571B2F45302900109380 /* Voice */,
 				6FCF571C2F45302900109380 /* Assets.xcassets */,
 				6FCF571D2F45302900109380 /* ContentView.swift */,
@@ -342,6 +359,9 @@
 				6FCF57402F45302900109380 /* NovaLogger.swift in Sources */,
 				6FCF572A2F45302900109380 /* ContentView.swift in Sources */,
 				6FCF572B2F45302900109380 /* NovaApp.swift in Sources */,
+				6FCF5A012F45302900109380 /* NovaToolResult.swift in Sources */,
+				6FCF5A032F45302900109380 /* ToolRouter.swift in Sources */,
+				6FCF5A052F45302900109380 /* PlatformTools.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

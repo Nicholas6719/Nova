@@ -112,6 +112,21 @@ struct NovaEngineCore: Sendable {
             }
         }
 
+        // MARK: Tool routing (before OpenAI)
+        let toolIntent = ToolRouter.match(from: trimmedInput)
+        switch toolIntent {
+        case .openApp(let name):
+            return (await PlatformTools.executeOpenApp(name: name)).spokenResponse
+        case .quitApp(let name):
+            return PlatformTools.executeQuitApp(name: name).spokenResponse
+        case .batteryStatus(let chargingIntent):
+            return (await PlatformTools.executeBatteryStatus(chargingIntent: chargingIntent)).spokenResponse
+        case .webSearch(let query):
+            return (await PlatformTools.executeWebSearch(query: query)).spokenResponse
+        case .none:
+            break
+        }
+
         // MARK: OpenAI fallback
         guard let cfg = llmConfig else {
             return "I'm missing my API key setup."
