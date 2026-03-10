@@ -1,11 +1,14 @@
 import Foundation
 import Combine
+import Speech
+import AVFoundation
 
 /// UI status for the header indicator.
 enum ChatStatus: String {
     case idle = "Idle"
     case listening = "Listening…"
     case processing = "Processing…"
+    case awake = "Awake"
 }
 
 @MainActor
@@ -22,6 +25,7 @@ final class ChatViewModel: ObservableObject {
     var status: ChatStatus {
         if isRecording { return .listening }
         if isProcessing { return .processing }
+        if isWakeTriggered { return .awake }
         return .idle
     }
 
@@ -80,7 +84,18 @@ final class ChatViewModel: ObservableObject {
     /// Gate: auto-listen only after Nova has spoken (not on launch).
     private var allowAutoListen = false
 
-    private enum RecordingMode { case manual, auto }
+    // MARK: - Wake word (Slice A: detection only, no command capture)
+
+    private var wakeWordEnabled = true
+    @Published private(set) var isWakeTriggered: Bool = false
+    @Published private(set) var wakeTriggerPhrase: String?
+    private enum PendingTransition { case none; case toWakeTriggered(phrase: String); case toReturnToWake }
+    private var pendingTransition: PendingTransition = .none
+    private let hardTimeoutWake: TimeInterval = 300
+
+    private var isWakeListening: Bool { recordingMode == .wake }
+
+    private enum RecordingMode { case manual, auto, wake, command }
     private var recordingMode: RecordingMode = .manual
     private var recordingSessionId: UUID = UUID()
 
@@ -107,6 +122,20 @@ final class ChatViewModel: ObservableObject {
             .compactMap { $0 }
             .sink { [weak self] message in
                 self?.errorMessage = message
+            }
+            .store(in: &cancellables)
+
+        speechRecognizer.$authorizationStatus
+            .dropFirst()
+            .sink { [weak self] status in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if status == .authorized {
+                        self.errorMessage = nil
+                        DebugLog.d("[Wake] cleared stale permission error")
+                        self.startWakeListeningIfIdle()
+                    }
+                }
             }
             .store(in: &cancellables)
 
@@ -142,6 +171,10 @@ final class ChatViewModel: ObservableObject {
         speechRecognizer.onPartialTranscript = { [weak self] text in
             Task { @MainActor [weak self] in
                 guard let self, self.isRecording else { return }
+                if self.recordingMode == .wake {
+                    self.handleWakeTranscript(text)
+                    return
+                }
                 self.lastTranscriptUpdate = Date()
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let now = Date()
@@ -155,6 +188,7 @@ final class ChatViewModel: ObservableObject {
         speechRecognizer.onFinalTranscript = { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.isRecording else { return }
+                if self.recordingMode == .wake { return }
                 self.lastTranscriptUpdate = Date()
                 self.stopListeningAndCommitNow(reason: "final", sessionId: self.recordingSessionId)
             }
@@ -173,6 +207,37 @@ final class ChatViewModel: ObservableObject {
         speechRecognizer.requestPermissions()
     }
 
+    /// Start wake only when auth and mic ready, app idle. Called from auth sink or after manual response.
+    func startWakeListeningIfIdle() {
+        guard wakeWordEnabled else { return }
+        guard speechRecognizer.authorizationStatus == .authorized else {
+            DebugLog.d("[Wake] auth not ready")
+            return
+        }
+        #if os(iOS)
+        let micGranted: Bool = if #available(iOS 17.0, *) {
+            AVAudioApplication.shared.recordPermission == .granted
+        } else {
+            AVAudioSession.sharedInstance().recordPermission == .granted
+        }
+        guard micGranted else {
+            DebugLog.d("[Wake] auth not ready")
+            return
+        }
+        #endif
+        if errorMessage != nil {
+            errorMessage = nil
+            DebugLog.d("[Wake] cleared stale permission error")
+        }
+        guard !isRecording else { return }
+        guard recordingMode != .wake else { return }
+        guard case .none = pendingTransition else { return }
+        guard !isProcessing else { return }
+        guard !speechManager.isSpeaking else { return }
+        DebugLog.d("[Wake] auth ready -> start wake")
+        startWakeListening()
+    }
+
     // MARK: - Microphone
 
     func toggleRecording() {
@@ -186,6 +251,8 @@ final class ChatViewModel: ObservableObject {
             return
         }
         if !isMicEnabled { return }
+        isWakeTriggered = false
+        wakeTriggerPhrase = nil
         if isRecording {
             stopListeningAndCommitNow(reason: "manual tap", sessionId: recordingSessionId)
         } else {
@@ -200,10 +267,40 @@ final class ChatViewModel: ObservableObject {
             speechRecognizer.clearTranscript()
             return
         }
-        let finalText = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        let transition = pendingTransition
+        pendingTransition = .none
         liveTranscript = ""
         speechRecognizer.clearTranscript()
+
+        switch transition {
+        case .toWakeTriggered(let phrase):
+            isWakeTriggered = true
+            wakeTriggerPhrase = phrase
+            DebugLog.d("[Wake] stopped")
+            endOfSpeechTask?.cancel()
+            endOfSpeechTask = nil
+            autoListenTask?.cancel()
+            autoListenTask = nil
+            vadHeardSpeech = false
+            firstSpeechAt = nil
+            lastSpeechOrTranscriptAt = nil
+            vadDidTriggerStop = false
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                guard let self else { return }
+                DebugLog.d("[Wake] command mode delayed start")
+                self.beginRecordingSession(mode: .command)
+            }
+            return
+        case .toReturnToWake:
+            returnToWakeListeningIfIdle()
+            return
+        case .none:
+            break
+        }
+
+        let finalText = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !finalText.isEmpty else {
             errorMessage = "No speech recognized. Try again."
@@ -218,6 +315,26 @@ final class ChatViewModel: ObservableObject {
         lastCommittedTime = now
 
         processUserInput(text: finalText)
+    }
+
+    // MARK: - Wake phrase stripping
+
+    /// Strip "hey nova" or "nova" prefix (word boundary); return trimmed remainder.
+    private func extractWakeRemainder(from text: String) -> String {
+        var s = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let wordBoundary: (Character) -> Bool = { $0.isWhitespace || $0.isPunctuation }
+        if s.hasPrefix("hey nova") {
+            let rest = String(s.dropFirst("hey nova".count))
+            if rest.isEmpty || rest.first.map(wordBoundary) ?? true {
+                s = rest
+            }
+        } else if s.hasPrefix("nova") {
+            let rest = String(s.dropFirst("nova".count))
+            if rest.isEmpty || rest.first.map(wordBoundary) ?? true {
+                s = rest
+            }
+        }
+        return s.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",.")))
     }
 
     // MARK: - Process user input
@@ -555,6 +672,7 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func handleAudioEnergy(_ rms: Float) {
         guard isRecording else { return }
+        guard recordingMode != .wake else { return }
         guard !vadDidTriggerStop else { return }
         let sessionId = recordingSessionId
         let now = Date()
@@ -594,8 +712,32 @@ final class ChatViewModel: ObservableObject {
         speechRecognizer.clearTranscript()
         skipNextRecordingStopped = true
 
+        if recordingMode == .command {
+            let remainder = extractWakeRemainder(from: text)
+            if remainder.isEmpty {
+                DebugLog.d("[Wake] ignored bare wake phrase command")
+                if reason == "hard-timeout" {
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                        self?.returnToWakeListeningIfIdle()
+                    }
+                } else {
+                    beginRecordingSession(mode: .command)
+                }
+                return
+            }
+            DebugLog.d("[Wake] extracted remainder=\"\(remainder.prefix(80))\(remainder.count > 80 ? "…" : "")\"")
+            processUserInput(text: remainder)
+            return
+        }
+
         guard !text.isEmpty else {
-            if reason == "vad-silence" {
+            if recordingMode == .auto && wakeWordEnabled {
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    self?.returnToWakeListeningIfIdle()
+                }
+            } else if reason == "vad-silence" {
                 errorMessage = "No speech recognized. Try again."
             }
             return
@@ -614,6 +756,7 @@ final class ChatViewModel: ObservableObject {
                 guard !Task.isCancelled else { return }
                 guard sessionId == self.recordingSessionId else { return }
                 guard self.isRecording else { return }
+                guard self.recordingMode != .wake else { continue }
                 let transcript = self.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !transcript.isEmpty else { continue }
 
@@ -630,7 +773,11 @@ final class ChatViewModel: ObservableObject {
 
     @MainActor
     private func startHardTimeout(sessionId: UUID, mode: RecordingMode) {
-        let timeout: TimeInterval = mode == .manual ? hardTimeoutManual : hardTimeoutAuto
+        let timeout: TimeInterval = switch mode {
+        case .manual: hardTimeoutManual
+        case .wake: hardTimeoutWake
+        default: hardTimeoutAuto
+        }
         autoListenTask?.cancel()
         autoListenTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
@@ -638,6 +785,9 @@ final class ChatViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
             guard sessionId == self.recordingSessionId else { return }
             if self.isRecording {
+                if self.recordingMode == .wake {
+                    self.pendingTransition = .toReturnToWake
+                }
                 self.stopListeningAndCommitNow(reason: "hard-timeout", sessionId: sessionId)
             }
             self.autoListenTask = nil
@@ -675,5 +825,44 @@ final class ChatViewModel: ObservableObject {
             self.allowAutoListen = false
             self.beginRecordingSession(mode: .auto)
         }
+    }
+
+    // MARK: - Wake word helpers (Slice A)
+
+    @MainActor
+    private func startWakeListening() {
+        guard !isRecording else { return }
+        guard recordingMode != .wake else { return }
+        guard case .none = pendingTransition else { return }
+        isWakeTriggered = false
+        wakeTriggerPhrase = nil
+        beginRecordingSession(mode: .wake)
+    }
+
+    @MainActor
+    private func handleWakeTranscript(_ text: String) {
+        let lower = text.lowercased()
+        let trigger: String? = lower.contains("hey nova") ? "hey nova" : (lower.contains("nova") ? "nova" : nil)
+        guard let trigger else { return }
+        DebugLog.d("[Wake] detected trigger=\(trigger)")
+        pendingTransition = .toWakeTriggered(phrase: trigger)
+        endOfSpeechTask?.cancel()
+        endOfSpeechTask = nil
+        autoListenTask?.cancel()
+        autoListenTask = nil
+        speechRecognizer.stopListening()
+    }
+
+    @MainActor
+    private func returnToWakeListeningIfIdle() {
+        guard !isRecording else { return }
+        guard !isProcessing else { return }
+        guard !speechManager.isSpeaking else { return }
+        guard !speechManager.hasPendingSpeech else { return }
+        let hasUnspoken = !speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard !hasUnspoken else { return }
+        guard case .none = pendingTransition else { return }
+        DebugLog.d("[Wake] return to wake")
+        startWakeListening()
     }
 }
