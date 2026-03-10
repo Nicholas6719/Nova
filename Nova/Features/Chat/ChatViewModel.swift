@@ -93,7 +93,7 @@ final class ChatViewModel: ObservableObject {
     private var wakeWordEnabled = true
     @Published private(set) var isWakeTriggered: Bool = false
     @Published private(set) var wakeTriggerPhrase: String?
-    private enum PendingTransition { case none; case toWakeTriggered(phrase: String); case toReturnToWake }
+    private enum PendingTransition: Equatable { case none; case toWakeTriggered(phrase: String); case toReturnToWake; case toFreshCommandAfterBareWake }
     private var pendingTransition: PendingTransition = .none
     private let hardTimeoutWake: TimeInterval = 300
 
@@ -269,6 +269,15 @@ final class ChatViewModel: ObservableObject {
             skipNextRecordingStopped = false
             liveTranscript = ""
             speechRecognizer.clearTranscript()
+            if pendingTransition == .toFreshCommandAfterBareWake {
+                pendingTransition = .none
+                vadHeardSpeech = false
+                firstSpeechAt = nil
+                lastSpeechOrTranscriptAt = nil
+                vadDidTriggerStop = false
+                DebugLog.d("[Wake] fresh command session started after bare wake")
+                beginRecordingSession(mode: .command)
+            }
             return
         }
 
@@ -278,24 +287,9 @@ final class ChatViewModel: ObservableObject {
         speechRecognizer.clearTranscript()
 
         switch transition {
-        case .toWakeTriggered(let phrase):
-            isWakeTriggered = true
-            wakeTriggerPhrase = phrase
-            DebugLog.d("[Wake] stopped")
-            endOfSpeechTask?.cancel()
-            endOfSpeechTask = nil
-            autoListenTask?.cancel()
-            autoListenTask = nil
-            vadHeardSpeech = false
-            firstSpeechAt = nil
-            lastSpeechOrTranscriptAt = nil
-            vadDidTriggerStop = false
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 350_000_000)
-                guard let self else { return }
-                DebugLog.d("[Wake] command mode delayed start")
-                self.beginRecordingSession(mode: .command)
-            }
+        case .toWakeTriggered:
+            return
+        case .toFreshCommandAfterBareWake:
             return
         case .toReturnToWake:
             returnToWakeListeningIfIdle()
@@ -330,19 +324,20 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Wake phrase stripping
 
-    /// Strip "hey nova" or "nova" prefix (word boundary); return trimmed remainder.
+    /// Strip first "hey nova" or "nova" occurrence (word boundary); return trimmed remainder.
     private func extractWakeRemainder(from text: String) -> String {
-        var s = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let s = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let wordBoundary: (Character) -> Bool = { $0.isWhitespace || $0.isPunctuation }
-        if s.hasPrefix("hey nova") {
-            let rest = String(s.dropFirst("hey nova".count))
+        if let range = s.range(of: "hey nova") {
+            let rest = String(s[range.upperBound...])
             if rest.isEmpty || rest.first.map(wordBoundary) ?? true {
-                s = rest
+                return rest.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",.")))
             }
-        } else if s.hasPrefix("nova") {
-            let rest = String(s.dropFirst("nova".count))
+        }
+        if let range = s.range(of: "nova") {
+            let rest = String(s[range.upperBound...])
             if rest.isEmpty || rest.first.map(wordBoundary) ?? true {
-                s = rest
+                return rest.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",.")))
             }
         }
         return s.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",.")))
@@ -727,14 +722,14 @@ final class ChatViewModel: ObservableObject {
         if recordingMode == .command {
             let remainder = extractWakeRemainder(from: text)
             if remainder.isEmpty {
-                DebugLog.d("[Wake] ignored bare wake phrase command")
                 if reason == "hard-timeout" {
                     Task { @MainActor [weak self] in
                         try? await Task.sleep(nanoseconds: 100_000_000)
                         self?.returnToWakeListeningIfIdle()
                     }
                 } else {
-                    beginRecordingSession(mode: .command)
+                    DebugLog.d("[Wake] bare wake phrase -> restart fresh command session")
+                    pendingTransition = .toFreshCommandAfterBareWake
                 }
                 return
             }
@@ -857,12 +852,17 @@ final class ChatViewModel: ObservableObject {
         let trigger: String? = lower.contains("hey nova") ? "hey nova" : (lower.contains("nova") ? "nova" : nil)
         guard let trigger else { return }
         DebugLog.d("[Wake] detected trigger=\(trigger)")
-        pendingTransition = .toWakeTriggered(phrase: trigger)
-        endOfSpeechTask?.cancel()
-        endOfSpeechTask = nil
+        DebugLog.d("[Wake] stay in same session for command capture")
+        isWakeTriggered = true
+        wakeTriggerPhrase = trigger
+        recordingMode = .command
+        lastTranscriptUpdate = Date()
+        vadHeardSpeech = true
+        firstSpeechAt = firstSpeechAt ?? Date()
+        lastSpeechOrTranscriptAt = Date()
         autoListenTask?.cancel()
         autoListenTask = nil
-        speechRecognizer.stopListening()
+        startHardTimeout(sessionId: recordingSessionId, mode: .command)
     }
 
     @MainActor
