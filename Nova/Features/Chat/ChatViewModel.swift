@@ -405,21 +405,18 @@ final class ChatViewModel: ObservableObject {
         let engineRef = engine
         Task.detached(priority: .userInitiated) { [cfg, messageSnapshot, text, onStreamStart, onStreamDelta, token] in
             do {
-                let resp = try await Task.detached(priority: .userInitiated) {
-                    try await engineRef.generateResponse(
-                        messages: messageSnapshot,
-                        newInput: text,
-                        llmConfig: cfg,
-                        onStreamStart: onStreamStart,
-                        onStreamDelta: onStreamDelta
-                    )
-                }.value
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    self.onEngineComplete(fullText: resp, token: token)
+                let resp = try await engineRef.generateResponse(
+                    messages: messageSnapshot,
+                    newInput: text,
+                    llmConfig: cfg,
+                    onStreamStart: onStreamStart,
+                    onStreamDelta: onStreamDelta
+                )
+                Task { @MainActor [weak self] in
+                    self?.onEngineComplete(fullText: resp, token: token)
                 }
             } catch {
-                await MainActor.run { [weak self] in
+                Task { @MainActor [weak self] in
                     guard let self else { return }
                     DebugLog.d("[Chat] engine error: \(error)")
                     self.onEngineComplete(fullText: "Sorry — I couldn't reach my online brain. Please try again.", token: token)
