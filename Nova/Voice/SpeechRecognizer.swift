@@ -275,7 +275,7 @@ final class SpeechRecognizer: ObservableObject {
                         Task { @MainActor [weak self] in
                             guard let self else { return }
                             self.isRecording = true
-                            print("[SpeechRecognizer] speech start")
+                            DebugLog.d("[SpeechRecognizer] speech start")
                         }
                     },
                     onStartFailed: { [weak self] message in
@@ -310,7 +310,7 @@ final class SpeechRecognizer: ObservableObject {
             await stateGuardRef.didFinishStop()
             await MainActor.run {
                 self.isRecording = false
-                print("[SpeechRecognizer] speech stop")
+                DebugLog.d("[SpeechRecognizer] speech stop")
                 self.onRecordingDidStop?(finalText)
             }
         }
