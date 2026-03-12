@@ -20,20 +20,14 @@ struct NovaEngineCore: Sendable {
             return "I didn't catch that. Say something and I'll respond."
         }
 
-        // MARK: Local math (normalize → binary → chain → mathy guard)
-        let mathNormalized = Self.normalizeMathOperators(input)
-
-        if let mathReply = Self.tryEvaluateSimpleBinaryMath(mathNormalized) {
+        // MARK: Local math
+        if let mathReply = MathRouter.localMathResponse(for: input) {
             return mathReply
-        }
-
-        if let chainReply = Self.tryEvaluateChainedMath(mathNormalized) {
-            return chainReply
         }
 
         // If input looks like a math expression we can't handle, skip intent detection → OpenAI
         localChecks: do {
-            if Self.looksLikeMathExpression(mathNormalized) {
+            if MathRouter.looksLikeMath(input) {
                 break localChecks
             }
 
@@ -240,133 +234,6 @@ struct NovaEngineCore: Sendable {
         return resp
     }
 
-    // MARK: - Math Helpers (static, pure — no self, no MainActor)
-
-    /// Normalize Unicode math symbols from speech recognition (×→*, ÷→/, •→*, ·→*).
-    private static func normalizeMathOperators(_ s: String) -> String {
-        s.replacingOccurrences(of: "\u{00D7}", with: "*")
-         .replacingOccurrences(of: "\u{00F7}", with: "/")
-         .replacingOccurrences(of: "\u{2022}", with: "*")
-         .replacingOccurrences(of: "\u{00B7}", with: "*")
-    }
-
-    /// Evaluate a single binary operation: "8-2", "300*2", "12/3".
-    /// Returns nil for multi-op expressions, non-numeric input, or divide-by-zero.
-    private static func tryEvaluateSimpleBinaryMath(_ normalized: String) -> String? {
-        let s = normalized.replacingOccurrences(of: " ", with: "")
-        guard s.rangeOfCharacter(from: .decimalDigits) != nil else { return nil }
-
-        let ops: [Character] = ["+", "-", "*", "/"]
-        var found: (Character, Int)? = nil
-        for (i, ch) in s.enumerated() {
-            if ops.contains(ch) {
-                if i == 0 { return nil }
-                if found != nil { return nil }
-                found = (ch, i)
-            }
-        }
-        guard let (op, idx) = found else { return nil }
-
-        let lhs = String(s.prefix(idx))
-        let rhs = String(s.suffix(s.count - idx - 1))
-        guard let a = Double(lhs), let b = Double(rhs) else { return nil }
-
-        let result: Double
-        switch op {
-        case "+": result = a + b
-        case "-": result = a - b
-        case "*": result = a * b
-        case "/":
-            if b == 0 { return nil }
-            result = a / b
-        default: return nil
-        }
-
-        func fmt(_ x: Double) -> String {
-            x.rounded() == x && abs(x) < 1e15 ? String(Int(x)) : String(x)
-        }
-
-        let spokenOp: String
-        switch op {
-        case "+": spokenOp = "plus"
-        case "-": spokenOp = "minus"
-        case "*": spokenOp = "times"
-        case "/": spokenOp = "divided by"
-        default: spokenOp = "?"
-        }
-        return "\(fmt(a)) \(spokenOp) \(fmt(b)) equals \(fmt(result))."
-    }
-
-    /// Evaluate chained +/− expressions: "300-200+2", "-5+2", "calculate 10+5-3".
-    /// Strips common prefixes. Rejects input containing *, /, parens, or letters.
-    private static func tryEvaluateChainedMath(_ raw: String) -> String? {
-        var s = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-
-        for prefix in ["nova ", "what is ", "what's ", "whats ", "calculate ", "solve "] {
-            if s.hasPrefix(prefix) {
-                s = String(s.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                break
-            }
-        }
-
-        s = s.replacingOccurrences(of: " ", with: "")
-
-        for ch in s {
-            guard ch.isNumber || ch == "." || ch == "+" || ch == "-" else { return nil }
-        }
-        guard !s.isEmpty else { return nil }
-
-        let inner = s.first == "-" ? String(s.dropFirst()) : s
-        guard inner.contains("+") || inner.contains("-") else { return nil }
-
-        var result = 0.0
-        var currentNum = ""
-        var pendingOp: Character = "+"
-        var isFirst = true
-
-        for ch in s {
-            if (ch == "+" || ch == "-") && !currentNum.isEmpty {
-                guard let val = Double(currentNum) else { return nil }
-                result = pendingOp == "+" ? result + val : result - val
-                currentNum = ""
-                pendingOp = ch
-                isFirst = false
-            } else if ch == "-" && currentNum.isEmpty && isFirst {
-                currentNum.append(ch)
-            } else if ch.isNumber || ch == "." {
-                currentNum.append(ch)
-            } else {
-                return nil
-            }
-        }
-
-        guard !currentNum.isEmpty, let val = Double(currentNum) else { return nil }
-        result = pendingOp == "+" ? result + val : result - val
-
-        let formatted: String
-        if result.truncatingRemainder(dividingBy: 1) == 0 && abs(result) < 1e15 {
-            formatted = String(Int(result))
-        } else {
-            formatted = String(result)
-        }
-        return "That equals \(formatted)."
-    }
-
-    /// True if input (after stripping spaces) contains digits + math operators but NO letters.
-    /// Used to skip compound/intent detection for expressions we can't evaluate locally.
-    private static func looksLikeMathExpression(_ normalized: String) -> Bool {
-        let s = normalized.replacingOccurrences(of: " ", with: "")
-        var hasDigit = false
-        var hasOp = false
-        let mathChars: Set<Character> = ["+", "-", "*", "/", "(", ")"]
-        for ch in s {
-            if ch.isNumber || ch == "." { hasDigit = true }
-            else if mathChars.contains(ch) { hasOp = true }
-            else if ch.isLetter { return false }
-        }
-        return hasDigit && hasOp
-    }
-
     // MARK: - Helpers
 
     private nonisolated func getDate(for keyword: String, now: Date) -> Date? {
@@ -485,7 +352,7 @@ struct NovaEngineCore: Sendable {
         if input.contains("what was your last response") || input.contains("what did you last say") || input.contains("what did you say") { return true }
         if input.contains("remind me what we discussed") || input.contains("what we discussed") || (input.contains("remind me") && input.contains("discussed")) { return true }
         if input.contains("set a reminder") || (input.contains("remind me") && !input.contains("discussed")) { return true }
-        if evaluateSimpleMath(input: trimmedInput) != nil { return true }
+        if MathRouter.localMathResponse(for: trimmedInput) != nil { return true }
         return false
     }
 
@@ -532,7 +399,7 @@ struct NovaEngineCore: Sendable {
         if input.contains("set a reminder") || (input.contains("remind me") && !input.contains("discussed")) {
             return "I don't set timed reminders yet, but I can summarize what we've discussed if you'd like."
         }
-        if let mathResult = evaluateSimpleMath(input: trimmedInput) {
+        if let mathResult = MathRouter.localMathResponse(for: trimmedInput) {
             return mathResult
         }
         return nil
@@ -567,74 +434,6 @@ struct NovaEngineCore: Sendable {
             return greeting
         }
         return "Hello again. " + greeting
-    }
-
-    /// Instance math evaluator used by compound greeting+math detection (hasLocalIntent/generateLocalIntentResponse).
-    /// Strips common prefixes ("what's", "calculate", etc.), parses single binary op.
-    private nonisolated func evaluateSimpleMath(input: String) -> String? {
-        let candidate = mathCandidate(from: input)
-        guard let candidate, !candidate.isEmpty else { return nil }
-
-        let ops: [(Character, String, (Double, Double) -> Double)] = [
-            ("+", "plus", +),
-            ("-", "minus", { $0 - $1 }),
-            ("*", "times", *),
-            ("/", "divided by", { $1 != 0 ? $0 / $1 : .nan }),
-        ]
-        for (sym, word, fn) in ops {
-            guard let idx = candidate.firstIndex(of: sym) else { continue }
-            let lhs = String(candidate[..<idx]).trimmingCharacters(in: .whitespaces)
-            let rhs = String(candidate[candidate.index(after: idx)...]).trimmingCharacters(in: .whitespaces)
-            guard let a = Double(lhs), let b = Double(rhs) else { continue }
-            if sym == "/" && b == 0 { return nil }
-            let res = fn(a, b)
-            if res.isNaN || res.isInfinite { return nil }
-            let aStr = a == a.rounded() && abs(a) < 1e7 ? "\(Int(a))" : "\(a)"
-            let bStr = b == b.rounded() && abs(b) < 1e7 ? "\(Int(b))" : "\(b)"
-            let rStr = res == res.rounded() && abs(res) < 1e7 ? "\(Int(res))" : String(format: "%.2g", res)
-            return "\(aStr) \(word) \(bStr) equals \(rStr)."
-        }
-        return nil
-    }
-
-    private nonisolated func mathCandidate(from input: String) -> String? {
-        var s = input
-            .replacingOccurrences(of: "\u{2019}", with: "'")
-            .replacingOccurrences(of: "\u{2018}", with: "'")
-            .lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        for prefix in ["what's ", "whats ", "what is ", "calculate ", "solve ", "nova "] {
-            if s.hasPrefix(prefix) {
-                s = String(s.dropFirst(prefix.count))
-                break
-            }
-        }
-
-        var out = ""
-        var lastSpace = false
-        for c in s {
-            let v = c.unicodeScalars.first.map { $0.value } ?? 0
-            if (v >= 48 && v <= 57) || c == "." || c == "+" || c == "-" || c == "*" || c == "/" {
-                out.append(c)
-                lastSpace = false
-            } else if v == 32 || v == 9 {
-                if !lastSpace && !out.isEmpty { out.append(" "); lastSpace = true }
-            }
-        }
-        let result = out.trimmingCharacters(in: .whitespaces)
-        guard !result.isEmpty else { return nil }
-
-        var numCount = 0; var opCount = 0; var inNum = false
-        for c in result {
-            if c.isNumber || c == "." {
-                if !inNum { numCount += 1; inNum = true }
-            } else if c == "+" || c == "-" || c == "*" || c == "/" {
-                opCount += 1; inNum = false
-            } else { inNum = false }
-        }
-        guard numCount >= 2 && opCount >= 1 else { return nil }
-        return result
     }
 
     private nonisolated func summarizeConversation(messages: [Message]) -> String {
