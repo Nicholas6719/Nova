@@ -18,15 +18,6 @@ enum AudioSessionQueue {
         queue.async(execute: work)
     }
 
-    /// Run AVAudioSession configuration and resume when done. Use from async context.
-    static func runAsync() async {
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            queue.async {
-                cont.resume()
-            }
-        }
-    }
-
     #if os(iOS)
     /// Configure session for playback (TTS). Category .playAndRecord, mode .voiceChat, active=true.
     static func configureForPlayback() async {

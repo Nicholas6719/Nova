@@ -201,7 +201,9 @@ struct NovaEngineCore: Sendable {
                         try await Task.sleep(nanoseconds: 60_000_000_000)
                         return fallbackMsg
                     }
-                    let first = try await group.next()!
+                    guard let first = try await group.next() else {
+                        throw CancellationError()
+                    }
                     group.cancelAll()
                     return first
                 }
@@ -224,7 +226,9 @@ struct NovaEngineCore: Sendable {
                     try await Task.sleep(nanoseconds: 10_000_000_000)
                     return fallbackMsg
                 }
-                let first = try await group.next()!
+                guard let first = try await group.next() else {
+                    throw CancellationError()
+                }
                 group.cancelAll()
                 return first
             }

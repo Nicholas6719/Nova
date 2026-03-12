@@ -111,7 +111,9 @@ enum PlatformTools: Sendable {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 return .failure(spoken: "I couldn't read battery information.")
             }
-            let first = await group.next()!
+            guard let first = await group.next() else {
+                return .failure(spoken: "I couldn't read battery information.")
+            }
             group.cancelAll()
             return first
         }
