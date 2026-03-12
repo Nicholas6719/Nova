@@ -229,7 +229,11 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
     private func speakOne(_ sentence: String) {
         let utterance = AVSpeechUtterance(string: sentence)
         configure(utterance)
-        synthesizer.speak(utterance)
+        // Dispatch outside the Swift cooperative executor so AVSpeechSynthesizer's internal
+        // sync coordination doesn't trigger the unsafeForcedSync concurrency warning.
+        DispatchQueue.main.async { [weak self] in
+            self?.synthesizer.speak(utterance)
+        }
     }
 
     // MARK: - TTSEngine
@@ -253,7 +257,10 @@ final class AVSpeechTTSEngine: NSObject, TTSEngine {
     func stop() {
         sentenceQueue = []
         _synthesizerSpeaking = false
-        synthesizer.stopSpeaking(at: .immediate)
+        // Same reason as speakOne: dispatch off Swift cooperative executor.
+        DispatchQueue.main.async { [weak self] in
+            self?.synthesizer.stopSpeaking(at: .immediate)
+        }
         stopTimestamps.append(CFAbsoluteTimeGetCurrent())
         #if os(iOS)
         AudioSessionQueue.deactivate()
