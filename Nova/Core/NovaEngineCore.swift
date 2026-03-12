@@ -112,6 +112,56 @@ struct NovaEngineCore: Sendable {
             }
         }
 
+        // MARK: Memory update / save / recall (before tools)
+        let memoryInput = strippedQuery.isEmpty ? input : strippedQuery
+
+        // Update/correction: "actually my name is X" or "actually it's X" (with last key)
+        if let update = MemoryRouter.matchUpdate(from: memoryInput) {
+            guard MemoryStore.set(update.key, value: update.value) else {
+                DebugLog.d("[Memory] returning update failure")
+                return "I couldn't update that memory."
+            }
+            MemoryContext.updateLastDiscussed(key: update.key, value: update.value)
+            let key = update.key
+            let val = update.value
+            let displayVal = val.prefix(1).uppercased() + val.dropFirst()
+            let label = Self.memoryKeyToDisplayLabel(key)
+            let response: String
+            if let p = update.previousValue, !p.isEmpty {
+                let pDisplay = p.prefix(1).uppercased() + p.dropFirst()
+                response = "Okay, I'll remember that your \(label) is \(displayVal), not \(pDisplay)."
+            } else {
+                response = "Okay, I'll remember that your \(label) is \(displayVal)."
+            }
+            DebugLog.d("[Memory] returning update response")
+            return response
+        }
+
+        if let save = MemoryRouter.matchSave(from: memoryInput) {
+            guard MemoryStore.set(save.key, value: save.value) else {
+                DebugLog.d("[Memory] returning save failure")
+                return "I couldn't save that memory."
+            }
+            MemoryContext.updateLastDiscussed(key: save.key, value: save.value)
+            let displayValue = save.value.prefix(1).uppercased() + save.value.dropFirst()
+            let fieldLabel = Self.memoryKeyToDisplayLabel(save.key)
+            let response = "Got it. I'll remember that your \(fieldLabel) is \(displayValue)."
+            DebugLog.d("[Memory] returning save response")
+            return response
+        }
+        if let recallKey = MemoryRouter.matchRecall(from: memoryInput) {
+            if let value = MemoryStore.get(recallKey) {
+                MemoryContext.updateLastDiscussed(key: recallKey, value: value)
+                let displayValue = value.prefix(1).uppercased() + value.dropFirst()
+                let fieldLabel = Self.memoryKeyToDisplayLabel(recallKey)
+                let response = "Your \(fieldLabel) is \(displayValue)."
+                DebugLog.d("[Memory] returning recall response")
+                return response
+            }
+            DebugLog.d("[Memory] returning recall miss")
+            return "I don't know that yet."
+        }
+
         // MARK: Tool routing (before OpenAI)
         let toolIntent = ToolRouter.match(from: trimmedInput)
         switch toolIntent {
@@ -385,6 +435,22 @@ struct NovaEngineCore: Sendable {
         let c = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !c.isEmpty else { return false }
         return hasGreetingWord(c)
+    }
+
+    /// Display label for memory keys in responses.
+    private static func memoryKeyToDisplayLabel(_ key: String) -> String {
+        switch key {
+        case "name": return "name"
+        case "nickname": return "nickname"
+        case "favorite_ide": return "favorite IDE"
+        case "favorite_game": return "favorite game"
+        case "favorite_color": return "favorite color"
+        case "favorite_food": return "favorite food"
+        case "hometown": return "hometown"
+        case "company": return "company"
+        case "job": return "job"
+        default: return key
+        }
     }
 
     /// Strip leading wake words and greetings for intent detection.
