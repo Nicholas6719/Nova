@@ -15,6 +15,23 @@ enum ChatStatus: String {
 @MainActor
 final class ChatViewModel: ObservableObject {
 
+    // MARK: - StreamingSession
+
+    /// Holds all mutable state for one streaming response session.
+    /// Created at the start of streaming; nilled out on completion or cancel.
+    private final class StreamingSession {
+        let messageId: UUID
+        var fullText: String = ""
+        var shownCount: Int = 0
+        var tickerTask: Task<Void, Never>?
+        var isActive: Bool = true
+        var finalText: String?
+
+        init(messageId: UUID) {
+            self.messageId = messageId
+        }
+    }
+
     // MARK: - Published
 
     @Published private(set) var messages: [Message] = []
@@ -45,16 +62,13 @@ final class ChatViewModel: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
 
-    // MARK: - Streaming UI state (MainActor-owned)
+    // MARK: - Streaming state (MainActor-owned)
 
     /// Invalidated on barge-in so late deltas/completion become no-ops.
     private var activeStreamToken: UUID?
-    private var streamingFullText = ""
-    private var streamingShownCount = 0
-    private var streamingMessageId: UUID?
-    private var streamingTickerTask: Task<Void, Never>?
-    private var streamingIsActive = false
-    private var streamingFinalText: String?
+
+    /// Non-nil while a streaming response session is in progress.
+    private var stream: StreamingSession?
 
     // MARK: - Streaming speech state (MainActor-owned)
 
@@ -72,7 +86,7 @@ final class ChatViewModel: ObservableObject {
 
     /// Hands-free: auto-start listening after TTS completes; cancel after timeout.
     private var autoListenTask: Task<Void, Never>?
-    /// Scheduled auto-listen start (300ms after TTS finished). Cancelled when a new one is scheduled.
+    /// Scheduled auto-listen start (250ms after TTS finished). Cancelled when a new one is scheduled.
     private var scheduledAutoListenTask: Task<Void, Never>?
     private let hardTimeoutManual: TimeInterval = 15
     private let hardTimeoutAuto: TimeInterval = 6
@@ -420,11 +434,7 @@ final class ChatViewModel: ObservableObject {
     private func beginStreaming(token: UUID) {
         guard activeStreamToken == token else { return }
         let pid = UUID()
-        streamingMessageId = pid
-        streamingFullText = ""
-        streamingShownCount = 0
-        streamingIsActive = true
-        streamingFinalText = nil
+        stream = StreamingSession(messageId: pid)
         speechBuffer = ""
         isSpeakingStreamChunk = false
         hasSpokenAnyStreamChunk = false
@@ -435,7 +445,7 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func receiveStreamDelta(_ delta: String, token: UUID) {
         guard activeStreamToken == token else { return }
-        streamingFullText += delta
+        stream?.fullText += delta
         speechBuffer += delta
         trySpeakNextSentence()
     }
@@ -443,22 +453,23 @@ final class ChatViewModel: ObservableObject {
     /// Continuous ticker: reveals 5 characters every 120ms (~41 chars/sec).
     @MainActor
     private func startTicker(token: UUID) {
-        streamingTickerTask?.cancel()
-        streamingTickerTask = Task { @MainActor [weak self] in
+        stream?.tickerTask?.cancel()
+        stream?.tickerTask = Task { @MainActor [weak self] in
             let step = 5
             let intervalNs: UInt64 = 120_000_000
 
             while !Task.isCancelled {
                 guard let self else { return }
                 guard self.activeStreamToken == token else { return }
+                guard let s = self.stream else { return }
 
-                let available = self.streamingFullText.count
-                if self.streamingShownCount < available {
-                    self.streamingShownCount = min(self.streamingShownCount + step, available)
-                    self.updateBubble(charCount: self.streamingShownCount, token: token)
+                let available = s.fullText.count
+                if s.shownCount < available {
+                    s.shownCount = min(s.shownCount + step, available)
+                    self.updateBubble(charCount: s.shownCount, token: token)
                 }
 
-                if !self.streamingIsActive && self.streamingShownCount >= self.streamingFullText.count {
+                if !s.isActive && s.shownCount >= s.fullText.count {
                     self.commitFinalStreamedResponse(token: token)
                     return
                 }
@@ -471,10 +482,10 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func updateBubble(charCount: Int, token: UUID) {
         guard activeStreamToken == token else { return }
-        guard let pid = streamingMessageId,
-              let idx = messages.lastIndex(where: { $0.id == pid }) else { return }
-        let text = String(streamingFullText.prefix(charCount))
-        messages[idx] = Message(id: pid, role: .assistant, content: text)
+        guard let s = stream,
+              let idx = messages.lastIndex(where: { $0.id == s.messageId }) else { return }
+        let text = String(s.fullText.prefix(charCount))
+        messages[idx] = Message(id: s.messageId, role: .assistant, content: text)
     }
 
     // MARK: - Sentence-by-sentence TTS
@@ -491,7 +502,7 @@ final class ChatViewModel: ObservableObject {
     /// the end of the buffer when the stream has finished.
     @MainActor
     private func trySpeakNextSentence() {
-        guard activeStreamToken != nil else { return }
+        guard stream != nil else { return }
         guard !isSpeakingStreamChunk else { return }
         guard let sentence = extractFirstSentence() else { return }
         isSpeakingStreamChunk = true
@@ -516,7 +527,7 @@ final class ChatViewModel: ObservableObject {
                             .trimmingCharacters(in: .whitespaces)
                         return sentence.isEmpty ? nil : sentence
                     }
-                } else if !streamingIsActive {
+                } else if !(stream?.isActive ?? true) {
                     let sentence = String(speechBuffer[speechBuffer.startIndex...i])
                         .trimmingCharacters(in: .whitespaces)
                     speechBuffer = ""
@@ -525,7 +536,7 @@ final class ChatViewModel: ObservableObject {
             }
             i = nextIdx
         }
-        if !streamingIsActive {
+        if !(stream?.isActive ?? true) {
             let remainder = speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
             speechBuffer = ""
             return remainder.isEmpty ? nil : remainder
@@ -538,7 +549,7 @@ final class ChatViewModel: ObservableObject {
     private func onSpeechFinished() {
         if isSpeakingStreamChunk {
             isSpeakingStreamChunk = false
-            if activeStreamToken != nil, streamingMessageId != nil {
+            if stream != nil {
                 trySpeakNextSentence()
             } else {
                 speakRemainingBuffer()
@@ -562,25 +573,20 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func commitFinalStreamedResponse(token: UUID) {
         guard activeStreamToken == token else { return }
-        streamingTickerTask?.cancel()
-        streamingTickerTask = nil
+        stream?.tickerTask?.cancel()
 
-        let fullText = normalizeMojibake(streamingFinalText ?? streamingFullText)
+        let fullText = normalizeMojibake(stream?.finalText ?? stream?.fullText ?? "")
 
-        if let pid = streamingMessageId,
-           let idx = messages.lastIndex(where: { $0.id == pid }) {
-            messages[idx] = Message(id: pid, role: .assistant, content: fullText)
+        if let s = stream,
+           let idx = messages.lastIndex(where: { $0.id == s.messageId }) {
+            messages[idx] = Message(id: s.messageId, role: .assistant, content: fullText)
         }
 
         DebugLog.d("[Chat] append assistant: \(fullText.prefix(60))\(fullText.count > 60 ? "…" : "")")
 
         // Clear UI streaming state; speech state may survive briefly for onSpeechFinished.
+        stream = nil
         activeStreamToken = nil
-        streamingMessageId = nil
-        streamingFullText = ""
-        streamingShownCount = 0
-        streamingFinalText = nil
-        streamingIsActive = false
 
         if !hasSpokenAnyStreamChunk {
             clearSpeechState()
@@ -597,11 +603,11 @@ final class ChatViewModel: ObservableObject {
 
     @MainActor
     private func onEngineComplete(fullText: String, token: UUID) {
-        if streamingMessageId != nil {
+        if stream != nil {
             guard activeStreamToken == token else { return }
-            streamingFinalText = fullText
-            streamingFullText = fullText
-            streamingIsActive = false
+            stream?.finalText = fullText
+            stream?.fullText = fullText
+            stream?.isActive = false
             // Ticker keeps running to finish reveal. Also try to speak if idle.
             if !isSpeakingStreamChunk {
                 trySpeakNextSentence()
@@ -622,14 +628,9 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func cancelStreamingState() {
         activeStreamToken = nil
-        streamingTickerTask?.cancel()
-        streamingTickerTask = nil
+        stream?.tickerTask?.cancel()
+        stream = nil
         speechManager.stop()
-        streamingMessageId = nil
-        streamingFullText = ""
-        streamingShownCount = 0
-        streamingIsActive = false
-        streamingFinalText = nil
         clearSpeechState()
     }
 
@@ -770,8 +771,7 @@ final class ChatViewModel: ObservableObject {
                 if Date().timeIntervalSince(self.lastTranscriptUpdate) >= self.endOfSpeechDelay {
                     self.endOfSpeechTask?.cancel()
                     self.endOfSpeechTask = nil
-                    let reason = self.recordingMode == .manual ? "partial-silence" : "partial-silence"
-                    self.stopListeningAndCommitNow(reason: reason, sessionId: sessionId)
+                    self.stopListeningAndCommitNow(reason: "partial-silence", sessionId: sessionId)
                     return
                 }
             }
@@ -805,7 +805,7 @@ final class ChatViewModel: ObservableObject {
 
     @MainActor
     private func handleSpeechStarted() {
-        // TTS actually started; fallback will no-op (isSpeaking true or we'll get onSpeechFinished).
+        // TODO: Reserved for future use (e.g. barge-in animation, UI feedback on TTS start).
     }
 
     /// Called by SpeechManager when TTS fully completes (all utterances done).
