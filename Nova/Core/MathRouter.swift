@@ -6,7 +6,7 @@ import Foundation
 enum MathRouter {
 
     /// Attempt local math evaluation. Returns formatted response or nil.
-    static func localMathResponse(for rawInput: String) -> String? {
+    nonisolated static func localMathResponse(for rawInput: String) -> String? {
         let normalized = normalizeMathSymbols(
             rawInput.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         )
@@ -21,7 +21,7 @@ enum MathRouter {
 
     /// True if input looks like an unsupported math expression (digits + operators, no letters).
     /// Used to skip intent detection for mathy strings we can't evaluate locally.
-    static func looksLikeMath(_ rawInput: String) -> Bool {
+    nonisolated static func looksLikeMath(_ rawInput: String) -> Bool {
         let s = normalizeMathSymbols(
             rawInput.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         ).replacingOccurrences(of: " ", with: "")
@@ -38,7 +38,7 @@ enum MathRouter {
 
     // MARK: - Private
 
-    private static func evaluate(_ expr: String) -> String? {
+    nonisolated private static func evaluate(_ expr: String) -> String? {
         let s = expr.replacingOccurrences(of: " ", with: "")
         guard !s.isEmpty else { return nil }
         if let result = singleBinaryOp(s) { return result }
@@ -46,14 +46,14 @@ enum MathRouter {
         return nil
     }
 
-    private static func normalizeMathSymbols(_ s: String) -> String {
+    nonisolated private static func normalizeMathSymbols(_ s: String) -> String {
         s.replacingOccurrences(of: "\u{00D7}", with: "*")
          .replacingOccurrences(of: "\u{00F7}", with: "/")
          .replacingOccurrences(of: "\u{2022}", with: "*")
          .replacingOccurrences(of: "\u{00B7}", with: "*")
     }
 
-    private static func stripMathPrefixes(_ s: String) -> String {
+    nonisolated private static func stripMathPrefixes(_ s: String) -> String {
         var result = s
         for prefix in ["nova ", "what's ", "whats ", "what is ", "calculate ", "solve "] {
             if result.hasPrefix(prefix) {
@@ -66,7 +66,7 @@ enum MathRouter {
     }
 
     /// Parse "number op number" where op is one of +, -, *, /.
-    private static func singleBinaryOp(_ s: String) -> String? {
+    nonisolated private static func singleBinaryOp(_ s: String) -> String? {
         guard s.rangeOfCharacter(from: .decimalDigits) != nil else { return nil }
 
         let ops: [Character] = ["+", "-", "*", "/"]
@@ -107,7 +107,7 @@ enum MathRouter {
     }
 
     /// Parse a chain of + and - operations: "300-200+2" → 102, "-5+2" → -3.
-    private static func plusMinusChain(_ s: String) -> String? {
+    nonisolated private static func plusMinusChain(_ s: String) -> String? {
         for ch in s {
             guard ch.isNumber || ch == "." || ch == "+" || ch == "-" else { return nil }
         }
@@ -143,7 +143,7 @@ enum MathRouter {
         return "That equals \(fmt(result))."
     }
 
-    private static func fmt(_ x: Double) -> String {
+    nonisolated private static func fmt(_ x: Double) -> String {
         x.truncatingRemainder(dividingBy: 1) == 0 && abs(x) < 1e15
             ? String(Int(x)) : String(x)
     }
