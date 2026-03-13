@@ -217,6 +217,20 @@ final class ChatViewModel: ObservableObject {
                 self?.handleAudioEnergy(rms)
             }
         }
+
+        // Load persisted conversation history.
+        let saved = ConversationStore.load()
+        if !saved.isEmpty {
+            messages = saved
+            DebugLog.d("[Chat] loaded \(saved.count) messages from disk")
+        }
+    }
+
+    // MARK: - Persistence
+
+    /// Save current messages to disk. Called after user append and assistant finalize.
+    private func persistMessages() {
+        ConversationStore.save(messages)
     }
 
     // MARK: - Permissions
@@ -378,6 +392,7 @@ final class ChatViewModel: ObservableObject {
 
         let userMessage = Message(role: .user, content: text)
         messages.append(userMessage)
+        persistMessages()
         DebugLog.d("[Chat] append user: \(text.prefix(60))\(text.count > 60 ? "…" : "")")
 
         let messageSnapshot = messages
@@ -580,6 +595,7 @@ final class ChatViewModel: ObservableObject {
         }
 
         DebugLog.d("[Chat] append assistant: \(fullText.prefix(60))\(fullText.count > 60 ? "…" : "")")
+        persistMessages()
 
         // Clear UI streaming state; speech state may survive briefly for onSpeechFinished.
         stream = nil
@@ -614,6 +630,7 @@ final class ChatViewModel: ObservableObject {
             guard activeStreamToken == token else { return }
             let normalized = normalizeMojibake(fullText)
             messages.append(Message(role: .assistant, content: normalized))
+            persistMessages()
             DebugLog.d("[Chat] append assistant: \(normalized.prefix(60))\(normalized.count > 60 ? "…" : "")")
             speakWithAutoListen(normalized, source: "local")
             isProcessing = false
