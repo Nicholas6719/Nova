@@ -19,7 +19,7 @@ struct ContentView: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(viewModel.messages) { message in
                             MessageBubble(message: message)
                                 .id(message.id)
@@ -43,16 +43,12 @@ struct ContentView: View {
                 }
             }
 
-            if let error = viewModel.errorMessage {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .padding(.horizontal)
-                    .padding(.vertical, 6)
+            HStack {
+                Spacer()
+                micButton
             }
-
-            micButton
-                .padding(.vertical, 20)
+            .padding(.trailing, 16)
+            .padding(.vertical, 12)
         }
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -63,20 +59,15 @@ struct ContentView: View {
     }
 
     private var headerView: some View {
-        VStack(spacing: 4) {
-            Text("Nova")
-                .font(.title.weight(.bold))
-            Text("Neural Omniscient Voice Assistant")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity)
+        Text("NovaOS")
+            .font(.title.weight(.bold))
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity)
     }
 
     private var statusView: some View {
         Text(viewModel.status.rawValue)
-            .font(.subheadline)
+            .font(.caption)
             .foregroundStyle(.secondary)
             .padding(.vertical, 6)
     }
@@ -88,21 +79,21 @@ struct ContentView: View {
             ZStack {
                 Circle()
                     .fill(viewModel.isRecording ? Color.red.opacity(0.2) : Color.gray.opacity(0.15))
-                    .frame(width: 88, height: 88)
+                    .frame(width: 54, height: 54)
                     .scaleEffect(viewModel.isRecording ? 1.08 : 1.0)
                     .animation(.easeInOut(duration: 0.25), value: viewModel.isRecording)
 
                 Circle()
                     .stroke(viewModel.isRecording ? Color.red : Color.gray.opacity(0.4), lineWidth: 3)
-                    .frame(width: 88, height: 88)
+                    .frame(width: 54, height: 54)
                     .scaleEffect(viewModel.isRecording ? 1.05 : 1.0)
                     .animation(.easeInOut(duration: 0.25), value: viewModel.isRecording)
 
                 Image(systemName: viewModel.isRecording ? "stop.fill" : "mic.fill")
-                    .font(.system(size: 36))
+                    .font(.system(size: 22))
                     .foregroundStyle(viewModel.isRecording ? .red : .gray)
             }
-            .frame(width: 100, height: 100)
+            .frame(width: 62, height: 62)
             .contentShape(Circle())
             .opacity(viewModel.isMicEnabled ? 1.0 : 0.5)
         }
@@ -122,13 +113,13 @@ private struct MessageBubble: View {
         HStack(alignment: .top, spacing: 8) {
             if isFromUser { Spacer(minLength: 40) }
             Text(message.content)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
                 .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(isFromUser ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.2))
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(isFromUser ? Color(hex: "#1E6FFF") : Color(hex: "#2A2A2E"))
                 )
-                .foregroundStyle(isFromUser ? Color.accentColor : .primary)
+                .foregroundStyle(isFromUser ? .white : Color(white: 0.78))
             if !isFromUser { Spacer(minLength: 40) }
         }
         .frame(maxWidth: .infinity, alignment: isFromUser ? .trailing : .leading)
@@ -143,6 +134,22 @@ private struct MicButtonStyle: ButtonStyle {
             .contentShape(Circle())
             .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
             .animation(.easeInOut(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+// MARK: - Hex color initializer
+
+private extension Color {
+    init(hex: String) {
+        let hex = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        let scanner = Scanner(string: hex)
+        var rgb: UInt64 = 0
+        scanner.scanHexInt64(&rgb)
+        self.init(
+            red: Double((rgb >> 16) & 0xFF) / 255,
+            green: Double((rgb >> 8) & 0xFF) / 255,
+            blue: Double(rgb & 0xFF) / 255
+        )
     }
 }
 

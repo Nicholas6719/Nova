@@ -23,7 +23,6 @@
 		6FCF57332F45303E00109380 /* NovaUITestsLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57302F45303E00109380 /* NovaUITestsLaunchTests.swift */; };
 		6FCF57362F45302900109380 /* NovaEngineCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57372F45302900109380 /* NovaEngineCore.swift */; };
 		6FCF57382F45302900109380 /* DebugLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57392F45302900109380 /* DebugLog.swift */; };
-		6FCF5C012F45302900109380 /* MathRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF5C022F45302900109380 /* MathRouter.swift */; };
 		6FCF57402F45302900109380 /* NovaLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57412F45302900109380 /* NovaLogger.swift */; };
 		6FCF57442F45302900109380 /* AudioSessionQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57452F45302900109380 /* AudioSessionQueue.swift */; };
 		6FCF5A012F45302900109380 /* NovaToolResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF5A022F45302900109380 /* NovaToolResult.swift */; };
@@ -32,6 +31,7 @@
 		6FCF5B012F45302900109380 /* MemoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF5B022F45302900109380 /* MemoryStore.swift */; };
 		6FCF5B042F45302900109380 /* MemoryRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF5B052F45302900109380 /* MemoryRouter.swift */; };
 		6FCF5B062F45302900109380 /* MemoryContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF5B072F45302900109380 /* MemoryContext.swift */; };
+		6FCF5C012F45302900109380 /* MathRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF5C022F45302900109380 /* MathRouter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -52,7 +52,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		6F1BE0862F43D66C00380C52 /* Nova.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nova.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6F1BE0862F43D66C00380C52 /* NovaOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NovaOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6F1BE0952F43D66E00380C52 /* NovaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NovaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6F1BE09F2F43D66E00380C52 /* NovaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NovaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6FCF570F2F45302900109380 /* IntentDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentDetector.swift; sourceTree = "<group>"; };
@@ -71,7 +71,6 @@
 		6FCF57302F45303E00109380 /* NovaUITestsLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaUITestsLaunchTests.swift; sourceTree = "<group>"; };
 		6FCF57372F45302900109380 /* NovaEngineCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaEngineCore.swift; sourceTree = "<group>"; };
 		6FCF57392F45302900109380 /* DebugLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLog.swift; sourceTree = "<group>"; };
-		6FCF5C022F45302900109380 /* MathRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MathRouter.swift; sourceTree = "<group>"; };
 		6FCF57412F45302900109380 /* NovaLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaLogger.swift; sourceTree = "<group>"; };
 		6FCF57452F45302900109380 /* AudioSessionQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionQueue.swift; sourceTree = "<group>"; };
 		6FCF5A022F45302900109380 /* NovaToolResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaToolResult.swift; sourceTree = "<group>"; };
@@ -80,6 +79,7 @@
 		6FCF5B022F45302900109380 /* MemoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryStore.swift; sourceTree = "<group>"; };
 		6FCF5B052F45302900109380 /* MemoryRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryRouter.swift; sourceTree = "<group>"; };
 		6FCF5B072F45302900109380 /* MemoryContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryContext.swift; sourceTree = "<group>"; };
+		6FCF5C022F45302900109380 /* MathRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MathRouter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -120,7 +120,7 @@
 		6F1BE0872F43D66C00380C52 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				6F1BE0862F43D66C00380C52 /* Nova.app */,
+				6F1BE0862F43D66C00380C52 /* NovaOS.app */,
 				6F1BE0952F43D66E00380C52 /* NovaTests.xctest */,
 				6F1BE09F2F43D66E00380C52 /* NovaUITests.xctest */,
 			);
@@ -157,26 +157,6 @@
 				6FCF57162F45302900109380 /* Chat */,
 			);
 			path = Features;
-			sourceTree = "<group>";
-		};
-		6FCF5A072F45302900109380 /* Tools */ = {
-			isa = PBXGroup;
-			children = (
-				6FCF5A022F45302900109380 /* NovaToolResult.swift */,
-				6FCF5A042F45302900109380 /* ToolRouter.swift */,
-				6FCF5A062F45302900109380 /* PlatformTools.swift */,
-			);
-			path = Tools;
-			sourceTree = "<group>";
-		};
-		6FCF5B032F45302900109380 /* Memory */ = {
-			isa = PBXGroup;
-			children = (
-				6FCF5B022F45302900109380 /* MemoryStore.swift */,
-				6FCF5B052F45302900109380 /* MemoryRouter.swift */,
-				6FCF5B072F45302900109380 /* MemoryContext.swift */,
-			);
-			path = Memory;
 			sourceTree = "<group>";
 		};
 		6FCF571B2F45302900109380 /* Voice */ = {
@@ -221,6 +201,26 @@
 			path = NovaUITests;
 			sourceTree = "<group>";
 		};
+		6FCF5A072F45302900109380 /* Tools */ = {
+			isa = PBXGroup;
+			children = (
+				6FCF5A022F45302900109380 /* NovaToolResult.swift */,
+				6FCF5A042F45302900109380 /* ToolRouter.swift */,
+				6FCF5A062F45302900109380 /* PlatformTools.swift */,
+			);
+			path = Tools;
+			sourceTree = "<group>";
+		};
+		6FCF5B032F45302900109380 /* Memory */ = {
+			isa = PBXGroup;
+			children = (
+				6FCF5B022F45302900109380 /* MemoryStore.swift */,
+				6FCF5B052F45302900109380 /* MemoryRouter.swift */,
+				6FCF5B072F45302900109380 /* MemoryContext.swift */,
+			);
+			path = Memory;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -240,7 +240,7 @@
 			packageProductDependencies = (
 			);
 			productName = Nova;
-			productReference = 6F1BE0862F43D66C00380C52 /* Nova.app */;
+			productReference = 6F1BE0862F43D66C00380C52 /* NovaOS.app */;
 			productType = "com.apple.product-type.application";
 		};
 		6F1BE0942F43D66E00380C52 /* NovaTests */ = {
@@ -558,7 +558,7 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = Nova;
+				INFOPLIST_KEY_CFBundleDisplayName = NovaOS;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Nova uses the microphone for voice input.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Nova uses speech recognition to understand what you say.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -577,7 +577,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = Coppola.Nova;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = NovaOS;
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -616,7 +616,7 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = Nova;
+				INFOPLIST_KEY_CFBundleDisplayName = NovaOS;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Nova uses the microphone for voice input.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Nova uses speech recognition to understand what you say.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -635,7 +635,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = Coppola.Nova;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = NovaOS;
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
