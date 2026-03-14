@@ -32,6 +32,13 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Active conversation tracking
+
+    /// UUID of the current active conversation (persisted with messages).
+    private var activeConversationId: UUID = UUID()
+    /// Start date of the current active conversation (used for day-based rollover).
+    private var conversationStartDate: Date = Date()
+
     // MARK: - Published
 
     @Published private(set) var messages: [Message] = []
@@ -218,11 +225,22 @@ final class ChatViewModel: ObservableObject {
             }
         }
 
-        // Load persisted conversation history.
-        let saved = ConversationStore.load()
-        if !saved.isEmpty {
-            messages = saved
-            DebugLog.d("[Chat] loaded \(saved.count) messages from disk")
+        // Load persisted conversation history with day-based rollover.
+        if let active = ConversationStore.loadActive() {
+            if ConversationStore.needsRollover(startDate: active.startDate) {
+                // Different calendar day — archive old conversation, start fresh.
+                ConversationStore.archive(id: active.id, startDate: active.startDate, messages: active.messages)
+                activeConversationId = UUID()
+                conversationStartDate = Date()
+                messages = []
+                DebugLog.d("[Chat] rolled over conversation from \(active.startDate) — archived \(active.messages.count) messages")
+            } else {
+                // Same calendar day — resume existing conversation.
+                activeConversationId = active.id
+                conversationStartDate = active.startDate
+                messages = active.messages
+                DebugLog.d("[Chat] loaded \(active.messages.count) messages from disk (id=\(active.id))")
+            }
         }
     }
 
@@ -230,7 +248,7 @@ final class ChatViewModel: ObservableObject {
 
     /// Save current messages to disk. Called after user append and assistant finalize.
     private func persistMessages() {
-        ConversationStore.save(messages)
+        ConversationStore.saveActive(id: activeConversationId, startDate: conversationStartDate, messages: messages)
     }
 
     // MARK: - Permissions
