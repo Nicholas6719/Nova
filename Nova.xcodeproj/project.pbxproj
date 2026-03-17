@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		6FCF5D032F45302900109380 /* Config.plist in Resources */ = {isa = PBXBuildFile; fileRef = 6FCF5D042F45302900109380 /* Config.plist */; };
 		6FCF57202F45302900109380 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6FCF571C2F45302900109380 /* Assets.xcassets */; };
 		6FCF57212F45302900109380 /* SpeechRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57192F45302900109380 /* SpeechRecognizer.swift */; };
 		6FCF57222F45302900109380 /* NovaPersonality.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57122F45302900109380 /* NovaPersonality.swift */; };
@@ -22,6 +23,7 @@
 		6FCF57322F45303E00109380 /* NovaUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF572F2F45303E00109380 /* NovaUITests.swift */; };
 		6FCF57332F45303E00109380 /* NovaUITestsLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57302F45303E00109380 /* NovaUITestsLaunchTests.swift */; };
 		6FCF57362F45302900109380 /* NovaEngineCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57372F45302900109380 /* NovaEngineCore.swift */; };
+		6FCF5D022F45302900109380 /* APIKeyProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF5D012F45302900109380 /* APIKeyProvider.swift */; };
 		6FCF57382F45302900109380 /* DebugLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57392F45302900109380 /* DebugLog.swift */; };
 		6FCF57402F45302900109380 /* NovaLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57412F45302900109380 /* NovaLogger.swift */; };
 		6FCF57442F45302900109380 /* AudioSessionQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FCF57452F45302900109380 /* AudioSessionQueue.swift */; };
@@ -64,12 +66,14 @@
 		6FCF57182F45302900109380 /* SpeechManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechManager.swift; sourceTree = "<group>"; };
 		6FCF57192F45302900109380 /* SpeechRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechRecognizer.swift; sourceTree = "<group>"; };
 		6FCF571C2F45302900109380 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		6FCF5D042F45302900109380 /* Config.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.plist; sourceTree = "<group>"; };
 		6FCF571D2F45302900109380 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		6FCF571E2F45302900109380 /* NovaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaApp.swift; sourceTree = "<group>"; };
 		6FCF572C2F45303400109380 /* NovaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaTests.swift; sourceTree = "<group>"; };
 		6FCF572F2F45303E00109380 /* NovaUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaUITests.swift; sourceTree = "<group>"; };
 		6FCF57302F45303E00109380 /* NovaUITestsLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaUITestsLaunchTests.swift; sourceTree = "<group>"; };
 		6FCF57372F45302900109380 /* NovaEngineCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaEngineCore.swift; sourceTree = "<group>"; };
+		6FCF5D012F45302900109380 /* APIKeyProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIKeyProvider.swift; sourceTree = "<group>"; };
 		6FCF57392F45302900109380 /* DebugLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLog.swift; sourceTree = "<group>"; };
 		6FCF57412F45302900109380 /* NovaLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaLogger.swift; sourceTree = "<group>"; };
 		6FCF57452F45302900109380 /* AudioSessionQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionQueue.swift; sourceTree = "<group>"; };
@@ -130,6 +134,7 @@
 		6FCF57132F45302900109380 /* Core */ = {
 			isa = PBXGroup;
 			children = (
+				6FCF5D012F45302900109380 /* APIKeyProvider.swift */,
 				6FCF570F2F45302900109380 /* IntentDetector.swift */,
 				6FCF57102F45302900109380 /* LLMClient.swift */,
 				6FCF57392F45302900109380 /* DebugLog.swift */,
@@ -178,6 +183,7 @@
 				6FCF5A072F45302900109380 /* Tools */,
 				6FCF571B2F45302900109380 /* Voice */,
 				6FCF571C2F45302900109380 /* Assets.xcassets */,
+				6FCF5D042F45302900109380 /* Config.plist */,
 				6FCF571D2F45302900109380 /* ContentView.swift */,
 				6FCF571E2F45302900109380 /* NovaApp.swift */,
 			);
@@ -332,6 +338,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6FCF5D032F45302900109380 /* Config.plist in Resources */,
 				6FCF57202F45302900109380 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -367,6 +374,7 @@
 				6FCF57282F45302900109380 /* Message.swift in Sources */,
 				6FCF57292F45302900109380 /* LLMClient.swift in Sources */,
 				6FCF57362F45302900109380 /* NovaEngineCore.swift in Sources */,
+				6FCF5D022F45302900109380 /* APIKeyProvider.swift in Sources */,
 				6FCF57382F45302900109380 /* DebugLog.swift in Sources */,
 				6FCF57402F45302900109380 /* NovaLogger.swift in Sources */,
 				6FCF5C012F45302900109380 /* MathRouter.swift in Sources */,

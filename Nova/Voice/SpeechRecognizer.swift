@@ -50,6 +50,11 @@ private actor SpeechRecognitionEngine {
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+        DebugLog.d("[SpeechEngine] format: \(format.channelCount)ch, \(format.sampleRate)Hz")
+        guard format.channelCount > 0, format.sampleRate > 0 else {
+            onStartFailed("Audio input format invalid: \(format.channelCount)ch \(format.sampleRate)Hz")
+            return
+        }
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [request] buffer, _ in
             request.append(buffer)
             if let onEnergy = onEnergy {
@@ -229,17 +234,21 @@ final class SpeechRecognizer: ObservableObject {
                 return
             }
             #if os(iOS)
+            DebugLog.d("[SpeechRecognizer] iOS: requesting mic permission")
             let granted = await requestMicrophonePermission()
+            DebugLog.d("[SpeechRecognizer] iOS: mic permission granted=\(granted)")
             guard granted else {
                 self.errorMessage = "Microphone access was denied."
                 return
             }
+            DebugLog.d("[SpeechRecognizer] iOS: configuring audio session")
             do {
                 try await AudioSessionQueue.configureForRecording()
             } catch {
                 self.errorMessage = "Could not configure audio: \(error.localizedDescription)"
                 return
             }
+            DebugLog.d("[SpeechRecognizer] iOS: audio session configured")
             #endif
 
             self.transcript = ""

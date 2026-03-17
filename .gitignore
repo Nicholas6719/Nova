@@ -5,3 +5,9 @@
 
 # Xcode user-specific state
 **/xcuserdata/
+
+# API key config (contains secrets)
+Nova/Config.plist
+
+# Claude session data
+.claude/
