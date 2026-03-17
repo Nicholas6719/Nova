@@ -223,10 +223,32 @@ final class ChatViewModel: ObservableObject {
 
     func requestPermissions() {
         speechRecognizer.requestPermissions()
+        #if os(iOS)
+        // iOS: explicitly request mic permission at startup and retry wake start
+        if #available(iOS 17.0, *) {
+            AVAudioApplication.requestRecordPermission { _ in
+                Task { @MainActor [weak self] in
+                    self?.startWakeListeningIfIdle()
+                }
+            }
+        } else {
+            AVAudioSession.sharedInstance().requestRecordPermission { _ in
+                Task { @MainActor [weak self] in
+                    self?.startWakeListeningIfIdle()
+                }
+            }
+        }
+        // Fallback: retry after delay in case both permissions were already granted
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            self?.startWakeListeningIfIdle()
+        }
+        #endif
     }
 
     /// Start wake only when auth and mic ready, app idle. Called from auth sink or after manual response.
     func startWakeListeningIfIdle() {
+        DebugLog.d("[Chat] startWakeListeningIfIdle called")
         guard wakeWordEnabled else { return }
         guard speechRecognizer.authorizationStatus == .authorized else {
             DebugLog.d("[Wake] auth not ready")
@@ -382,7 +404,7 @@ final class ChatViewModel: ObservableObject {
 
         let messageSnapshot = messages
 
-        let apiKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? ""
+        let apiKey = APIKeyProvider.openAIKey
         let cfg = LLMConfig(
             apiKey: apiKey,
             endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
@@ -817,14 +839,14 @@ final class ChatViewModel: ObservableObject {
         guard allowAutoListen else { return }
         scheduledAutoListenTask?.cancel()
         scheduledAutoListenTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            try? await Task.sleep(nanoseconds: 250_000_000)  // 250ms stabilization
             guard let self else { return }
             guard !Task.isCancelled else { return }
             self.scheduledAutoListenTask = nil
             let hasUnspoken = !self.speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let ok = self.allowAutoListen && !self.isProcessing && !self.isRecording
                 && !self.speechManager.isSpeaking && !self.speechManager.hasPendingSpeech
-                && !hasUnspoken
+                && !hasUnspoken && self.stream == nil && !self.isSpeakingStreamChunk
             if !ok { return }
             self.allowAutoListen = false
             self.beginRecordingSession(mode: .auto)

@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "6F1BE0852F43D66C00380C52"
-               BuildableName = "Nova.app"
+               BuildableName = "NovaOS.app"
                BlueprintName = "Nova"
                ReferencedContainer = "container:Nova.xcodeproj">
             </BuildableReference>
@@ -45,7 +45,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "6F1BE0852F43D66C00380C52"
-            BuildableName = "Nova.app"
+            BuildableName = "NovaOS.app"
             BlueprintName = "Nova"
             ReferencedContainer = "container:Nova.xcodeproj">
          </BuildableReference>
@@ -69,7 +69,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "6F1BE0852F43D66C00380C52"
-            BuildableName = "Nova.app"
+            BuildableName = "NovaOS.app"
             BlueprintName = "Nova"
             ReferencedContainer = "container:Nova.xcodeproj">
          </BuildableReference>

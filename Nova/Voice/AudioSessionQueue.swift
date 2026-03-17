@@ -25,7 +25,7 @@ enum AudioSessionQueue {
             queue.async {
                 do {
                     let session = AVAudioSession.sharedInstance()
-                    try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+                    try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
                     try session.setActive(true)
                 } catch { }
                 cont.resume()
@@ -40,7 +40,7 @@ enum AudioSessionQueue {
             queue.async {
                 do {
                     let session = AVAudioSession.sharedInstance()
-                    try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+                    try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
                     try session.setActive(true, options: .notifyOthersOnDeactivation)
                     cont.resume()
                 } catch {
@@ -76,7 +76,7 @@ enum AudioSessionQueue {
         queue.async {
             do {
                 let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
                 try session.setActive(false, options: .notifyOthersOnDeactivation)
             } catch { }
         }

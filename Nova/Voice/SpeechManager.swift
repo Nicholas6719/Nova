@@ -300,7 +300,7 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
             } else {
                 self._synthesizerSpeaking = false
                 #if os(iOS)
-                AudioSessionQueue.deactivate()
+                await AudioSessionQueue.deactivateAsync()
                 #endif
                 self.onSpeakingStateChanged?(false)
                 self.onSpeechFinished?()
@@ -309,10 +309,10 @@ extension AVSpeechTTSEngine: AVSpeechSynthesizerDelegate {
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        #if os(iOS)
-        AudioSessionQueue.deactivate()
-        #endif
         Task { @MainActor [weak self] in
+            #if os(iOS)
+            AudioSessionQueue.deactivate()
+            #endif
             guard let self else { return }
             self._synthesizerSpeaking = false
             self.onSpeakingStateChanged?(false)
