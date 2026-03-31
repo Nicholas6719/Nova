@@ -84,13 +84,15 @@ final class SpeechManager: ObservableObject {
     func speak(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // Set immediately so guards (e.g. startWakeListeningIfIdle) see speaking state
+        // before the async audio setup completes. Delegates reset to false on finish/cancel.
+        isSpeaking = true
         Task { @MainActor [weak self] in
             guard let self else { return }
             #if os(iOS)
             await AudioSessionQueue.configureForPlayback()
             #endif
             (self.engine as? AVSpeechTTSEngine)?.ensureReadyForPlayback()
-            self.isSpeaking = true
             self.engine.speak(trimmed)
         }
     }

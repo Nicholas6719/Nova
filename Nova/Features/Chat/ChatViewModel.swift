@@ -729,12 +729,15 @@ final class ChatViewModel: ObservableObject {
 
     @MainActor
     private func cancelStreamingState() {
+        let hadActiveStream = stream != nil || speechManager.isSpeaking
         activeStreamToken = nil
         stream?.tickerTask?.cancel()
         stream = nil
         speechManager.stop()
         clearSpeechState()
-        transitionPhase(to: .idle, reason: "cancelStreaming")
+        if hadActiveStream {
+            transitionPhase(to: .idle, reason: "cancelStreaming")
+        }
     }
 
     @MainActor
