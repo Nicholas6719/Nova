@@ -3,6 +3,29 @@ import Combine
 import Speech
 import AVFoundation
 
+// MARK: - AssistantPhase (V1.5 observational state layer)
+
+/// Single source of truth for Nova's runtime phase.
+/// Observational only — logs transitions and validates in debug builds,
+/// but does not block existing guard-based logic.
+enum AssistantPhase: Equatable, CustomStringConvertible {
+    case idle
+    case wakeListening
+    case listening       // manual, auto, or command modes
+    case processing
+    case speaking
+
+    var description: String {
+        switch self {
+        case .idle:          return "idle"
+        case .wakeListening: return "wakeListening"
+        case .listening:     return "listening"
+        case .processing:    return "processing"
+        case .speaking:      return "speaking"
+        }
+    }
+}
+
 /// UI status for the header indicator.
 enum ChatStatus: String {
     case idle = "Idle"
@@ -40,6 +63,12 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var isProcessing: Bool = false
 
+    // MARK: - Phase (V1.5 observational state layer)
+
+    /// Single source of truth for assistant runtime phase.
+    /// Updated at key transition points; does not drive logic yet.
+    @Published private(set) var phase: AssistantPhase = .idle
+
     var status: ChatStatus {
         if speechManager.isSpeaking { return .speaking }
         if isProcessing { return .processing }
@@ -61,6 +90,56 @@ final class ChatViewModel: ObservableObject {
     private let engine = NovaEngine()
 
     private var cancellables = Set<AnyCancellable>()
+
+    // MARK: - Phase transition (V1.5 observational layer)
+
+    /// Transition to a new phase. Logs every transition and validates in debug builds.
+    /// Does NOT block execution on invalid transitions — existing guards handle safety.
+    private func transitionPhase(to newPhase: AssistantPhase, reason: String) {
+        let oldPhase = phase
+        if oldPhase == newPhase { return }
+
+        #if DEBUG
+        let valid = Self.isValidTransition(from: oldPhase, to: newPhase)
+        if !valid {
+            DebugLog.d("[Phase] ⚠️ UNEXPECTED: \(oldPhase) → \(newPhase) (\(reason))")
+        }
+        #endif
+
+        phase = newPhase
+        DebugLog.d("[Phase] \(oldPhase) → \(newPhase) (\(reason))")
+    }
+
+    /// Transition validation table. Returns true for expected transitions.
+    /// Unexpected transitions are logged but never blocked.
+    private static func isValidTransition(from: AssistantPhase, to: AssistantPhase) -> Bool {
+        switch (from, to) {
+        // idle can go to any listening or wakeListening
+        case (.idle, .wakeListening),
+             (.idle, .listening):
+            return true
+        // wake listening → listening (wake trigger detected) or idle (timeout/cancel)
+        case (.wakeListening, .listening),
+             (.wakeListening, .idle):
+            return true
+        // listening → processing (input committed) or idle (empty/cancelled) or wakeListening (auto→wake fallback)
+        case (.listening, .processing),
+             (.listening, .idle),
+             (.listening, .wakeListening):
+            return true
+        // processing → speaking (response ready) or idle (error/barge-in before speech)
+        case (.processing, .speaking),
+             (.processing, .idle):
+            return true
+        // speaking → idle (speech done) or listening (barge-in) or wakeListening (speech done → wake)
+        case (.speaking, .idle),
+             (.speaking, .listening),
+             (.speaking, .wakeListening):
+            return true
+        default:
+            return false
+        }
+    }
 
     // MARK: - Streaming state (MainActor-owned)
 
@@ -387,6 +466,7 @@ final class ChatViewModel: ObservableObject {
         guard !text.isEmpty else { return }
         guard !isProcessing else { return }
         isProcessing = true
+        transitionPhase(to: .processing, reason: "processUserInput")
         errorMessage = nil
         autoListenTask?.cancel()
         autoListenTask = nil
@@ -515,6 +595,7 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func speakWithAutoListen(_ text: String, source: String) {
         allowAutoListen = true
+        transitionPhase(to: .speaking, reason: "speak(\(source))")
         speechManager.speak(sanitizeResponse(text))
     }
 
@@ -653,6 +734,7 @@ final class ChatViewModel: ObservableObject {
         stream = nil
         speechManager.stop()
         clearSpeechState()
+        transitionPhase(to: .idle, reason: "cancelStreaming")
     }
 
     @MainActor
@@ -693,6 +775,7 @@ final class ChatViewModel: ObservableObject {
         errorMessage = nil
         speechRecognizer.clearTranscript()
         speechRecognizer.startListening()
+        transitionPhase(to: mode == .wake ? .wakeListening : .listening, reason: "beginRecording(\(mode))")
         DebugLog.d("[EOS] begin mode=\(recordingMode) sid=\(recordingSessionId)")
         startEndOfSpeechMonitor(sessionId: recordingSessionId)
         startHardTimeout(sessionId: recordingSessionId, mode: mode)
@@ -744,6 +827,7 @@ final class ChatViewModel: ObservableObject {
         if recordingMode == .command {
             let remainder = extractWakeRemainder(from: text)
             if remainder.isEmpty {
+                transitionPhase(to: .idle, reason: "commandEmpty(\(reason))")
                 if reason == "hard-timeout" {
                     Task { @MainActor [weak self] in
                         try? await Task.sleep(nanoseconds: 100_000_000)
@@ -761,6 +845,7 @@ final class ChatViewModel: ObservableObject {
         }
 
         guard !text.isEmpty else {
+            transitionPhase(to: .idle, reason: "emptyCommit(\(reason))")
             if recordingMode == .auto && wakeWordEnabled {
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: 100_000_000)
@@ -832,6 +917,7 @@ final class ChatViewModel: ObservableObject {
     /// Called by SpeechManager when TTS fully completes (all utterances done).
     @MainActor
     private func handleSpeechFinished() {
+        transitionPhase(to: .idle, reason: "speechFinished")
         scheduleAutoListenStart(source: "handleSpeechFinished")
     }
 
@@ -877,6 +963,7 @@ final class ChatViewModel: ObservableObject {
         isWakeTriggered = true
         wakeTriggerPhrase = trigger
         recordingMode = .command
+        transitionPhase(to: .listening, reason: "wakeTriggered(\(trigger))")
         lastTranscriptUpdate = Date()
         vadHeardSpeech = true
         firstSpeechAt = firstSpeechAt ?? Date()
