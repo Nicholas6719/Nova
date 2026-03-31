@@ -353,8 +353,10 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Response text normalization
 
-    /// Fix common mojibake from UTF-8 misinterpreted as Latin-1 (e.g. "Iâ€™m" -> "I'm").
-    private func normalizeMojibake(_ text: String) -> String {
+    /// Lightweight text sanitation for LLM responses.
+    /// The root cause (byte-level UTF-8 splitting) is fixed in LLMClient.
+    /// This remains as a temporary safety net and can be removed once streaming is verified clean.
+    private func sanitizeResponse(_ text: String) -> String {
         text.replacingOccurrences(of: "\u{00E2}\u{20AC}\u{2122}", with: "\u{2019}")
     }
 
@@ -513,7 +515,7 @@ final class ChatViewModel: ObservableObject {
     @MainActor
     private func speakWithAutoListen(_ text: String, source: String) {
         allowAutoListen = true
-        speechManager.speak(normalizeMojibake(text))
+        speechManager.speak(sanitizeResponse(text))
     }
 
     /// Extract the first complete sentence from speechBuffer and speak it.
@@ -594,7 +596,7 @@ final class ChatViewModel: ObservableObject {
         guard activeStreamToken == token else { return }
         stream?.tickerTask?.cancel()
 
-        let fullText = normalizeMojibake(stream?.finalText ?? stream?.fullText ?? "")
+        let fullText = sanitizeResponse(stream?.finalText ?? stream?.fullText ?? "")
 
         if let s = stream,
            let idx = messages.lastIndex(where: { $0.id == s.messageId }) {
@@ -634,7 +636,7 @@ final class ChatViewModel: ObservableObject {
         } else {
             // Non-streaming (local) OR invalidated streaming (barge-in before placeholder).
             guard activeStreamToken == token else { return }
-            let normalized = normalizeMojibake(fullText)
+            let normalized = sanitizeResponse(fullText)
             messages.append(Message(role: .assistant, content: normalized))
             DebugLog.d("[Chat] append assistant: \(normalized.prefix(60))\(normalized.count > 60 ? "…" : "")")
             speakWithAutoListen(normalized, source: "local")

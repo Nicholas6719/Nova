@@ -160,23 +160,16 @@ struct LLMClient {
 
         onStreamStart()
 
-        var buffer = ""
         var fullText = ""
 
-        for try await byte in bytes {
-            let c = Character(Unicode.Scalar(byte))
-            if c == "\n" {
-                let trimmed = buffer.trimmingCharacters(in: .whitespaces)
-                buffer = ""
-                guard trimmed.hasPrefix("data: "), trimmed != "data: [DONE]" else { continue }
-                let jsonStr = String(trimmed.dropFirst(6))
-                guard let data = jsonStr.data(using: .utf8),
-                      let delta = parseStreamDelta(data), !delta.isEmpty else { continue }
-                fullText += delta
-                onDelta(delta)
-            } else {
-                buffer.append(c)
-            }
+        for try await line in bytes.lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("data: "), trimmed != "data: [DONE]" else { continue }
+            let jsonStr = String(trimmed.dropFirst(6))
+            guard let data = jsonStr.data(using: .utf8),
+                  let delta = parseStreamDelta(data), !delta.isEmpty else { continue }
+            fullText += delta
+            onDelta(delta)
         }
 
         DebugLog.d("[LLMClient] stream end len=\(fullText.count)")
