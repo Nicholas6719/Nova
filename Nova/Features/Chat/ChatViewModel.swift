@@ -175,11 +175,6 @@ final class ChatViewModel: ObservableObject {
             .sink { [weak self] _ in self?.onSpeechFinished() }
             .store(in: &cancellables)
 
-        speechManager.onSpeechStarted = { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.handleSpeechStarted()
-            }
-        }
         speechManager.onSpeechFinished = { [weak self] in
             Task { @MainActor [weak self] in
                 self?.handleSpeechFinished()
@@ -351,15 +346,6 @@ final class ChatViewModel: ObservableObject {
         processUserInput(text: finalText)
     }
 
-    // MARK: - Response text normalization
-
-    /// Lightweight text sanitation for LLM responses.
-    /// The root cause (byte-level UTF-8 splitting) is fixed in LLMClient.
-    /// This remains as a temporary safety net and can be removed once streaming is verified clean.
-    private func sanitizeResponse(_ text: String) -> String {
-        text.replacingOccurrences(of: "\u{00E2}\u{20AC}\u{2122}", with: "\u{2019}")
-    }
-
     // MARK: - Wake phrase stripping
 
     /// Strip first "hey nova" or "nova" occurrence (word boundary); return trimmed remainder.
@@ -513,9 +499,9 @@ final class ChatViewModel: ObservableObject {
 
     /// Single entry point for TTS: arms auto-listen and speaks. No fallback — auto-listen starts only from TTS-finished signal.
     @MainActor
-    private func speakWithAutoListen(_ text: String, source: String) {
+    private func speakWithAutoListen(_ text: String) {
         allowAutoListen = true
-        speechManager.speak(sanitizeResponse(text))
+        speechManager.speak(text)
     }
 
     /// Extract the first complete sentence from speechBuffer and speak it.
@@ -528,7 +514,7 @@ final class ChatViewModel: ObservableObject {
         guard let sentence = extractFirstSentence() else { return }
         isSpeakingStreamChunk = true
         hasSpokenAnyStreamChunk = true
-        speakWithAutoListen(sentence, source: "openai")
+        speakWithAutoListen(sentence)
     }
 
     @MainActor
@@ -584,7 +570,7 @@ final class ChatViewModel: ObservableObject {
         let remaining = speechBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
         clearSpeechState()
         if !remaining.isEmpty {
-            speakWithAutoListen(remaining, source: "openai")
+            speakWithAutoListen(remaining)
         }
     }
 
@@ -596,7 +582,7 @@ final class ChatViewModel: ObservableObject {
         guard activeStreamToken == token else { return }
         stream?.tickerTask?.cancel()
 
-        let fullText = sanitizeResponse(stream?.finalText ?? stream?.fullText ?? "")
+        let fullText = stream?.finalText ?? stream?.fullText ?? ""
 
         if let s = stream,
            let idx = messages.lastIndex(where: { $0.id == s.messageId }) {
@@ -611,7 +597,7 @@ final class ChatViewModel: ObservableObject {
 
         if !hasSpokenAnyStreamChunk {
             clearSpeechState()
-            speakWithAutoListen(fullText, source: "openai")
+            speakWithAutoListen(fullText)
         } else if !isSpeakingStreamChunk {
             speakRemainingBuffer()
         }
@@ -636,10 +622,9 @@ final class ChatViewModel: ObservableObject {
         } else {
             // Non-streaming (local) OR invalidated streaming (barge-in before placeholder).
             guard activeStreamToken == token else { return }
-            let normalized = sanitizeResponse(fullText)
-            messages.append(Message(role: .assistant, content: normalized))
-            DebugLog.d("[Chat] append assistant: \(normalized.prefix(60))\(normalized.count > 60 ? "…" : "")")
-            speakWithAutoListen(normalized, source: "local")
+            messages.append(Message(role: .assistant, content: fullText))
+            DebugLog.d("[Chat] append assistant: \(fullText.prefix(60))\(fullText.count > 60 ? "…" : "")")
+            speakWithAutoListen(fullText)
             isProcessing = false
         }
     }
@@ -823,11 +808,6 @@ final class ChatViewModel: ObservableObject {
     }
 
     // MARK: - Hands-free auto-listen
-
-    @MainActor
-    private func handleSpeechStarted() {
-        // TODO: Reserved for future use (e.g. barge-in animation, UI feedback on TTS start).
-    }
 
     /// Called by SpeechManager when TTS fully completes (all utterances done).
     @MainActor

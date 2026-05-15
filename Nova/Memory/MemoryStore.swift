@@ -14,11 +14,27 @@ struct MemoryStore: Sendable {
     private static let fileName = "memories.json"
     private static let lock = NSLock()
 
-    /// Supported memory keys for v1.
-    static let supportedKeys: Set<String> = [
-        "name", "nickname", "favorite_ide", "favorite_game", "favorite_color",
-        "favorite_food", "hometown", "company", "job"
+    /// Supported memory keys for v1, mapped to their human-readable display labels
+    /// used when speaking memory back to the user. Adding a key here is the only
+    /// place required to start supporting it end-to-end.
+    static let supportedKeyLabels: [String: String] = [
+        "name": "name",
+        "nickname": "nickname",
+        "favorite_ide": "favorite IDE",
+        "favorite_game": "favorite game",
+        "favorite_color": "favorite color",
+        "favorite_food": "favorite food",
+        "hometown": "hometown",
+        "company": "company",
+        "job": "job",
     ]
+
+    static var supportedKeys: Set<String> { Set(supportedKeyLabels.keys) }
+
+    /// Human-readable label for a key, falling back to the raw key if unknown.
+    static func displayLabel(for key: String) -> String {
+        supportedKeyLabels[key] ?? key
+    }
 
     /// Resolve storage URL and ensure directory exists. Returns nil on any failure.
     private static func resolveStorageURL() -> URL? {

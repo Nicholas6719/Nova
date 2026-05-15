@@ -13,11 +13,6 @@ enum AudioSessionQueue {
 
     private static let queue = DispatchQueue(label: "nova.audio.session", qos: .userInteractive)
 
-    /// Run AVAudioSession configuration on the dedicated queue. Non-blocking; use async version for callers.
-    static func async(work: @escaping () -> Void) {
-        queue.async(execute: work)
-    }
-
     #if os(iOS)
     /// Configure session for playback (TTS). Category .playAndRecord, mode .voiceChat, active=true.
     static func configureForPlayback() async {
