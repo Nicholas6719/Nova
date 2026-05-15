@@ -9,7 +9,6 @@ import Foundation
 
 enum ToolIntent: Sendable, Equatable {
     case openApp(name: String)
-    case quitApp(name: String)
     case batteryStatus(chargingIntent: Bool)
     case webSearch(query: String)
     case none

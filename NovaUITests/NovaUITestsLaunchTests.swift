@@ -1,6 +1,6 @@
 //
 //  NovaUITestsLaunchTests.swift
-//  BriaUITests
+//  NovaUITests
 //
 //  Created by Nicholas Coppola on 2/16/26.
 //

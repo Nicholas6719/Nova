@@ -41,8 +41,8 @@ struct NovaEngineCore: Sendable {
             }
 
             // Pure greeting (no substantive question)
-            if isGreetingPhrase(input) && !hasSubstantiveQuestion(input: input) {
-                let priorGreetings = messages.dropLast().filter { $0.role == .user }.filter { isGreetingPhrase($0.content) }
+            if hasGreetingWord(input) && !hasSubstantiveQuestion(input: input) {
+                let priorGreetings = messages.dropLast().filter { $0.role == .user }.filter { hasGreetingWord($0.content) }
                 return greetingResponse(priorGreetings: priorGreetings, now: now)
             }
 
@@ -119,7 +119,7 @@ struct NovaEngineCore: Sendable {
             let key = update.key
             let val = update.value
             let displayVal = val.prefix(1).uppercased() + val.dropFirst()
-            let label = Self.memoryKeyToDisplayLabel(key)
+            let label = MemoryStore.displayLabel(for:key)
             let response: String
             if let p = update.previousValue, !p.isEmpty {
                 let pDisplay = p.prefix(1).uppercased() + p.dropFirst()
@@ -138,7 +138,7 @@ struct NovaEngineCore: Sendable {
             }
             MemoryContext.updateLastDiscussed(key: save.key, value: save.value)
             let displayValue = save.value.prefix(1).uppercased() + save.value.dropFirst()
-            let fieldLabel = Self.memoryKeyToDisplayLabel(save.key)
+            let fieldLabel = MemoryStore.displayLabel(for:save.key)
             let response = "Got it. I'll remember that your \(fieldLabel) is \(displayValue)."
             DebugLog.d("[Memory] returning save response")
             return response
@@ -147,7 +147,7 @@ struct NovaEngineCore: Sendable {
             if let value = MemoryStore.get(recallKey) {
                 MemoryContext.updateLastDiscussed(key: recallKey, value: value)
                 let displayValue = value.prefix(1).uppercased() + value.dropFirst()
-                let fieldLabel = Self.memoryKeyToDisplayLabel(recallKey)
+                let fieldLabel = MemoryStore.displayLabel(for:recallKey)
                 let response = "Your \(fieldLabel) is \(displayValue)."
                 DebugLog.d("[Memory] returning recall response")
                 return response
@@ -161,8 +161,6 @@ struct NovaEngineCore: Sendable {
         switch toolIntent {
         case .openApp(let name):
             return (await PlatformTools.executeOpenApp(name: name)).spokenResponse
-        case .quitApp:
-            return "Closing apps by name isn't available yet."
         case .batteryStatus(let chargingIntent):
             return (await PlatformTools.executeBatteryStatus(chargingIntent: chargingIntent)).spokenResponse
         case .webSearch(let query):
@@ -300,28 +298,6 @@ struct NovaEngineCore: Sendable {
             if padded.contains(p) { return true }
         }
         return c == "hi" || c == "hello" || c == "hey"
-    }
-
-    private nonisolated func isGreetingPhrase(_ text: String) -> Bool {
-        let c = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !c.isEmpty else { return false }
-        return hasGreetingWord(c)
-    }
-
-    /// Display label for memory keys in responses.
-    private static func memoryKeyToDisplayLabel(_ key: String) -> String {
-        switch key {
-        case "name": return "name"
-        case "nickname": return "nickname"
-        case "favorite_ide": return "favorite IDE"
-        case "favorite_game": return "favorite game"
-        case "favorite_color": return "favorite color"
-        case "favorite_food": return "favorite food"
-        case "hometown": return "hometown"
-        case "company": return "company"
-        case "job": return "job"
-        default: return key
-        }
     }
 
     /// Strip leading wake words and greetings for intent detection.

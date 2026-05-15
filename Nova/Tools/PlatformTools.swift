@@ -77,11 +77,6 @@ enum PlatformTools: Sendable {
         #endif
     }
 
-    /// Execute quit/close app. Disabled for release. Returns safe message; no execution.
-    static func executeQuitApp(name: String) -> NovaToolResult {
-        return .failure(spoken: "Closing apps by name isn't available yet.")
-    }
-
     /// Execute battery status. Returns spoken response. Non-blocking on macOS.
     static func executeBatteryStatus(chargingIntent: Bool) async -> NovaToolResult {
         #if os(macOS)
