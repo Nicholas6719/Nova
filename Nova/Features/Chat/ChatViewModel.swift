@@ -594,6 +594,11 @@ final class ChatViewModel: ObservableObject {
     /// Single entry point for TTS: arms auto-listen and speaks. No fallback — auto-listen starts only from TTS-finished signal.
     @MainActor
     private func speakWithAutoListen(_ text: String, source: String) {
+        // Stop wake-listening mic before TTS to prevent self-capture on iOS.
+        if isRecording && recordingMode == .wake {
+            speechRecognizer.stopListening()
+            skipNextRecordingStopped = true
+        }
         allowAutoListen = true
         transitionPhase(to: .speaking, reason: "speak(\(source))")
         speechManager.speak(sanitizeResponse(text))
@@ -859,6 +864,15 @@ final class ChatViewModel: ObservableObject {
             }
             return
         }
+
+        // Wake mode: never commit captured text as user input.
+        // Transcript may contain TTS echo, ambient noise, or other non-user speech.
+        if recordingMode == .wake {
+            DebugLog.d("[EOS] wake-mode discard reason=\(reason) text=\(text.prefix(40))")
+            transitionPhase(to: .idle, reason: "wakeDiscard(\(reason))")
+            return
+        }
+
         DebugLog.d("[EOS] stop reason=\(reason) mode=\(recordingMode) sid=\(sessionId) text.len=\(text.count)")
         processUserInput(text: text)
     }
