@@ -3,8 +3,8 @@
 **/xcuserdata/
 **/*.xcuserstate
 
-# Xcode user-specific state
-**/xcuserdata/
+# macOS Finder metadata
+**/.DS_Store
 
 # API key config (contains secrets)
 Nova/Config.plist
