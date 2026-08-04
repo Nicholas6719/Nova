@@ -11,3 +11,17 @@ Nova/Config.plist
 
 # Claude session data
 .claude/
+
+# Python backend — bytecode and virtualenvs
+nova_backend/__pycache__/
+**/__pycache__/
+*.pyc
+nova_backend/.venv/
+nova_backend/venv/
+
+# Local model weights — copied in per-machine, never version-controlled
+# (Kokoro TTS files live in nova_backend/, same files as Jarvis)
+nova_backend/kokoro-v1.0.onnx
+nova_backend/voices-v1.0.bin
+*.onnx
+*.bin
