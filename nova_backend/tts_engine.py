@@ -26,11 +26,18 @@ log = logging.getLogger("nova.tts")
 
 
 class TTSEngine:
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None) -> None:
         self.config   = config
         self._queue   = queue.Queue()
         self._stop    = threading.Event()
         self._primary = None
+
+        # Shared gate with the STT engine. While audio is playing we clear it so
+        # the mic loops pause — recording and playback on the same device at once
+        # causes a CoreAudio conflict (PaMacCore -50) that garbles the output.
+        # A no-op Event is used if none is supplied (keeps standalone use simple).
+        self._mic_gate = mic_gate if mic_gate is not None else threading.Event()
+        self._mic_gate.set()
 
         # Start playback worker before loading model so the thread is ready
         self._worker = threading.Thread(target=self._playback_worker, daemon=True)
@@ -107,8 +114,21 @@ class TTSEngine:
             try:
                 text = self._queue.get(timeout=0.1)
             except queue.Empty:
+                # Queue drained: re-open the mic (idempotent).
+                if not self._mic_gate.is_set():
+                    self._mic_gate.set()
                 continue
 
+            # About to play: pause the mic so recording and playback don't
+            # contend for the audio device, and abort any recording already in
+            # flight. sounddevice's sd.rec/sd.play share one global stream, so a
+            # 2s wake-word capture that started just before playback would still
+            # collide; sd.stop() ends it so playback owns the device cleanly.
+            self._mic_gate.clear()
+            try:
+                sd.stop()
+            except Exception:
+                pass
             try:
                 if self._primary:
                     self._play_kokoro(text)
@@ -118,6 +138,10 @@ class TTSEngine:
                 log.error(f"TTS playback error: {exc}")
             finally:
                 self._queue.task_done()
+                # If nothing else is queued, re-open the mic promptly rather than
+                # waiting for the next idle poll.
+                if self._queue.empty():
+                    self._mic_gate.set()
 
     # ── Kokoro playback ───────────────────────────────────────────────────────────
     def _play_kokoro(self, text: str) -> None:

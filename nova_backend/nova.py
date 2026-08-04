@@ -89,6 +89,14 @@ class VoiceAssistant:
         self._rag_ready       = False
         self._rag             = None
 
+        # Shared microphone gate. Set = capture allowed; cleared = mic paused.
+        # A voice assistant must not record while it speaks — both to avoid
+        # hearing its own TTS and to avoid a CoreAudio input/output device
+        # conflict (PaMacCore -50) that garbles playback. TTS clears this around
+        # playback; the STT record loops skip capture while it is clear.
+        self.mic_gate = threading.Event()
+        self.mic_gate.set()
+
         log.info("Nova initializing…")
         self._init_stt()
         self._init_llm()
@@ -102,7 +110,7 @@ class VoiceAssistant:
     def _init_stt(self) -> None:
         log.info("Loading STT (faster-whisper)…")
         from stt_engine import STTEngine
-        self.stt = STTEngine(self.config["stt"])
+        self.stt = STTEngine(self.config["stt"], mic_gate=self.mic_gate)
 
     def _init_llm(self) -> None:
         # MLX arrays and Metal GPU streams are thread-local: the model must be
@@ -153,7 +161,7 @@ class VoiceAssistant:
     def _init_tts(self) -> None:
         log.info("Loading TTS (Kokoro ONNX)…")
         from tts_engine import TTSEngine
-        self.tts = TTSEngine(self.config["tts"])
+        self.tts = TTSEngine(self.config["tts"], mic_gate=self.mic_gate)
 
     def _init_memory(self) -> None:
         from memory import NovaMemory

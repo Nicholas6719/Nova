@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from typing import Optional
 
@@ -32,8 +33,14 @@ OWW_FRAME_SAMPLES = 1280                              # 80 ms at 16 kHz (openwak
 
 
 class STTEngine:
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None) -> None:
         self.config = config
+        # Shared gate with the TTS engine: cleared while Nova is speaking so we
+        # do not record during playback (avoids self-capture and the CoreAudio
+        # input/output device conflict). If unset, defaults to always-open.
+        self._mic_gate = mic_gate if mic_gate is not None else threading.Event()
+        if mic_gate is None:
+            self._mic_gate.set()
         log.info(f"Loading Whisper model: {config['model']}")
         self.model = WhisperModel(
             config["model"],
@@ -42,6 +49,10 @@ class STTEngine:
         )
         self.vad = webrtcvad.Vad(config.get("vad_aggressiveness", 2))
         log.info("STT ready.")
+
+    def _await_mic(self) -> None:
+        """Block until the mic gate is open (Nova is not speaking)."""
+        self._mic_gate.wait()
 
     # ── Wake-word detection ───────────────────────────────────────────────────────
     def record_wake(
@@ -69,6 +80,9 @@ class STTEngine:
         from openwakeword.model import Model
         oww = Model(inference_framework="onnx")
         start = time.time()
+
+        # Don't open the mic while Nova is speaking (device conflict + self-hear).
+        self._await_mic()
 
         with sd.InputStream(
             samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=OWW_FRAME_SAMPLES
@@ -116,6 +130,9 @@ class STTEngine:
         speech_start   = None
         start          = time.time()
 
+        # Don't open the mic while Nova is speaking (device conflict + self-hear).
+        self._await_mic()
+
         with sd.InputStream(
             samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME_SAMPLES
         ) as stream:
@@ -146,6 +163,8 @@ class STTEngine:
 
     # ── Fixed-duration recording ──────────────────────────────────────────────────
     def _record_fixed(self, duration_s: float = 2.0) -> np.ndarray:
+        # Don't open the mic while Nova is speaking (device conflict + self-hear).
+        self._await_mic()
         samples = int(SAMPLE_RATE * duration_s)
         audio   = sd.rec(samples, samplerate=SAMPLE_RATE, channels=1, dtype="int16")
         sd.wait()
