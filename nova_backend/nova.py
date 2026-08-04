@@ -1,0 +1,488 @@
+#!/usr/bin/env python3
+"""
+Nova — Neural Omniscient Voice Assistant
+macOS backend · Entry point
+
+Pipeline:
+  Wake word → STT (faster-whisper + webrtcvad)
+  → Fast-path routing → Memory → Tools
+  → LLM (MLX Llama, streaming) → Sentence-chunked TTS (Kokoro ONNX)
+
+Communication with SwiftUI:
+  HTTP  :5001  — /api/status, /api/messages, /api/message
+  WS    :8766  — real-time state + token stream
+
+Run: python nova.py
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional
+
+# ── Logging ──────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("nova")
+
+# ── Paths ─────────────────────────────────────────────────────────────────────────
+ROOT     = Path(__file__).parent
+DATA_DIR = Path(
+    os.environ.get(
+        "NOVA_DATA_DIR",
+        Path.home() / "Library" / "Application Support" / "Nova",
+    )
+)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_config() -> dict:
+    with open(ROOT / "config.json") as f:
+        return json.load(f)
+
+
+# ── Greeting helper ───────────────────────────────────────────────────────────────
+def _time_of_day_greeting() -> str:
+    hour = datetime.now().hour
+    if hour < 12:
+        return "Good morning"
+    if hour < 17:
+        return "Good afternoon"
+    return "Good evening"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# VoiceAssistant
+# ═══════════════════════════════════════════════════════════════════════════════════
+class VoiceAssistant:
+    """
+    Central orchestrator for the Nova voice pipeline.
+
+    Routing order (first match wins):
+      1. System commands  (sleep / wake / mute)
+      2. Pending confirmation flow
+      3. Memory intents   (remember / recall / update / forget)
+      4. Fast-path intents (greeting / date / time / repeat)
+      5. Tool intents     (open app / volume / battery / search / screenshot)
+      6. RAG context enrichment
+      7. LLM fallback     (MLX streaming + sentence-chunked TTS)
+    """
+
+    # ── Init ──────────────────────────────────────────────────────────────────────
+    def __init__(self) -> None:
+        self.config           = load_config()
+        self.is_muted         = False
+        self.is_awake         = True
+        self._last_response   = ""
+        self._pending_action: Optional[Callable[[], str]] = None
+        self._rag_ready       = False
+        self._rag             = None
+
+        log.info("Nova initializing…")
+        self._init_stt()
+        self._init_llm()
+        self._init_tts()
+        self._init_memory()
+        self._init_rag()
+        self._init_tools()
+        self._init_ws()
+        log.info("Nova ready.")
+
+    def _init_stt(self) -> None:
+        log.info("Loading STT (faster-whisper)…")
+        from stt_engine import STTEngine
+        self.stt = STTEngine(self.config["stt"])
+
+    def _init_llm(self) -> None:
+        log.info("Loading LLM (MLX)…")
+        from llm_engine import LLMEngine
+        self.llm = LLMEngine(self.config["llm"])
+
+    def _init_tts(self) -> None:
+        log.info("Loading TTS (Kokoro ONNX)…")
+        from tts_engine import TTSEngine
+        self.tts = TTSEngine(self.config["tts"])
+
+    def _init_memory(self) -> None:
+        from memory import NovaMemory
+        self.memory = NovaMemory(DATA_DIR / "nova_memory.db")
+
+    def _init_rag(self) -> None:
+        """RAG index loads in background — never blocks startup."""
+        if self.config["memory"].get("rag_enabled", True):
+            t = threading.Thread(target=self._load_rag_background, daemon=True)
+            t.start()
+
+    def _load_rag_background(self) -> None:
+        try:
+            from rag import NovaRAG
+            docs_dir = Path(self.config["memory"]["rag_docs_dir"]).expanduser()
+            self._rag = NovaRAG(DATA_DIR / "rag_index", docs_dir=docs_dir)
+            self._rag_ready = True
+            log.info("RAG index ready.")
+        except Exception as exc:
+            log.warning(f"RAG unavailable: {exc}")
+
+    def _init_tools(self) -> None:
+        from tools import NovaTools
+        self.tools = NovaTools(self.config)
+
+    def _init_ws(self) -> None:
+        from ws_server import NovaWSServer
+        self.ws = NovaWSServer(
+            http_port=self.config["server"]["http_port"],
+            ws_port=self.config["server"]["ws_port"],
+            on_text_message=self._handle_text_input,
+        )
+        self.ws.start()
+
+    # ── State broadcasting ────────────────────────────────────────────────────────
+    def set_state(self, state: str) -> None:
+        log.info(f"[state] → {state}")
+        self.ws.broadcast_state(state)
+
+    # ── Main run loop ─────────────────────────────────────────────────────────────
+    def run(self) -> None:
+        log.info("Starting voice pipeline.")
+        self.set_state("idle")
+        try:
+            self._main_loop()
+        except KeyboardInterrupt:
+            log.info("Nova shutting down.")
+            self.ws.stop()
+
+    def _main_loop(self) -> None:
+        while True:
+            if self.is_muted or not self.is_awake:
+                time.sleep(0.1)
+                continue
+
+            # ── Phase 1: Wait for wake word ──────────────────────────────────
+            self.set_state("idle")
+            log.info("Waiting for wake word…")
+            wake_detected = self.stt.record_wake(
+                wake_keywords=self.config["wake_word"]["keywords"],
+                timeout_s=300.0,
+            )
+            if not wake_detected:
+                continue
+
+            # ── Phase 2: Record command (VAD-gated) ──────────────────────────
+            self.set_state("listening")
+            command_audio = self.stt.record_command(
+                max_duration_s=self.config["stt"]["command_max_duration_s"],
+            )
+
+            if command_audio is None:
+                self._respond("I'm listening.")
+                continue
+
+            # ── Phase 3: Transcribe ──────────────────────────────────────────
+            self.set_state("processing")
+            text = self.stt.transcribe(command_audio)
+            if not text or not text.strip():
+                continue
+
+            log.info(f"[user] {text}")
+            self.memory.add_turn("user", text)
+            self.ws.send_message("user", text)
+            self.handle_turn(text)
+
+    # ── Text input from SwiftUI (typed / programmatic) ────────────────────────────
+    def _handle_text_input(self, text: str) -> None:
+        if not text.strip():
+            return
+        log.info(f"[text-input] {text}")
+        self.memory.add_turn("user", text)
+        self.ws.send_message("user", text)
+        threading.Thread(target=self.handle_turn, args=(text,), daemon=True).start()
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Core turn handler
+    # ═════════════════════════════════════════════════════════════════════════════
+    def handle_turn(self, text: str) -> None:
+        """Full pipeline for one user utterance. First match wins."""
+        text = text.strip()
+
+        # ── 1. System commands ───────────────────────────────────────────────
+        resp = self._handle_system_commands(text)
+        if resp is not None:
+            self._respond(resp)
+            return
+
+        # ── 2. Pending confirmation flow ─────────────────────────────────────
+        if self._pending_action is not None:
+            resp = self._resume_pending(text)
+            if resp is not None:
+                self._respond(resp)
+                return
+
+        # ── 3. Memory intents ────────────────────────────────────────────────
+        resp = self._handle_memory_intent(text)
+        if resp is not None:
+            self._respond(resp)
+            return
+
+        # ── 4. Fast-path intents ─────────────────────────────────────────────
+        resp = self._fast_path(text)
+        if resp is not None:
+            self._respond(resp)
+            return
+
+        # ── 5. Tool intents ──────────────────────────────────────────────────
+        resp = self.tools.match(text)
+        if resp is not None:
+            self._respond(resp)
+            return
+
+        # ── 6. RAG context enrichment ────────────────────────────────────────
+        rag_ctx = ""
+        if self._rag_ready and self._rag:
+            try:
+                rag_ctx = self._rag.query(text, n_results=3)
+            except Exception:
+                pass
+
+        # ── 7. LLM fallback (streaming) ──────────────────────────────────────
+        self.set_state("thinking")
+        self._stream_response(text, rag_context=rag_ctx)
+
+    # ── Respond helper ────────────────────────────────────────────────────────────
+    def _respond(self, text: str) -> None:
+        """Canonical response path: log → store → broadcast → speak."""
+        text = text.strip()
+        if not text:
+            return
+        self._last_response = text
+        self.memory.add_turn("assistant", text)
+        self.ws.send_message("assistant", text)
+        log.info(f"[nova] {text}")
+        self.set_state("speaking")
+        self.tts.speak(text)
+        self.tts.wait_until_done()
+        self.set_state("idle")
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Fast-path intents (date / time / greeting / repeat)
+    # ═════════════════════════════════════════════════════════════════════════════
+    _GREETING_WORDS = frozenset(
+        {"hi", "hello", "hey", "morning", "afternoon", "evening", "howdy", "sup", "yo"}
+    )
+    _DATE_PHRASES = frozenset(
+        {"what day is it", "what's today", "what is today", "today's date", "what date is it",
+         "what is the date", "what's the date"}
+    )
+    _TIME_PHRASES = frozenset(
+        {"what time is it", "what's the time", "current time", "time please"}
+    )
+
+    def _fast_path(self, text: str) -> Optional[str]:
+        low  = text.lower().strip(" .!?")
+        name = self.config["user"]["address_as"]
+
+        # Pure greeting (only greeting words, possibly with name)
+        words = set(low.split())
+        allowed = self._GREETING_WORDS | {name.lower(), "nova"}
+        if words and words.issubset(allowed):
+            return f"{_time_of_day_greeting()}, {name}."
+
+        # Date
+        if low in self._DATE_PHRASES or ("what" in low and "date" in low):
+            return f"Today is {datetime.now().strftime('%A, %B %d, %Y')}."
+
+        # Time
+        if low in self._TIME_PHRASES or ("what" in low and "time" in low and "date" not in low):
+            return f"It's {datetime.now().strftime('%I:%M %p')}."
+
+        # Day of week
+        if "what day" in low and "is it" in low:
+            return f"Today is {datetime.now().strftime('%A')}."
+
+        # Repeat last response
+        if any(p in low for p in ("say that again", "repeat that", "what did you say")):
+            return self._last_response or "I haven't said anything yet."
+
+        return None
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # System commands
+    # ═════════════════════════════════════════════════════════════════════════════
+    def _handle_system_commands(self, text: str) -> Optional[str]:
+        low  = text.lower().strip()
+        name = self.config["user"]["address_as"]
+
+        if any(p in low for p in ("go to sleep", "sleep mode", "stop listening", "take a break")):
+            self.is_awake = False
+            self.set_state("idle")
+            return f"Understood. I'll be here when you need me, {name}."
+
+        if any(p in low for p in ("wake up", "nova wake up", "come back")):
+            self.is_awake = True
+            return f"I'm here, {name}."
+
+        if any(p in low for p in ("mute yourself", "stop talking", "be quiet", "shut up")):
+            self.is_muted = True
+            return "Muted."
+
+        if "unmute" in low or "start listening" in low:
+            self.is_muted = False
+            return "Unmuted."
+
+        return None
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Memory intents
+    # ═════════════════════════════════════════════════════════════════════════════
+    _SAVE_RE    = re.compile(r"remember (?:that )?my ([\w][\w ]*?) is (.+)", re.I)
+    _RECALL_RE  = re.compile(r"what(?:'?s| is) my ([\w][\w ]*?)[\s.?]*$", re.I)
+    _UPDATE_RE  = re.compile(r"actually (?:my ([\w][\w ]*?) is |it'?s )(.+)", re.I)
+    _FORGET_RE  = re.compile(r"forget (?:that )?my ([\w][\w ]*?)$", re.I)
+
+    def _handle_memory_intent(self, text: str) -> Optional[str]:
+        name = self.config["user"]["address_as"]
+
+        # Save
+        m = self._SAVE_RE.search(text)
+        if m:
+            key   = m.group(1).strip()
+            value = m.group(2).strip().rstrip(".")
+            self.memory.save_fact(key, value)
+            return f"Got it. I'll remember your {key} is {value}."
+
+        # Recall
+        m = self._RECALL_RE.search(text)
+        if m:
+            key   = m.group(1).strip()
+            value = self.memory.recall_fact(key)
+            return (f"Your {key} is {value}." if value
+                    else f"I don't have your {key} stored yet.")
+
+        # Update / correction
+        m = self._UPDATE_RE.search(text)
+        if m:
+            key_part = m.group(1)
+            value    = m.group(2).strip().rstrip(".")
+            key      = key_part.strip() if key_part else self.memory.last_key()
+            if key:
+                self.memory.save_fact(key, value)
+                return f"Updated. Your {key} is now {value}."
+            return "I'm not sure what you'd like me to update."
+
+        # Forget
+        m = self._FORGET_RE.search(text)
+        if m:
+            key = m.group(1).strip()
+            self.memory.delete_fact(key)
+            return f"Done. I've forgotten your {key}."
+
+        # Meta-recall
+        low = text.lower()
+        if any(p in low for p in ("what do you know about me", "what do you remember", "what have i told you")):
+            facts = self.memory.all_facts()
+            if not facts:
+                return f"I don't have any facts stored about you yet, {name}."
+            items = "; ".join(f"your {k.replace('_', ' ')} is {v}" for k, v in facts.items())
+            return f"Here's what I have: {items}."
+
+        return None
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # LLM streaming with sentence-chunked TTS overlap
+    # ═════════════════════════════════════════════════════════════════════════════
+    _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+    def _stream_response(self, user_text: str, rag_context: str = "") -> None:
+        """
+        Stream LLM tokens → split into sentences → speak each sentence as it
+        completes → overlap TTS with continued LLM generation.
+        """
+        memory_ctx    = self.memory.get_context_for_llm()
+        system_prompt = self._build_system_prompt(memory_ctx, rag_context)
+        history       = self.memory.get_recent_turns(n=10)
+
+        sentence_buf     = ""
+        full_response    = ""
+        first_token_sent = False
+
+        def on_token(token: str) -> None:
+            nonlocal sentence_buf, full_response, first_token_sent
+
+            full_response += token
+            sentence_buf  += token
+            self.ws.stream_token(token)
+
+            if not first_token_sent:
+                self.set_state("speaking")
+                first_token_sent = True
+
+            # Emit complete sentences to TTS immediately
+            parts = self._SENT_SPLIT.split(sentence_buf)
+            if len(parts) > 1:
+                for sentence in parts[:-1]:
+                    s = sentence.strip()
+                    if s:
+                        self.tts.speak(s)
+                sentence_buf = parts[-1]
+
+        self.llm.stream(
+            system_prompt=system_prompt,
+            history=history,
+            user_message=user_text,
+            on_token=on_token,
+        )
+
+        # Speak any remaining text after stream ends
+        if sentence_buf.strip():
+            self.tts.speak(sentence_buf.strip())
+
+        self.tts.wait_until_done()
+
+        self._last_response = full_response
+        self.memory.add_turn("assistant", full_response)
+        self.ws.send_message("assistant", full_response)
+
+        # Background summarization — yields immediately if pipeline is busy
+        threading.Thread(
+            target=self.memory.summarize_old_turns,
+            kwargs={"keep_recent": self.config["memory"]["max_recent_turns"]},
+            daemon=True,
+        ).start()
+
+        self.set_state("idle")
+
+    def _build_system_prompt(self, memory_ctx: str, rag_ctx: str) -> str:
+        from system_prompt import build_system_prompt
+        return build_system_prompt(self.config, memory_context=memory_ctx, rag_context=rag_ctx)
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Confirmation flow
+    # ═════════════════════════════════════════════════════════════════════════════
+    def _resume_pending(self, text: str) -> Optional[str]:
+        low = text.lower()
+        if any(w in low for w in ("yes", "yeah", "yep", "do it", "confirm", "go ahead", "sure", "ok")):
+            result = self._pending_action()
+            self._pending_action = None
+            return result
+        else:
+            self._pending_action = None
+            return "Cancelled."
+
+    def set_pending(self, action: Callable[[], str], prompt: str) -> None:
+        """Register a pending confirmation action and speak the prompt."""
+        self._pending_action = action
+        self._respond(prompt)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    VoiceAssistant().run()

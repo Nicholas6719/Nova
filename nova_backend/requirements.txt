@@ -1,0 +1,44 @@
+# Nova backend — Python dependencies
+# Install: pip install -r requirements.txt
+#
+# Apple Silicon (M-series Mac) required for MLX inference.
+# All inference is local — no cloud dependencies.
+
+# ── STT ───────────────────────────────────────────────────────────────────────────
+faster-whisper>=1.0.0
+webrtcvad>=2.0.10
+sounddevice>=0.4.6
+numpy>=1.26.0
+
+# ── LLM — MLX (Apple Silicon only) ───────────────────────────────────────────────
+mlx>=0.16.0
+mlx-lm>=0.16.0
+# Model downloaded automatically on first run via mlx_lm.load()
+# Default: mlx-community/Llama-3.2-3B-Instruct-4bit  (~2GB)
+# Upgrade:  mlx-community/Llama-3.1-8B-Instruct-4bit  (~5GB)
+
+# ── TTS — Kokoro ONNX (fully local, no cloud) ─────────────────────────────────────
+kokoro-onnx>=0.4.0
+onnxruntime>=1.18.0
+# Model files required (same as Jarvis):
+#   kokoro-v1.0.onnx
+#   voices-v1.0.bin
+# Place them in nova_backend/ or update tts_engine.py with absolute paths.
+
+# ── Wake word (optional — transcript fallback used if not installed) ───────────────
+openwakeword>=0.6.0
+
+# ── RAG — local vector store ──────────────────────────────────────────────────────
+chromadb>=0.5.0
+pypdf>=4.0.0                     # PDF reading for RAG ingestion
+
+# ── WebSocket server ──────────────────────────────────────────────────────────────
+websockets>=12.0
+
+# ── macOS integrations (PyObjC) ───────────────────────────────────────────────────
+# Used for EventKit calendar integration (implemented next phase)
+pyobjc-core>=10.0
+pyobjc-framework-EventKit>=10.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
