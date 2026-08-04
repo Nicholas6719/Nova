@@ -127,16 +127,32 @@ final class BackendManager: ObservableObject {
 
     /// Waits for the child process to terminate without blocking the main actor.
     private nonisolated func waitForExit(_ proc: Process) async {
+        // A continuation must resume EXACTLY once. Both the terminationHandler and
+        // the already-exited guard can fire for the same process (especially when
+        // the child dies immediately on launch), so gate the resume behind an
+        // atomic flag so only the first one through actually resumes.
+        let resumed = ResumeGuard()
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             proc.terminationHandler = { _ in
-                continuation.resume()
+                if resumed.claim() { continuation.resume() }
             }
             // Guard against a race where the process already exited before the
             // handler was installed.
             if !proc.isRunning {
-                proc.terminationHandler = nil
-                continuation.resume()
+                if resumed.claim() { continuation.resume() }
             }
+        }
+    }
+
+    /// One-shot, thread-safe latch: `claim()` returns true exactly once.
+    private final class ResumeGuard: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if done { return false }
+            done = true
+            return true
         }
     }
 
