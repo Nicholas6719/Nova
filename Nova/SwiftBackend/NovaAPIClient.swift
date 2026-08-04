@@ -35,31 +35,62 @@ final class NovaAPIClient: ObservableObject {
     private var webSocketTask: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
 
+    /// True between `connect()` and `disconnect()`. Drives the reconnect loop so
+    /// a WebSocket failure retries instead of giving up — the backend often is
+    /// not listening yet when the app first launches (it loads models for a few
+    /// seconds), and it may also be restarted by BackendManager.
+    private var shouldStayConnected = false
+
     /// ID of the assistant message currently being assembled from `token` events,
     /// if any.
     private var streamingMessageID: UUID?
 
     // MARK: - Connection lifecycle
 
-    /// Opens the WebSocket and starts the receive loop. Idempotent.
+    /// Begins maintaining a WebSocket connection to the backend, retrying until
+    /// it is reachable and reconnecting if it later drops. Idempotent.
     func connect() {
-        guard webSocketTask == nil else { return }
-        let task = session.webSocketTask(with: wsURL)
-        webSocketTask = task
-        task.resume()
-        isConnected = true
+        guard receiveTask == nil else { return }
+        shouldStayConnected = true
         receiveTask = Task { [weak self] in
-            await self?.receiveLoop()
+            await self?.maintainConnection()
         }
     }
 
-    /// Closes the WebSocket and stops the receive loop.
+    /// Stops connecting and closes any open WebSocket.
     func disconnect() {
+        shouldStayConnected = false
         receiveTask?.cancel()
         receiveTask = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         isConnected = false
+    }
+
+    /// Reconnect supervisor: (re)opens the socket and pumps messages until it
+    /// fails, then waits briefly and tries again for as long as we should stay
+    /// connected. On each successful open it reloads history so the UI catches
+    /// up on anything sent while it was down.
+    private func maintainConnection() async {
+        while shouldStayConnected && !Task.isCancelled {
+            let task = session.webSocketTask(with: wsURL)
+            webSocketTask = task
+            task.resume()
+
+            // Confirm the backend is actually reachable before declaring
+            // connected — webSocketTask.resume() succeeds optimistically even
+            // when nothing is listening.
+            await loadHistory()
+
+            await receiveLoop()   // returns when the connection drops
+
+            isConnected = false
+            webSocketTask?.cancel(with: .goingAway, reason: nil)
+            webSocketTask = nil
+
+            if !shouldStayConnected || Task.isCancelled { break }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1s backoff
+        }
     }
 
     // MARK: - REST: outbound
@@ -134,6 +165,8 @@ final class NovaAPIClient: ObservableObject {
         while !Task.isCancelled, let task = webSocketTask {
             do {
                 let message = try await task.receive()
+                // A successful receive proves the backend is up and listening.
+                isConnected = true
                 switch message {
                 case .string(let text):
                     handle(text)
@@ -143,11 +176,9 @@ final class NovaAPIClient: ObservableObject {
                     break
                 }
             } catch {
-                // Connection dropped; mark disconnected and exit. BackendManager
-                // restarts the process and the view can re-`connect()`.
-                isConnected = false
-                webSocketTask = nil
-                break
+                // Connection failed or dropped (often: backend not up yet at
+                // launch). Return so the supervisor waits and reconnects.
+                return
             }
         }
     }
