@@ -199,25 +199,64 @@ final class BackendManager: ObservableObject {
         throw BackendError.scriptNotFound
     }
 
-    /// Finds a Python 3 interpreter. Checks common install locations and the
-    /// `PATH` via `/usr/bin/env`.
+    /// Finds a Python 3 interpreter that can actually run the backend.
+    ///
+    /// A plain "first python3 on disk" search is not enough: several interpreters
+    /// exist (system `/usr/bin/python3`, Homebrew, miniforge) and only the one
+    /// with the backend's dependencies installed (`mlx_lm`) will work. Picking the
+    /// wrong one makes `nova.py` crash on import and the supervisor restart-loops.
+    /// So each candidate is validated by importing `mlx_lm` before it's accepted.
     private func locatePython() throws -> String {
         let fm = FileManager.default
-        let candidates = [
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3"
-        ]
-        for path in candidates where fm.isExecutableFile(atPath: path) {
-            return path
+
+        // Explicit override wins, unconditionally (escape hatch for any setup).
+        if let override = ProcessInfo.processInfo.environment["NOVA_PYTHON"],
+           fm.isExecutableFile(atPath: override) {
+            return override
         }
 
-        // Fall back to resolving `python3` on PATH.
-        if let resolved = resolveOnPath("python3") {
-            return resolved
+        var candidates = [
+            "/opt/homebrew/Caskroom/miniforge/base/bin/python3",  // conda/miniforge
+            "/opt/homebrew/bin/python3",                          // Homebrew (Apple silicon)
+            "/usr/local/bin/python3",                             // Homebrew (Intel)
+            "/usr/bin/python3"                                    // macOS system
+        ]
+        if let onPath = resolveOnPath("python3") {
+            candidates.append(onPath)
+        }
+
+        var firstUsable: String?
+        for path in candidates where fm.isExecutableFile(atPath: path) {
+            if firstUsable == nil { firstUsable = path }
+            if pythonCanImportBackendDeps(path) {
+                return path
+            }
+        }
+
+        // None validated (deps not importable from any). Fall back to the first
+        // real interpreter so the backend can at least start and surface its own
+        // import error in the logs, rather than failing silently here.
+        if let fallback = firstUsable {
+            return fallback
         }
 
         throw BackendError.pythonNotFound
+    }
+
+    /// Returns true if `python -c "import mlx_lm"` succeeds for this interpreter.
+    private func pythonCanImportBackendDeps(_ pythonPath: String) -> Bool {
+        let check = Process()
+        check.executableURL = URL(fileURLWithPath: pythonPath)
+        check.arguments = ["-c", "import mlx_lm"]
+        check.standardOutput = Pipe()
+        check.standardError = Pipe()
+        do {
+            try check.run()
+            check.waitUntilExit()
+            return check.terminationStatus == 0
+        } catch {
+            return false
+        }
     }
 
     private func resolveOnPath(_ name: String) -> String? {

@@ -64,14 +64,13 @@ final class NovaAPIClient: ObservableObject {
 
     // MARK: - REST: outbound
 
-    /// Sends user text to the pipeline via `POST /api/message`. The user's turn
-    /// is appended locally immediately so the UI feels responsive; the assistant
-    /// reply arrives over the WebSocket.
+    /// Sends user text to the pipeline via `POST /api/message`. The backend
+    /// echoes the user's turn back over the WebSocket as a `message` frame, so we
+    /// do NOT append it locally here — doing both showed every message twice.
+    /// The backend echo is the single source of truth for the message list.
     func sendMessage(_ text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-
-        messages.append(Message(role: .user, content: trimmed))
 
         let url = httpBase.appendingPathComponent("api/message")
         var request = URLRequest(url: url)

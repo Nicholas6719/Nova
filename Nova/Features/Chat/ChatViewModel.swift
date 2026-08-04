@@ -206,7 +206,12 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Wake word (Slice A: detection only, no command capture)
 
-    private var wakeWordEnabled = true
+    /// Python backend owns all voice I/O (mic capture via faster-whisper, speech
+    /// via Kokoro). Swift's on-device wake-loop is disabled so the two engines
+    /// don't fight over the microphone or capture Nova's own TTS. Every guard in
+    /// startWakeListeningIfIdle()/startWakeListening() checks this first, so the
+    /// Swift mic is never opened while it's false.
+    private var wakeWordEnabled = false
     @Published private(set) var isWakeTriggered: Bool = false
     @Published private(set) var wakeTriggerPhrase: String?
     private enum PendingTransition: Equatable { case none; case toWakeTriggered(phrase: String); case toReturnToWake; case toFreshCommandAfterBareWake }
@@ -575,17 +580,14 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Sentence-by-sentence TTS
 
-    /// Single entry point for TTS: arms auto-listen and speaks. No fallback — auto-listen starts only from TTS-finished signal.
+    /// Single entry point for TTS.
+    ///
+    /// The Python backend now performs all speech (Kokoro). Swift TTS is disabled
+    /// so the app doesn't speak on top of the backend. Kept as the one choke point
+    /// so re-enabling on-device speech later is a single change here.
     @MainActor
     private func speakWithAutoListen(_ text: String) {
-        // Stop wake-listening mic before TTS to prevent self-capture on iOS.
-        if isRecording && recordingMode == .wake {
-            speechRecognizer.stopListening()
-            skipNextRecordingStopped = true
-        }
-        allowAutoListen = true
-        transitionPhase(to: .speaking, reason: "speak")
-        speechManager.speak(text)
+        // no-op: Python backend owns TTS.
     }
 
     /// Extract the first complete sentence from speechBuffer and speak it.
