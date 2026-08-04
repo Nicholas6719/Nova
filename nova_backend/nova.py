@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import re
 import threading
 import time
@@ -104,9 +105,50 @@ class VoiceAssistant:
         self.stt = STTEngine(self.config["stt"])
 
     def _init_llm(self) -> None:
+        # MLX arrays and Metal GPU streams are thread-local: the model must be
+        # loaded on, and every generation run on, ONE consistent thread. We use a
+        # single long-lived worker thread that owns MLX end-to-end. Both the voice
+        # loop (main thread) and text input (HTTP/WS threads) submit turns to it
+        # via a queue, so MLX is never touched off-thread.
+        self.llm: Optional["object"] = None
+        self._llm_queue: "queue.Queue[tuple]" = queue.Queue()
+        self._llm_ready = threading.Event()
+        self._llm_thread = threading.Thread(
+            target=self._llm_worker, daemon=True, name="nova-llm"
+        )
+        self._llm_thread.start()
+        # Block startup until the model is loaded on the worker thread so the
+        # "Nova ready." ordering and first-turn latency stay predictable.
+        self._llm_ready.wait()
+
+    def _llm_worker(self) -> None:
+        """Owns MLX for the process lifetime: loads the model, then serially
+        executes every turn submitted via ``self._llm_queue``."""
         log.info("Loading LLM (MLX)…")
         from llm_engine import LLMEngine
         self.llm = LLMEngine(self.config["llm"])
+        self._llm_ready.set()
+
+        while True:
+            text, done = self._llm_queue.get()
+            try:
+                self._handle_turn_impl(text)
+            except Exception:
+                log.exception("Turn handler failed")
+                self.set_state("idle")
+            finally:
+                if done is not None:
+                    done.set()
+                self._llm_queue.task_done()
+
+    def _submit_turn(self, text: str, wait: bool) -> None:
+        """Enqueue a turn for the MLX worker thread. Voice waits for completion
+        (so the wake loop doesn't resume mid-response); text input returns
+        immediately and receives results over the WebSocket."""
+        done = threading.Event() if wait else None
+        self._llm_queue.put((text, done))
+        if done is not None:
+            done.wait()
 
     def _init_tts(self) -> None:
         log.info("Loading TTS (Kokoro ONNX)…")
@@ -196,7 +238,9 @@ class VoiceAssistant:
             log.info(f"[user] {text}")
             self.memory.add_turn("user", text)
             self.ws.send_message("user", text)
-            self.handle_turn(text)
+            # Run on the MLX worker thread and wait: the wake loop must not resume
+            # until the response (and its TTS) is done, or it self-captures.
+            self._submit_turn(text, wait=True)
 
     # ── Text input from SwiftUI (typed / programmatic) ────────────────────────────
     def _handle_text_input(self, text: str) -> None:
@@ -205,13 +249,18 @@ class VoiceAssistant:
         log.info(f"[text-input] {text}")
         self.memory.add_turn("user", text)
         self.ws.send_message("user", text)
-        threading.Thread(target=self.handle_turn, args=(text,), daemon=True).start()
+        # Submit to the MLX worker and return immediately; the response streams
+        # back over the WebSocket. (Never touch MLX from this HTTP/WS thread.)
+        self._submit_turn(text, wait=False)
 
     # ═════════════════════════════════════════════════════════════════════════════
     # Core turn handler
     # ═════════════════════════════════════════════════════════════════════════════
-    def handle_turn(self, text: str) -> None:
-        """Full pipeline for one user utterance. First match wins."""
+    def _handle_turn_impl(self, text: str) -> None:
+        """Full pipeline for one user utterance. First match wins.
+
+        Always runs on the ``nova-llm`` worker thread (via ``_submit_turn``) so
+        every MLX access stays on the thread that owns the model."""
         text = text.strip()
 
         # ── 1. System commands ───────────────────────────────────────────────

@@ -14,6 +14,7 @@ Ports differ from Jarvis (3000/8765) so both can run simultaneously.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -39,6 +40,9 @@ class NovaWSServer:
         self._messages: list  = []           # rolling window for /api/messages
         self._state           = "idle"
         self._running         = False
+        # Event loop that owns the WS connections. Broadcasts originate on other
+        # threads (LLM worker, main), so sends must be scheduled back onto it.
+        self._loop            = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────────
     def start(self) -> None:
@@ -66,23 +70,35 @@ class NovaWSServer:
         self._ws_broadcast({"type": "token", "token": token})
 
     def _ws_broadcast(self, payload: dict) -> None:
+        # Called from non-async threads (LLM worker, main). websockets' send() is
+        # a coroutine, so hand each send to the WS event loop rather than calling
+        # it synchronously (which silently never transmits).
+        loop = self._loop
+        if loop is None:
+            return
         data = json.dumps(payload)
-        dead: set = set()
         with self._clients_lock:
             clients = list(self._clients)
-        for client in clients:
-            try:
-                client.send(data)
-            except Exception:
-                dead.add(client)
-        if dead:
-            with self._clients_lock:
-                self._clients -= dead
+
+        async def _send_all():
+            dead: set = set()
+            for client in clients:
+                try:
+                    await client.send(data)
+                except Exception:
+                    dead.add(client)
+            if dead:
+                with self._clients_lock:
+                    self._clients -= dead
+
+        try:
+            asyncio.run_coroutine_threadsafe(_send_all(), loop)
+        except Exception:
+            pass
 
     # ── WebSocket server ──────────────────────────────────────────────────────────
     def _run_ws(self) -> None:
         try:
-            import asyncio
             import websockets
 
             server_ref = self
@@ -111,6 +127,8 @@ class NovaWSServer:
                         server_ref._clients.discard(websocket)
 
             async def main():
+                # Publish the running loop so _ws_broadcast can schedule sends.
+                server_ref._loop = asyncio.get_running_loop()
                 async with websockets.serve(handler, "localhost", self.ws_port):
                     await asyncio.Future()   # run forever
 

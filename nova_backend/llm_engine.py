@@ -46,13 +46,15 @@ class LLMEngine:
 
         sampler = make_sampler(temp=self.config.get("temperature", 0.7))
         full = ""
-        for token in stream_generate(
+        for response in stream_generate(
             self.model,
             self.tokenizer,
             prompt=prompt,
             max_tokens=self.config.get("max_tokens", 512),
             sampler=sampler,
         ):
+            # mlx-lm yields GenerationResponse objects; the text is on `.text`.
+            token = response.text
             full += token
             on_token(token)
 
