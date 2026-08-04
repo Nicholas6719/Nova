@@ -9,8 +9,14 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var viewModel = ChatViewModel()
+    @StateObject private var viewModel: ChatViewModel
     private static let liveTranscriptID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+
+    /// Injects the app-owned `BackendManager` so the view model can reference the
+    /// shared supervisor without creating or starting it.
+    init(backendManager: BackendManager) {
+        _viewModel = StateObject(wrappedValue: ChatViewModel(backendManager: backendManager))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -155,6 +161,6 @@ private extension Color {
 
 #Preview {
     NavigationStack {
-        ContentView()
+        ContentView(backendManager: BackendManager())
     }
 }

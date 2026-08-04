@@ -63,6 +63,11 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var isProcessing: Bool = false
 
+    /// Latest pipeline state from the Python backend
+    /// ("idle" | "listening" | "thinking" | "speaking"). Mirrored from
+    /// `novaAPIClient.currentState` and used to drive the status indicator.
+    @Published private(set) var backendState: String = "idle"
+
     // MARK: - Phase (V1.5 observational state layer)
 
     /// Single source of truth for assistant runtime phase.
@@ -70,6 +75,14 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var phase: AssistantPhase = .idle
 
     var status: ChatStatus {
+        // Prefer the Python backend's authoritative pipeline state. Fall back to
+        // local speech/recording state for any value the backend doesn't report.
+        switch backendState {
+        case "speaking":  return .speaking
+        case "thinking":  return .processing
+        case "listening": return .listening
+        default:          break
+        }
         if speechManager.isSpeaking { return .speaking }
         if isProcessing { return .processing }
         if isRecording {
@@ -87,7 +100,17 @@ final class ChatViewModel: ObservableObject {
 
     private let speechRecognizer = SpeechRecognizer()
     private let speechManager = SpeechManager()
-    private let engine = NovaEngine()
+
+    // MARK: - Python backend integration
+
+    /// Client for the Python backend (HTTP :5001 + WebSocket :8766). Owns the
+    /// authoritative message list and pipeline state. Exposed so the view layer
+    /// can observe it directly if desired.
+    let novaAPIClient = NovaAPIClient()
+
+    /// Shared backend supervisor. Owned by `NovaApp` and injected in; this view
+    /// model references it but neither creates nor starts it.
+    private let backendManager: BackendManager
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -208,7 +231,27 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Init
 
-    init() {
+    /// - Parameter backendManager: the shared, app-owned process supervisor.
+    ///   `ChatViewModel` does not start or stop it; `NovaApp` owns its lifecycle.
+    init(backendManager: BackendManager) {
+        self.backendManager = backendManager
+
+        // Open the live WebSocket. The client owns the authoritative message list
+        // and pipeline state; mirror both into this view model so the existing UI
+        // bindings work. The backend process itself is started by NovaApp.
+        novaAPIClient.connect()
+
+        novaAPIClient.$messages
+            .receive(on: RunLoop.main)
+            .assign(to: &$messages)
+
+        novaAPIClient.$currentState
+            .receive(on: RunLoop.main)
+            .sink { [weak self] state in
+                self?.backendState = state
+            }
+            .store(in: &cancellables)
+
         speechRecognizer.$transcript
             .assign(to: &$liveTranscript)
 
@@ -448,11 +491,14 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Process user input
 
+    /// Routes committed user input to the Python backend. The backend owns the
+    /// LLM, TTS, and memory pipeline; the assistant reply and pipeline state
+    /// arrive back over the WebSocket and are mirrored into `messages` /
+    /// `backendState`. The old on-device OpenAI streaming path below is retained
+    /// but no longer invoked.
     private func processUserInput(text: String) {
-        guard !text.isEmpty else { return }
-        guard !isProcessing else { return }
-        isProcessing = true
-        transitionPhase(to: .processing, reason: "processUserInput")
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         errorMessage = nil
         autoListenTask?.cancel()
         autoListenTask = nil
@@ -461,57 +507,9 @@ final class ChatViewModel: ObservableObject {
         endOfSpeechTask?.cancel()
         endOfSpeechTask = nil
 
-        cancelStreamingState()
-
-        let token = UUID()
-        activeStreamToken = token
-
-        let userMessage = Message(role: .user, content: text)
-        messages.append(userMessage)
-        DebugLog.d("[Chat] append user: \(text.prefix(60))\(text.count > 60 ? "…" : "")")
-
-        let messageSnapshot = messages
-
-        let apiKey = APIKeyProvider.openAIKey
-        let cfg = LLMConfig(
-            apiKey: apiKey,
-            endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
-            model: "gpt-4o-mini",
-            temperature: 0.7
-        )
-
-        let onStreamStart: @Sendable () -> Void = { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.beginStreaming(token: token)
-            }
-        }
-
-        let onStreamDelta: @Sendable (String) -> Void = { [weak self] chunk in
-            Task { @MainActor [weak self] in
-                self?.receiveStreamDelta(chunk, token: token)
-            }
-        }
-
-        let engineRef = engine
-        Task.detached(priority: .userInitiated) { [cfg, messageSnapshot, text, onStreamStart, onStreamDelta, token] in
-            do {
-                let resp = try await engineRef.generateResponse(
-                    messages: messageSnapshot,
-                    newInput: text,
-                    llmConfig: cfg,
-                    onStreamStart: onStreamStart,
-                    onStreamDelta: onStreamDelta
-                )
-                Task { @MainActor [weak self] in
-                    self?.onEngineComplete(fullText: resp, token: token)
-                }
-            } catch {
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    DebugLog.d("[Chat] engine error: \(error)")
-                    self.onEngineComplete(fullText: "Sorry — I couldn't reach my online brain. Please try again.", token: token)
-                }
-            }
+        DebugLog.d("[Chat] -> backend: \(trimmed.prefix(60))\(trimmed.count > 60 ? "…" : "")")
+        Task { [weak self] in
+            await self?.novaAPIClient.sendMessage(trimmed)
         }
     }
 
