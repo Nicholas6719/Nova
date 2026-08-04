@@ -318,7 +318,7 @@ class VoiceAssistant:
         log.info(f"[nova] {text}")
         self.set_state("speaking")
         self.tts.speak(text)
-        self.tts.wait_until_done()
+        self.tts.wait_until_done(timeout=60)
         self.set_state("idle")
 
     # ═════════════════════════════════════════════════════════════════════════════
@@ -494,7 +494,7 @@ class VoiceAssistant:
         if sentence_buf.strip():
             self.tts.speak(sentence_buf.strip())
 
-        self.tts.wait_until_done()
+        self.tts.wait_until_done(timeout=60)
 
         self._last_response = full_response
         self.memory.add_turn("assistant", full_response)

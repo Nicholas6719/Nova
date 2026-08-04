@@ -72,9 +72,24 @@ class TTSEngine:
             return
         self._queue.put(text)
 
-    def wait_until_done(self) -> None:
-        """Block until the sentence queue is fully played out."""
-        self._queue.join()
+    def wait_until_done(self, timeout: Optional[float] = None) -> None:
+        """Block until the sentence queue is fully played out.
+
+        A timeout is important: this is called from the single LLM worker thread,
+        so if a playback call ever hangs (e.g. a wedged CoreAudio stream), an
+        unbounded wait would freeze the entire turn pipeline — status stuck on
+        "speaking", no further turns processed. With a timeout we give up waiting
+        and let the pipeline continue instead of deadlocking.
+        """
+        if timeout is None:
+            self._queue.join()
+            return
+        deadline = time.time() + timeout
+        while self._queue.unfinished_tasks > 0:
+            if time.time() >= deadline:
+                log.warning("TTS wait timed out; continuing without blocking pipeline.")
+                return
+            time.sleep(0.05)
 
     def stop_and_flush(self) -> None:
         """Barge-in: discard queued sentences and stop current playback."""
@@ -113,8 +128,22 @@ class TTSEngine:
             lang="en-us",
         )
         audio = np.array(samples, dtype=np.float32)
-        sd.play(audio, samplerate=sample_rate)
-        sd.wait()
+
+        # Guard playback so a wedged output device (seen as PaMacCore -50 when the
+        # mic is also open) can neither hang the worker nor kill the turn. On any
+        # audio error, fall back to macOS `say`, which uses a separate process and
+        # sidesteps the PortAudio input/output contention.
+        try:
+            sd.play(audio, samplerate=sample_rate)
+            sd.wait()
+        except Exception as exc:
+            log.warning(f"Kokoro playback failed ({exc}); using macOS say for this line.")
+            try:
+                sd.stop()
+            except Exception:
+                pass
+            self._play_macos_say(text)
+
         delay = self.config.get("post_utterance_delay_s", 0.1)
         if delay > 0:
             time.sleep(delay)

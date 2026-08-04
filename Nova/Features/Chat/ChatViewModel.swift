@@ -403,6 +403,15 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Microphone
 
     func toggleRecording() {
+        // Python backend owns the microphone. While Swift voice is disabled, the
+        // mic button must not open a second input stream — two processes holding
+        // the mic while the backend also plays audio causes a CoreAudio conflict
+        // (PaMacCore -50). Re-enabling Swift voice is a single flag flip.
+        guard wakeWordEnabled else {
+            DebugLog.d("[Chat] mic button ignored — Python backend owns voice")
+            return
+        }
+
         // Barge-in: tap during speech, streaming, or processing → stop + start listening (1 tap).
         if speechManager.isSpeaking || activeStreamToken != nil || isProcessing {
             speechManager.prepareForBargeIn()
