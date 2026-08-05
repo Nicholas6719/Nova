@@ -31,7 +31,8 @@
   "wake_word": {
     "enabled": true,
     "keywords": ["nova", "hey nova"],
-    "_note": "Using transcript-based wake detection by default. To use openwakeword, install it and set a model path here."
+    "conversation_timeout_s": 15.0,
+    "_note": "Using transcript-based wake detection by default. After Nova replies it stays in conversation mode (no wake word needed) until conversation_timeout_s of silence."
   },
 
   "server": {

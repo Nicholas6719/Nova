@@ -192,10 +192,14 @@ class NovaMemory:
         """
         Build a concise memory summary to inject into the system prompt.
         Called on every LLM turn — should be fast.
+
+        Only reliable memory is injected: explicit facts the user asked Nova to
+        remember, and inferred profile preferences. Auto-generated "episodes"
+        (raw concatenated transcript dumps) are deliberately NOT injected — the
+        small model reads them as fact and confabulates false recollections.
         """
         facts    = self.all_facts()
         profile  = self.get_profile()
-        episodes = self.get_recent_episodes(n=5)
 
         parts = []
 
@@ -210,10 +214,6 @@ class NovaMemory:
                 f"  {k.replace('_', ' ')}: {v}" for k, v in profile.items()
             )
             parts.append(f"Inferred preferences:\n{lines}")
-
-        if episodes:
-            lines = "\n".join(f"  - {ep['summary']}" for ep in episodes)
-            parts.append(f"Recent memories:\n{lines}")
 
         return "\n\n".join(parts)
 

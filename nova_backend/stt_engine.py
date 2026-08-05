@@ -167,7 +167,11 @@ class STTEngine:
         return False
 
     # ── Command recording (VAD-gated, adaptive silence) ────────────────────────────
-    def record_command(self, max_duration_s: float = 15.0) -> Optional[np.ndarray]:
+    def record_command(
+        self,
+        max_duration_s: float = 15.0,
+        start_timeout_s: Optional[float] = None,
+    ) -> Optional[np.ndarray]:
         """
         Record a full user utterance from the persistent stream.
 
@@ -175,6 +179,9 @@ class STTEngine:
         wake word isn't lost), then reads live audio until an adaptive silence
         cutoff — short for quick commands, longer once the user has been speaking
         a while, so long sentences aren't cut off. Returns int16 audio or None.
+
+        start_timeout_s: if set and no speech begins within that many seconds,
+        return None. Used for conversation mode — silence returns to wake mode.
         """
         self._ensure_stream()
 
@@ -195,8 +202,14 @@ class STTEngine:
                 priming.append(raw[i:i + FRAME_BYTES])
         processing_priming = bool(priming)
 
+        # Deadline for the user to START speaking (conversation-mode timeout).
+        start_deadline = (time.time() + start_timeout_s) if start_timeout_s else None
         deadline = time.time() + max(max_duration_s, 1.0) + 5.0  # absolute safety
         while time.time() < deadline:
+            # Give up if the user never started speaking within start_timeout_s.
+            if (not speaking and not priming and start_deadline is not None
+                    and time.time() > start_deadline):
+                return None
             if priming:
                 frame = priming.pop(0)
             else:

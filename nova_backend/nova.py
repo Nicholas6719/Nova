@@ -88,6 +88,9 @@ class VoiceAssistant:
         self._pending_action: Optional[Callable[[], str]] = None
         self._rag_ready       = False
         self._rag             = None
+        # Set by a "return to wake mode" voice command to drop out of
+        # conversation mode immediately (without full sleep).
+        self._return_to_wake  = False
 
         # Shared microphone gate. Set = capture allowed; cleared = mic paused.
         # A voice assistant must not record while it speaks — both to avoid
@@ -241,45 +244,74 @@ class VoiceAssistant:
         log.info(f"Parent watchdog armed (pid {parent_pid}).")
 
     def _main_loop(self) -> None:
+        in_conversation = False   # once awake, keep listening without the wake word
         while True:
             if self.is_muted or not self.is_awake:
+                in_conversation = False
                 time.sleep(0.1)
                 continue
 
-            # ── Phase 1: Wait for wake word ──────────────────────────────────
-            self.set_state("idle")
-            log.info("Waiting for wake word…")
-            wake_detected = self.stt.record_wake(
-                wake_keywords=self.config["wake_word"]["keywords"],
-                timeout_s=300.0,
-            )
-            if not wake_detected:
-                continue
+            # ── Phase 1: Get the user's turn ─────────────────────────────────
+            if not in_conversation:
+                # Wake mode: wait for "Nova" before listening.
+                self.set_state("idle")
+                log.info("Waiting for wake word…")
+                wake_detected = self.stt.record_wake(
+                    wake_keywords=self.config["wake_word"]["keywords"],
+                    timeout_s=300.0,
+                )
+                if not wake_detected:
+                    continue
+                just_woke = True
+            else:
+                just_woke = False
 
             # ── Phase 2: Record command (VAD-gated) ──────────────────────────
             self.set_state("listening")
+            # In conversation mode, cap how long we wait for the user to start
+            # speaking; if they stay silent past the timeout, drop back to wake.
+            conv_timeout = float(self.config["wake_word"].get("conversation_timeout_s", 15.0))
             command_audio = self.stt.record_command(
                 max_duration_s=self.config["stt"]["command_max_duration_s"],
+                start_timeout_s=None if just_woke else conv_timeout,
             )
 
             if command_audio is None:
-                self._respond("I'm listening.")
+                if in_conversation:
+                    # Silence during conversation → return to wake mode quietly.
+                    log.info("Conversation timed out — returning to wake mode.")
+                    in_conversation = False
+                    continue
+                # Woke but heard nothing usable — just re-listen for the wake word.
                 continue
 
             # ── Phase 3: Transcribe ──────────────────────────────────────────
             self.set_state("processing")
             text = self.stt.transcribe(command_audio)
-            text = self._strip_wake_prefix(text)
+            if just_woke:
+                text = self._strip_wake_prefix(text)
             if not text or not text.strip():
-                # Bare wake phrase with no command ("Nova.") — just re-listen.
+                # Bare wake phrase / no command. Stay in conversation so the user
+                # can just speak, but don't get stuck: fall back to wake on repeat.
+                if in_conversation:
+                    in_conversation = False
                 continue
 
             log.info(f"[user] {text}")
             self.memory.add_turn("user", text)
             self.ws.send_message("user", text)
-            # Run on the MLX worker thread and wait: the wake loop must not resume
+            # Run on the MLX worker thread and wait: capture must not resume
             # until the response (and its TTS) is done, or it self-captures.
             self._submit_turn(text, wait=True)
+            # A "return to wake mode" command during the turn drops us out of
+            # conversation immediately, without waiting for the silence timeout.
+            if self._return_to_wake:
+                self._return_to_wake = False
+                in_conversation = False
+            else:
+                # Otherwise stay in conversation mode — the user and Nova are
+                # talking; only silence (Phase 2 timeout) returns us to wake mode.
+                in_conversation = True
 
     def _strip_wake_prefix(self, text: str) -> str:
         """Remove a leading wake phrase from a single-breath command.
@@ -439,6 +471,16 @@ class VoiceAssistant:
         if any(p in low for p in ("wake up", "nova wake up", "come back")):
             self.is_awake = True
             return f"I'm here, {name}."
+
+        # Exit conversation mode immediately (without full sleep): the user is
+        # done for now but Nova stays ready for the next "Nova". This is distinct
+        # from "go to sleep", which ignores everything until "wake up".
+        if any(p in low for p in (
+            "return to wake mode", "go back to sleep mode", "that's all",
+            "that is all", "never mind", "nevermind", "we're done", "that'll be all",
+        )):
+            self._return_to_wake = True
+            return f"Alright, {name}. Just say Nova when you need me."
 
         if any(p in low for p in ("mute yourself", "stop talking", "be quiet", "shut up")):
             self.is_muted = True
