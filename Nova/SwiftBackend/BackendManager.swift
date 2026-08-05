@@ -145,7 +145,13 @@ final class BackendManager: ObservableObject {
     }
 
     /// One-shot, thread-safe latch: `claim()` returns true exactly once.
-    private final class ResumeGuard: @unchecked Sendable {
+    ///
+    /// Explicitly `nonisolated`: the project defaults every type to `@MainActor`,
+    /// but this latch is created and claimed from `waitForExit`'s nonisolated
+    /// async context and from `Process.terminationHandler` (an arbitrary thread).
+    /// Its own `NSLock` provides the safety, so main-actor isolation is both
+    /// unnecessary and wrong here (it caused the Swift 6 isolation warnings).
+    private nonisolated final class ResumeGuard: @unchecked Sendable {
         private let lock = NSLock()
         private var done = false
         func claim() -> Bool {
