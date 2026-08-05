@@ -108,10 +108,19 @@ class STTEngine:
 
         while time.time() - start < timeout_s:
             audio = self._record_fixed(duration_s=2.0)
-            text  = self._transcribe_raw(audio).lower()
-            if any(kw in text for kw in keywords_lower):
-                log.info(f"Wake word detected in transcript: '{text.strip()}'")
-                return True
+            # No VAD filter on the short wake window: faster-whisper's VAD was
+            # stripping entire 2s clips of real-room speech ("removed 00:02.000
+            # of audio"), leaving nothing to transcribe so the wake word never
+            # matched. Let Whisper transcribe the raw clip instead.
+            text  = self._transcribe_raw(audio, vad_filter=False).lower().strip()
+            # Log what we heard (even non-matches) so wake-word misses are
+            # visible — otherwise a failure to trigger is completely silent.
+            if text:
+                matched = any(kw in text for kw in keywords_lower)
+                log.info(f"[wake-heard] '{text}'" + ("  <-- MATCH" if matched else ""))
+                if matched:
+                    log.info(f"Wake word detected in transcript: '{text}'")
+                    return True
 
         return False
 
@@ -175,7 +184,7 @@ class STTEngine:
         """Transcribe a numpy int16 audio array to text."""
         return self._transcribe_raw(audio)
 
-    def _transcribe_raw(self, audio: np.ndarray) -> str:
+    def _transcribe_raw(self, audio: np.ndarray, vad_filter: bool = True) -> str:
         if audio is None or len(audio) == 0:
             return ""
 
@@ -186,7 +195,7 @@ class STTEngine:
             audio_f32,
             language=self.config.get("language", "en"),
             beam_size=5,
-            vad_filter=True,
+            vad_filter=vad_filter,
         )
 
         text = " ".join(seg.text for seg in segments).strip()
