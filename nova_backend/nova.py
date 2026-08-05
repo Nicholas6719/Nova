@@ -570,37 +570,28 @@ class VoiceAssistant:
 
     def _stream_response(self, user_text: str, rag_context: str = "") -> None:
         """
-        Stream LLM tokens → split into sentences → speak each sentence as it
-        completes → overlap TTS with continued LLM generation.
+        Stream LLM tokens to the UI, then synthesize the whole reply into TTS.
+
+        Tokens are streamed to the WebSocket live (the UI shows text as it
+        generates), but TTS is NOT fed per-sentence during generation. Feeding
+        the audio player one sentence at a time while the LLM slowly produces the
+        next starved the player between sentences and caused crackle/stutter.
+        Instead, once the full reply is generated we split it into sentences and
+        speak them back-to-back, so the audio buffer stays full and playback is
+        gapless (matching the proven Jarvis behavior).
         """
         memory_ctx    = self.memory.get_context_for_llm()
         system_prompt = self._build_system_prompt(memory_ctx, rag_context)
         history       = self.memory.get_recent_turns(n=10)
 
-        sentence_buf     = ""
-        full_response    = ""
-        first_token_sent = False
+        full_response = ""
 
         def on_token(token: str) -> None:
-            nonlocal sentence_buf, full_response, first_token_sent
-
+            nonlocal full_response
             full_response += token
-            sentence_buf  += token
-            self.ws.stream_token(token)
+            self.ws.stream_token(token)   # UI only; no TTS here
 
-            if not first_token_sent:
-                self.set_state("speaking")
-                first_token_sent = True
-
-            # Emit complete sentences to TTS immediately
-            parts = self._SENT_SPLIT.split(sentence_buf)
-            if len(parts) > 1:
-                for sentence in parts[:-1]:
-                    s = sentence.strip()
-                    if s:
-                        self.tts.speak(s)
-                sentence_buf = parts[-1]
-
+        self.set_state("thinking")
         self.llm.stream(
             system_prompt=system_prompt,
             history=history,
@@ -608,9 +599,13 @@ class VoiceAssistant:
             on_token=on_token,
         )
 
-        # Speak any remaining text after stream ends
-        if sentence_buf.strip():
-            self.tts.speak(sentence_buf.strip())
+        # Full reply is ready — now speak it. Split into sentences and queue them
+        # rapidly so the player buffer fills and never starves between sentences.
+        self.set_state("speaking")
+        for sentence in self._SENT_SPLIT.split(full_response.strip()):
+            s = sentence.strip()
+            if s:
+                self.tts.speak(s)
 
         self.tts.wait_until_done(timeout=60)
 
