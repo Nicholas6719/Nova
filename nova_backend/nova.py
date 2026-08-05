@@ -204,12 +204,41 @@ class VoiceAssistant:
     # ── Main run loop ─────────────────────────────────────────────────────────────
     def run(self) -> None:
         log.info("Starting voice pipeline.")
+        self._start_parent_watchdog()
         self.set_state("idle")
         try:
             self._main_loop()
         except KeyboardInterrupt:
             log.info("Nova shutting down.")
             self.ws.stop()
+
+    def _start_parent_watchdog(self) -> None:
+        """Exit if the launching app dies.
+
+        The Swift app terminates the backend on a clean quit, but if it is
+        SIGKILLed (e.g. stopped from Xcode) it never runs cleanup and the backend
+        would linger headless — still holding the mic and responding to speech.
+        BackendManager passes its PID as NOVA_PARENT_PID; poll it and exit when it
+        disappears. No-op when launched standalone (no parent PID set)."""
+        parent_pid_env = os.environ.get("NOVA_PARENT_PID")
+        if not parent_pid_env:
+            return
+        try:
+            parent_pid = int(parent_pid_env)
+        except ValueError:
+            return
+
+        def watch() -> None:
+            while True:
+                time.sleep(2.0)
+                try:
+                    os.kill(parent_pid, 0)   # signal 0 = liveness check only
+                except OSError:
+                    log.info(f"Parent app (pid {parent_pid}) gone — shutting down.")
+                    os._exit(0)              # hard exit: end all threads + audio
+
+        threading.Thread(target=watch, daemon=True, name="nova-parent-watchdog").start()
+        log.info(f"Parent watchdog armed (pid {parent_pid}).")
 
     def _main_loop(self) -> None:
         while True:

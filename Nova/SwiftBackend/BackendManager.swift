@@ -120,6 +120,10 @@ final class BackendManager: ObservableObject {
         env["NOVA_DATA_DIR"] = dataDirectory.path
         // Ensure stdout/stderr from Python is unbuffered for live logs.
         env["PYTHONUNBUFFERED"] = "1"
+        // Tell the backend which process to watch: if the app dies without a
+        // clean stop() (e.g. Xcode SIGKILLs it), the backend polls this PID and
+        // exits itself, so it never lingers headless holding the mic.
+        env["NOVA_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
         proc.environment = env
 
         return proc
@@ -164,7 +168,16 @@ final class BackendManager: ObservableObject {
 
     private func terminateProcess() {
         guard let proc = process, proc.isRunning else { return }
+        // SIGTERM first (graceful — nova.py handles it and shuts down its
+        // servers); escalate to SIGKILL if it hasn't exited shortly after, so a
+        // wedged backend can't survive the app.
         proc.terminate()
+        let pid = proc.processIdentifier
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+            if kill(pid, 0) == 0 {           // still alive → force kill
+                kill(pid, SIGKILL)
+            }
+        }
         process = nil
     }
 
