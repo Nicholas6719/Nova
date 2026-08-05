@@ -62,6 +62,26 @@ def _time_of_day_greeting() -> str:
     return "Good evening"
 
 
+def _ordinal(n: int) -> str:
+    """1 -> '1st', 2 -> '2nd', 4 -> '4th', 21 -> '21st'."""
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _spoken_time(now: datetime) -> str:
+    """Read a time the way a person would: '9:02 PM', not '09:02 PM'."""
+    hour12 = now.hour % 12 or 12   # 0 -> 12
+    return f"{hour12}:{now.minute:02d} {now.strftime('%p')}"
+
+
+def _spoken_date(now: datetime) -> str:
+    """Read a date naturally: 'Tuesday, August 4th, 2026' (no leading zero)."""
+    return f"{now.strftime('%A, %B')} {_ordinal(now.day)}, {now.year}"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════════
 # VoiceAssistant
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -440,11 +460,11 @@ class VoiceAssistant:
 
         # Date
         if low in self._DATE_PHRASES or ("what" in low and "date" in low):
-            return f"Today is {datetime.now().strftime('%A, %B %d, %Y')}."
+            return f"Today is {_spoken_date(datetime.now())}."
 
         # Time
         if low in self._TIME_PHRASES or ("what" in low and "time" in low and "date" not in low):
-            return f"It's {datetime.now().strftime('%I:%M %p')}."
+            return f"It's {_spoken_time(datetime.now())}."
 
         # Day of week
         if "what day" in low and "is it" in low:
@@ -463,23 +483,18 @@ class VoiceAssistant:
         low  = text.lower().strip()
         name = self.config["user"]["address_as"]
 
-        if any(p in low for p in ("go to sleep", "sleep mode", "stop listening", "take a break")):
-            self.is_awake = False
-            self.set_state("idle")
-            return f"Understood. I'll be here when you need me, {name}."
-
-        if any(p in low for p in ("wake up", "nova wake up", "come back")):
-            self.is_awake = True
-            return f"I'm here, {name}."
-
-        # Exit conversation mode immediately (without full sleep): the user is
-        # done for now but Nova stays ready for the next "Nova". This is distinct
-        # from "go to sleep", which ignores everything until "wake up".
+        # End the conversation and return to wake mode. One level only: "go to
+        # sleep", "that's all", 15s of silence — all just drop back to waiting for
+        # "Nova". Nova never goes fully dormant, so saying "Nova" always wakes it
+        # (no way to get stuck asleep).
         if any(p in low for p in (
-            "return to wake mode", "go back to sleep mode", "that's all",
-            "that is all", "never mind", "nevermind", "we're done", "that'll be all",
+            "go to sleep", "back to sleep", "sleep mode", "stop listening",
+            "take a break", "return to wake mode", "wake mode", "that's all",
+            "that is all", "never mind", "nevermind", "we're done", "we are done",
+            "that'll be all", "that will be all", "goodbye", "good night",
         )):
             self._return_to_wake = True
+            self.set_state("idle")
             return f"Alright, {name}. Just say Nova when you need me."
 
         if any(p in low for p in ("mute yourself", "stop talking", "be quiet", "shut up")):
