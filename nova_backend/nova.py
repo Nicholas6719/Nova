@@ -269,7 +269,9 @@ class VoiceAssistant:
             # ── Phase 3: Transcribe ──────────────────────────────────────────
             self.set_state("processing")
             text = self.stt.transcribe(command_audio)
+            text = self._strip_wake_prefix(text)
             if not text or not text.strip():
+                # Bare wake phrase with no command ("Nova.") — just re-listen.
                 continue
 
             log.info(f"[user] {text}")
@@ -278,6 +280,28 @@ class VoiceAssistant:
             # Run on the MLX worker thread and wait: the wake loop must not resume
             # until the response (and its TTS) is done, or it self-captures.
             self._submit_turn(text, wait=True)
+
+    def _strip_wake_prefix(self, text: str) -> str:
+        """Remove a leading wake phrase from a single-breath command.
+
+        With the always-on stream, "Nova, what time is it?" transcribes whole, so
+        strip the leading "nova"/"hey nova" (and trailing punctuation) to get the
+        actual command. Returns "" for a bare wake phrase with no command."""
+        if not text:
+            return ""
+        stripped = text.strip()
+        # Longest keywords first so "hey nova" wins over "nova".
+        keywords = sorted(
+            (kw.lower() for kw in self.config["wake_word"]["keywords"]),
+            key=len, reverse=True,
+        )
+        low = stripped.lower()
+        for kw in keywords:
+            if low.startswith(kw):
+                remainder = stripped[len(kw):]
+                # Drop the punctuation/space that follows the wake word.
+                return remainder.lstrip(" ,.!?—-").strip()
+        return stripped
 
     # ── Text input from SwiftUI (typed / programmatic) ────────────────────────────
     def _handle_text_input(self, text: str) -> None:
