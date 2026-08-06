@@ -361,9 +361,16 @@ class VoiceAssistant:
         if not turns:
             return
 
+        # Only the USER's turns are a source of facts about Nicholas. Feeding
+        # Nova's own replies to the reconciler made it extract facts about itself
+        # ("assistant/name = Nova") and waffle on existing facts. Skip them.
+        user_lines = [t["content"] for t in turns if t["role"] == "user"]
+        if not user_lines:
+            return
+
         def job() -> None:
             from fact_reconciler import reconcile
-            convo = "\n".join(f"{t['role']}: {t['content']}" for t in turns)
+            convo = "\n".join(f"user: {line}" for line in user_lines)
             try:
                 reconcile(self.memory, self.llm, convo)
             except Exception:

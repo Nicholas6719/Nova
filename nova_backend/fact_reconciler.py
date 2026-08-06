@@ -118,20 +118,46 @@ def parse_decisions(raw: str) -> list[dict]:
     return out
 
 
+# Categories that describe the assistant itself, not the user — never store.
+_REJECT_CATEGORIES = {"assistant", "ai", "nova", "system", "bot"}
+
+
 def apply_decisions(memory: "NovaMemory", decisions: list[dict]) -> int:
     """Apply validated decisions to memory. Returns how many were applied.
-    insert and update are the same operation (canonical upsert supersedes)."""
-    applied = 0
+
+    A small model sometimes emits CONTRADICTORY decisions for the same key in one
+    batch (insert + delete + update of routine/gym) — applying them in order lets
+    a spurious delete wipe a just-inserted fact. So collapse per (category, key):
+    if any insert/update exists for a key, that wins (last value) and any delete
+    for that key is ignored; a delete only applies when it's the sole action for
+    that key. insert and update are the same canonical upsert."""
+    # Collapse to one decision per (category, key).
+    upserts: dict[tuple, str] = {}
+    deletes: set[tuple] = set()
     for d in decisions:
+        cat, key = d["category"], d["key"]
+        if cat.lower() in _REJECT_CATEGORIES:
+            continue
+        ident = (cat, key)
+        if d["action"] in ("insert", "update"):
+            upserts[ident] = d["value"]      # last insert/update value wins
+            deletes.discard(ident)           # an upsert cancels any delete
+        elif d["action"] == "delete" and ident not in upserts:
+            deletes.add(ident)
+
+    applied = 0
+    for (cat, key), value in upserts.items():
         try:
-            if d["action"] in ("insert", "update"):
-                memory.upsert_fact(d["category"], d["key"], d["value"], source="llm")
-                applied += 1
-            elif d["action"] == "delete":
-                if memory.delete_fact(d["category"], d["key"]):
-                    applied += 1
+            memory.upsert_fact(cat, key, value, source="llm")
+            applied += 1
         except Exception:
-            log.exception("Failed to apply memory decision: %s", d)
+            log.exception("Failed to upsert: %s/%s", cat, key)
+    for (cat, key) in deletes:
+        try:
+            if memory.delete_fact(cat, key):
+                applied += 1
+        except Exception:
+            log.exception("Failed to delete: %s/%s", cat, key)
     return applied
 
 
