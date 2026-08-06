@@ -52,6 +52,9 @@ class NovaCalendar:
         # up?"). nova.py reads this after handle() and arms a one-shot offer
         # that only fires on an affirmative reply. Reset before every handle().
         self.pending_intent: Optional[str] = None
+        # Date already reported by a day-scoped reminder read; the look-ahead
+        # offer reads reminders due AFTER this day.
+        self._reminder_lookahead_exclude: Optional[datetime.date] = None
 
         # System prompt for all silent calendar LLM calls. Includes the user's
         # name so the 3B stops inventing one ("Samantha"). Nova speaks aloud,
@@ -208,7 +211,9 @@ class NovaCalendar:
             if intent == "read_rest_of_week":
                 return self._read_rest_of_week()
             if intent == "read_reminders":
-                return self._read_reminders()
+                return self._read_reminders(text)
+            if intent == "read_reminders_lookahead":
+                return self._read_reminders_lookahead()
             if intent == "create_event":
                 return self._create_event(text)
             if intent == "create_reminder":
@@ -610,30 +615,134 @@ class NovaCalendar:
                 out.append(e)
         return out
 
-    def _read_reminders(self) -> str:
+    def _read_reminders(self, text: str = "") -> str:
         reminders = cal.get_all_reminders()
         if not reminders:
             return f"You have no open reminders, {self.name}."
+
+        scope, scope_date = self._reminder_scope(text)
+        if scope == "day":
+            return self._read_reminders_for_day(reminders, scope_date)
+        if scope == "week":
+            today = datetime.date.today()
+            sat = today + datetime.timedelta(days=(5 - today.weekday()) % 7)
+            wk = [r for r in reminders
+                  if (dt := self._reminder_dt(r)) and today <= dt.date() <= sat]
+            if not wk:
+                return f"You have nothing due this week, {self.name}."
+            return self._summarize_reminders(wk, with_dates=True, when_label="this week")
+        # "all": every open reminder, with dates, no offer.
+        return self._summarize_reminders(reminders, with_dates=True)
+
+    def _reminder_scope(self, text: str):
+        """Classify a reminder-read request: ('day', date) / ('week', None) /
+        ('all', None). Default is 'all' when no day/week word is present."""
+        low = (text or "").lower()
+        if re.search(r"\ball\s+(?:my\s+|of\s+my\s+)?reminders\b", low) or "everything" in low:
+            return ("all", None)
+        today = datetime.date.today()
+        if re.search(r"\btomorrow\b", low):
+            return ("day", today + datetime.timedelta(days=1))
+        if re.search(r"\b(?:today|tonight|this\s+(?:morning|afternoon|evening))\b", low):
+            return ("day", today)
+        m = re.search(r"\b(next\s+)?(" + self._WEEKDAY_RE + r")\b", low)
+        if m:
+            return ("day", self._resolve_relative_date(
+                (("next " if m.group(1) else "") + m.group(2))))
+        if re.search(r"\b(?:this|the)\s+week\b", low):
+            return ("week", None)
+        return ("all", None)
+
+    @staticmethod
+    def _reminder_dt(r: dict) -> Optional[datetime.datetime]:
+        s = r.get("due_iso", "")
+        if not s:
+            return None
+        try:
+            return datetime.datetime.fromisoformat(s)
+        except Exception:
+            return None
+
+    def _read_reminders_for_day(self, reminders: list, day: datetime.date) -> str:
+        same, later, undated = [], [], []
+        for r in reminders:
+            dt = self._reminder_dt(r)
+            if dt is None:
+                undated.append(r)
+            elif dt.date() == day:
+                same.append(r)
+            elif dt.date() > day:
+                later.append(r)
+            # earlier than `day` (overdue) is not volunteered here.
+
+        label = self._day_word(day)
+        if same:
+            base = self._summarize_reminders(same, with_dates=False, when_label=label)
+        else:
+            base = f"You have no reminders for {label}, {self.name}."
+
+        # Soft look-ahead offer for anything beyond the asked-about day.
+        rest = later + undated
+        if rest:
+            self.pending_intent = "read_reminders_lookahead"
+            self._reminder_lookahead_exclude = day
+            n = len(rest)
+            base += (f" You've also got {n} other reminder{'s' if n != 1 else ''} "
+                     "coming up. Want to hear those?")
+        return base
+
+    def _read_reminders_lookahead(self) -> str:
+        day = getattr(self, "_reminder_lookahead_exclude", None)
+        reminders = cal.get_all_reminders()
+        rest = []
+        for r in reminders:
+            dt = self._reminder_dt(r)
+            if day is None or dt is None or dt.date() > day:
+                rest.append(r)
+        if not rest:
+            return f"Nothing else on your list, {self.name}."
+        return self._summarize_reminders(rest, with_dates=True)
+
+    def _day_word(self, day: datetime.date) -> str:
+        """A short spoken label for a date: today / tomorrow / the weekday."""
+        today = datetime.date.today()
+        if day == today:
+            return "today"
+        if day == today + datetime.timedelta(days=1):
+            return "tomorrow"
+        return day.strftime("%A")
+
+    def _summarize_reminders(self, reminders: list, with_dates: bool,
+                             when_label: Optional[str] = None) -> str:
         lines = []
-        for idx, r in enumerate(reminders, start=1):
-            parts = [f"{idx}. {r.get('title', '')}"]
-            if r.get("due"):
-                parts.append(f"(due {r['due']})")
-            lines.append(" ".join(parts))
+        for i, r in enumerate(reminders, start=1):
+            title = r.get("title", "")
+            dt = self._reminder_dt(r)
+            if with_dates:
+                when = r.get("due") or (cal.format_datetime_for_speech(dt) if dt else "")
+                lines.append(f"{i}. {title}" + (f" (due {when})" if when else " (no due date)"))
+            else:
+                when = cal.format_time_for_speech(dt) if dt else ""
+                lines.append(f"{i}. {title}" + (f" (at {when})" if when else ""))
+        if with_dates:
+            rule = ("Read each due date and time EXACTLY as written; do not "
+                    "change AM to PM, do not change the hour.")
+        else:
+            rule = ("These are all for the same day, so give only the TIME of "
+                    "each (for example 'at 3 PM'); do NOT state the date or day "
+                    "of week.")
+        header = "These are the user's open reminders"
+        if when_label:
+            header += f" for {when_label}"
         prompt = (
-            "These are the user's open reminders, listed in chronological "
-            "order, earliest due date first. Summarize them naturally and "
-            "conversationally, not a list, just how a sharp assistant would "
-            "say them out loud.\n\n"
+            header + ", earliest first. Summarize them naturally and "
+            "conversationally, not a list.\n\n"
             "CRITICAL RULES:\n"
-            "Mention the reminders in the exact order given below. Read each "
-            "due date and time EXACTLY as written; do not change AM to PM, do "
-            "not change the hour, do not round. Keep it brief, two to four "
-            "sentences.\n\n"
-            + "\n".join(lines)
+            "Mention them in the given order. Do not invent reminders. " + rule +
+            " Keep it brief, one to four sentences.\n\n" + "\n".join(lines)
         )
         text = self._llm_silent(prompt, max_tokens=220)
-        return text or self._template_reminders(reminders)
+        return text or self._template_reminders(reminders, with_dates, when_label)
 
     # ── Event formatting (clean times/days, so summaries don't garble) ───
     @staticmethod
@@ -697,18 +806,24 @@ class NovaCalendar:
             parts.append(seg + ".")
         return " ".join(parts)
 
-    def _template_reminders(self, reminders: list) -> str:
-        if len(reminders) == 1:
-            r = reminders[0]
-            if r.get("due"):
-                return f"You have one open reminder, {self.name}: {r['title']}, due {r['due']}."
-            return f"You have one open reminder, {self.name}: {r['title']}."
-        parts = [f"You have {len(reminders)} open reminders, {self.name}."]
+    def _template_reminders(self, reminders: list, with_dates: bool = True,
+                            when_label: Optional[str] = None) -> str:
+        """Deterministic fallback. Day-scoped reads give times only; the
+        all/week reads give full due dates."""
+        n = len(reminders)
+        head = f"You have {n} reminder{'s' if n != 1 else ''}"
+        if when_label:
+            head += f" for {when_label}"
+        parts = [head + f", {self.name}."]
         for r in reminders:
-            if r.get("due"):
-                parts.append(f"{r['title']} is due {r['due']}.")
+            dt = self._reminder_dt(r)
+            title = r.get("title", "")
+            if with_dates:
+                when = r.get("due") or (cal.format_datetime_for_speech(dt) if dt else "")
+                parts.append(f"{title} is due {when}." if when else f"{title}.")
             else:
-                parts.append(f"{r['title']}.")
+                when = cal.format_time_for_speech(dt) if dt else ""
+                parts.append(f"{title} at {when}." if when else f"{title}.")
         return " ".join(parts)
 
     # ═══════════════════════════════════════════════════════════════════════

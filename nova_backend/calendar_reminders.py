@@ -658,7 +658,12 @@ def _get_reminders_via_eventkit() -> list:
         except Exception:
             notes = ""
 
-        rows.append((due_dt, {"title": title, "due": due_str, "notes": notes}))
+        # due_iso lets the NL layer scope reminders by day ("for today") and
+        # read times without re-parsing the spoken 'due' string.
+        rows.append((due_dt, {
+            "title": title, "due": due_str, "notes": notes,
+            "due_iso": due_dt.isoformat() if due_dt else "",
+        }))
 
     # Sort by due date ascending. Items with no due date sort LAST so
     # "what's due soon" comes first and untimed tasks trail.
