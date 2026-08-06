@@ -71,6 +71,16 @@ class STTEngine:
         self._wake_config = wake_config or {}
         self._oww = None            # lazily-loaded OpenWakeWordDetector
         self._oww_failed = False    # don't retry a broken OWW load every wait
+
+        # ── Barge-in (interrupt Nova mid-sentence by saying the wake word) ──
+        # Uses its OWN detector instance so its debounce/buffer state can never
+        # pollute the normal wake path, and a separate queue fed only while Nova
+        # is speaking (see the stream callback).
+        self._barge_q: "queue.Queue[bytes]" = queue.Queue()
+        self._barge_active = threading.Event()
+        self._barge_detector = None
+        self._barge_thread: Optional[threading.Thread] = None
+        self._barge_cb = None
         # Shared gate with the TTS engine: cleared while Nova is speaking so we
         # ignore mic audio during playback (avoids self-capture and the CoreAudio
         # input/output device conflict). If unset, defaults to always-open.
@@ -103,10 +113,15 @@ class STTEngine:
             return
 
         def _cb(indata, frames, time_info, status):  # noqa: ANN001
-            # Runs on PortAudio's thread. Drop frames while Nova is speaking so
-            # its own TTS never enters the queue.
+            # Runs on PortAudio's thread. While Nova is speaking the gate is
+            # clear, so its own TTS never enters the command queue. When
+            # barge-in is armed those otherwise-discarded frames are routed to
+            # the barge queue instead, so the user can interrupt by saying the
+            # wake word over Nova's voice.
             if self._mic_gate.is_set():
                 self._audio_q.put(bytes(indata))
+            elif self._barge_active.is_set():
+                self._barge_q.put(bytes(indata))
 
         self._stream = sd.RawInputStream(
             samplerate=SAMPLE_RATE,
@@ -184,6 +199,91 @@ class STTEngine:
                 self._pre_wake_buf.clear()
                 return True
         return False
+
+    # ── Barge-in: interrupt Nova mid-sentence by saying the wake word ───────────────
+    def start_barge_listen(self, on_detect, threshold: float = 0.7,
+                           trigger_level: int = 3, startup_guard_s: float = 0.4) -> bool:
+        """Listen for the wake word WHILE Nova is speaking. Calls on_detect()
+        once if heard. Returns True if listening actually started.
+
+        Deliberately STRICTER than normal wake detection (higher threshold, more
+        consecutive hits) because the mic is hearing Nova's own voice through the
+        speaker at close range — the extra margin keeps Nova's speech from
+        tripping its own detector. The caller is responsible for the absolute
+        guarantee (not arming this at all when Nova's response contains the wake
+        word); this is the acoustic belt-and-braces on top of that.
+        """
+        if self._barge_active.is_set():
+            return False
+        try:
+            if self._barge_detector is None:
+                from wake_openwakeword import OpenWakeWordDetector
+                from pathlib import Path as _Path
+                model_path = self._wake_config.get("oww_model_path", "")
+                if model_path and not _Path(model_path).is_absolute():
+                    model_path = str(_Path(__file__).parent / model_path)
+                self._barge_detector = OpenWakeWordDetector(
+                    model_path=model_path,
+                    threshold=float(threshold),
+                    trigger_level=int(trigger_level),
+                    vad_threshold=float(self._wake_config.get("oww_vad_threshold", 0.5)),
+                )
+            self._barge_detector.threshold = float(threshold)
+            self._barge_detector.trigger_level = int(trigger_level)
+            self._barge_detector.reset()
+        except Exception as e:
+            log.warning(f"barge-in unavailable ({e}); Nova will not be interruptible.")
+            return False
+
+        self._barge_cb = on_detect
+        # Drop anything stale so a pre-arm frame can't fire instantly.
+        try:
+            while True:
+                self._barge_q.get_nowait()
+        except queue.Empty:
+            pass
+        self._barge_active.set()
+
+        def _worker() -> None:
+            armed_at = time.time()
+            # Rolling buffer so the words spoken right after "Nova" aren't lost.
+            roll: "collections.deque[bytes]" = collections.deque(maxlen=PRE_WAKE_FRAMES)
+            while self._barge_active.is_set():
+                try:
+                    frame = self._barge_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if len(frame) != FRAME_BYTES:
+                    continue
+                roll.append(frame)
+                # Ignore the very start of playback (speaker ramp / residual echo).
+                if time.time() - armed_at < startup_guard_s:
+                    continue
+                try:
+                    if self._barge_detector.process(frame):
+                        log.info("Barge-in: wake word heard during playback.")
+                        self._pending_pre_wake = b"".join(roll)
+                        self._barge_active.clear()
+                        cb = self._barge_cb
+                        if cb:
+                            try:
+                                cb()
+                            except Exception:
+                                log.exception("barge-in callback failed")
+                        return
+                except Exception:
+                    log.exception("barge-in scoring failed")
+                    return
+
+        self._barge_thread = threading.Thread(
+            target=_worker, daemon=True, name="nova-barge-in")
+        self._barge_thread.start()
+        return True
+
+    def stop_barge_listen(self) -> None:
+        """Disarm barge-in listening (call when playback ends)."""
+        self._barge_active.clear()
+        self._barge_cb = None
 
     # ── Wake-word detection (legacy transcript engine) ──────────────────────────────
     def _record_wake_transcript(self, wake_keywords: list[str], timeout_s: float = 300.0) -> bool:

@@ -124,6 +124,8 @@ class VoiceAssistant:
         # what's coming up?"). Unlike _pending_action it only fires on an
         # affirmative reply and never eats an unrelated next command.
         self._calendar_offer: Optional[Callable[[], str]] = None
+        # Set when the user interrupts Nova mid-response by saying the wake word.
+        self._barged_in = False
         self._rag_ready       = False
         self._rag             = None
         # Set by a "return to wake mode" voice command to drop out of
@@ -528,6 +530,43 @@ class VoiceAssistant:
         self.set_state("thinking")
         self._stream_response(text, rag_context=rag_ctx)
 
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Barge-in — let the user interrupt Nova by saying the wake word
+    # ═════════════════════════════════════════════════════════════════════════════
+    def _says_wake_word(self, text: str) -> bool:
+        """True if Nova's own response contains the wake word.
+
+        THE self-trigger guarantee: when Nova is about to SAY 'Nova' (e.g. 'just
+        say Nova when you need me'), barge-in is never armed for that audio, so
+        Nova can't interrupt itself. Text is always seen before its audio plays,
+        so disarming on sight happens before the word reaches the speaker."""
+        low = f" {re.sub(r'[^a-z ]', ' ', (text or '').lower())} "
+        low = re.sub(r"\s+", " ", low)
+        for kw in self.config["wake_word"]["keywords"]:
+            if f" {kw.lower()} " in low:
+                return True
+        return False
+
+    def _arm_barge_in(self) -> bool:
+        cfg = self.config["wake_word"].get("barge_in", {})
+        if not cfg.get("enabled", True):
+            return False
+        return self.stt.start_barge_listen(
+            on_detect=self._on_barge_in,
+            threshold=float(cfg.get("threshold", 0.7)),
+            trigger_level=int(cfg.get("trigger_level", 3)),
+            startup_guard_s=float(cfg.get("startup_guard_s", 0.4)),
+        )
+
+    def _on_barge_in(self) -> None:
+        """Called from the barge-in listener thread when the user says the wake
+        word over Nova's voice: stop talking immediately and go listen."""
+        self._barged_in = True
+        try:
+            self.tts.stop_and_flush()
+        except Exception:
+            log.exception("barge-in: stopping TTS failed")
+
     # ── Respond helper ────────────────────────────────────────────────────────────
     def _respond(self, text: str) -> None:
         """Canonical response path: log → store → broadcast → speak."""
@@ -540,8 +579,13 @@ class VoiceAssistant:
         self.ws.send_message("assistant", text)
         log.info(f"[nova] {text}")
         self.set_state("speaking")
+        self._barged_in = False
+        # Only interruptible when Nova isn't about to say its own name.
+        armed = self._arm_barge_in() if not self._says_wake_word(text) else False
         self.tts.speak(text)
         self.tts.wait_until_done(timeout=60)
+        if armed:
+            self.stt.stop_barge_listen()
         self.set_state("idle")
 
     # ═════════════════════════════════════════════════════════════════════════════
@@ -707,15 +751,28 @@ class VoiceAssistant:
 
         full_response = ""
         pending       = ""            # tokens not yet emitted as a full sentence
-        state         = {"spoke": False}
+        state         = {"spoke": False, "armed": False, "blocked": False}
+        self._barged_in = False
 
         def _emit(text: str) -> None:
             text = _clean_for_tts(text)
             if not text:
                 return
+            if self._barged_in:
+                return               # user interrupted — stop feeding audio
+            # Self-trigger guarantee for the STREAMING path: a sentence is seen
+            # here before it is synthesized, so disarming the moment Nova is
+            # about to say its own name happens before that audio ever plays.
+            if not state["blocked"] and self._says_wake_word(text):
+                if state["armed"]:
+                    self.stt.stop_barge_listen()
+                    state["armed"] = False
+                state["blocked"] = True
             if not state["spoke"]:
                 self.set_state("speaking")   # first audio → flip orb to speaking
                 state["spoke"] = True
+                if not state["blocked"]:
+                    state["armed"] = self._arm_barge_in()
             self.tts.speak(text)
 
         def _flush(force: bool) -> None:
@@ -754,12 +811,17 @@ class VoiceAssistant:
         else:
             # Blocking fallback: whole reply generated, now speak it back-to-back.
             self.set_state("speaking")
+            if not self._says_wake_word(full_response):
+                state["armed"] = self._arm_barge_in()
             for sentence in self._SENT_SPLIT.split(full_response.strip()):
                 s = sentence.strip()
-                if s:
+                if s and not self._barged_in:
                     self.tts.speak(_clean_for_tts(s))
 
         self.tts.wait_until_done(timeout=60)
+        if state["armed"]:
+            self.stt.stop_barge_listen()
+            state["armed"] = False
 
         self._last_response = full_response
         self.memory.add_turn("assistant", full_response)

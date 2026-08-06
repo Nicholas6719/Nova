@@ -41,6 +41,13 @@
     "oww_threshold": 0.5,
     "oww_trigger_level": 2,
     "oww_vad_threshold": 0.5,
+    "barge_in": {
+      "enabled": true,
+      "threshold": 0.7,
+      "trigger_level": 2,
+      "startup_guard_s": 0.4,
+      "_note": "Say the wake word WHILE Nova is speaking to interrupt it. Stricter than normal wake (higher threshold + more consecutive hits) because the mic hears Nova's own voice from the speaker. Barge-in is never armed for a response that contains the wake word, so Nova can't interrupt itself. Raise threshold if Nova's voice ever self-triggers; set enabled=false to disable."
+    },
     "_note": "engine: 'transcript' (legacy Whisper scan) or 'openwakeword' (neural, noise-robust). Stays 'transcript' until the trained nova.onnx is validated, then flip to 'openwakeword'. oww_* tune the neural detector: threshold=per-window score to count as a hit, trigger_level=consecutive hits to fire, vad_threshold=Silero speech gate (0 disables). After Nova replies it stays in conversation mode (no wake word) until conversation_timeout_s of silence."
   },
 
