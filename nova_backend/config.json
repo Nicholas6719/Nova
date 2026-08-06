@@ -51,5 +51,10 @@
     "summarize_after_turns": 50,
     "rag_enabled": true,
     "rag_docs_dir": "~/Documents"
+  },
+
+  "calendar": {
+    "natural_confirmations": false,
+    "_note": "Reads are always summarized by the LLM (natural voice, with a deterministic template fallback). natural_confirmations=true also runs create/reminder confirmations through the LLM (~4-6s slower); false uses fast deterministic templates."
   }
 }

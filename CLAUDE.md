@@ -61,6 +61,10 @@ Nova has two parts:
 
 **`tools.py`** — macOS system tools. App launch, volume control, battery status, web search, screenshot, system info. All deterministic — never touches the LLM. Easy to extend.
 
+**`calendar_reminders.py`** — Apple Calendar & Reminders engine. Pure functions over EventKit (PyObjC), with an AppleScript fallback. Reads (today / this week / open reminders), writes (create event, create reminder), and edits (complete / delete / update by fuzzy title match). Zero side effects at import. Every function may raise RuntimeError — callers must catch. Ported from Jarvis, where it ran in production.
+
+**`calendar_intents.py`** — Natural-language dispatch on top of `calendar_reminders.py`. `NovaCalendar.detect_intent` is strict regex only (no calendar word → None → normal chat); `handle` runs LLM JSON extraction (temp=0, heavily post-processed) and returns a single spoken string. Runs on the `nova-llm` worker thread, so its `self.llm.generate` calls are thread-safe. Reads are LLM-summarized with deterministic template fallbacks so a bad generation never invents a day/time.
+
 **`ws_server.py`** — Bridge between Python and Swift. HTTP server on :5001, WebSocket server on :8766. Swift connects here to receive state changes, message content, and streaming tokens in real time.
 
 **`requirements.txt`** — All Python dependencies. Install with `pip install -r requirements.txt`.
@@ -73,9 +77,10 @@ Nova has two parts:
 2. Pending confirmation — yes/no flow for destructive actions
 3. Memory intents — remember / recall / update / forget
 4. Fast-path intents — greetings / date / time / repeat last response
-5. Tool intents — open app / volume / battery / search / screenshot
-6. RAG context enrichment — query personal documents for context
-7. LLM fallback — MLX streaming with sentence-chunked TTS overlap
+5. Calendar / reminders intents — read / create / complete / delete / update (EventKit)
+6. Tool intents — open app / volume / battery / search / screenshot
+7. RAG context enrichment — query personal documents for context
+8. LLM fallback — MLX streaming with sentence-chunked TTS overlap
 
 ---
 

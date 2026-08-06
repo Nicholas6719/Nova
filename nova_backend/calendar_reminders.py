@@ -1,0 +1,1047 @@
+"""
+Apple Calendar & Reminders — pure function module.
+─────────────────────────────────────────────────────────────────────────────
+Every public function here talks to macOS via EventKit (PyObjC) when available,
+falling back to `osascript`/AppleScript otherwise. None of them run at import
+time — importing this module is zero-cost and has no side effects on macOS
+permissions, Calendar.app, or Reminders.app.
+
+All AppleScript timeouts are short by design: if macOS is waiting on a first-run
+permission dialog, we'd rather fail fast with a speakable error than freeze
+Nova's pipeline for 30+ seconds.
+
+IMPORTANT: every public function may raise RuntimeError. Callers must handle the
+exception and keep Nova running — never let a calendar failure propagate into
+the main voice pipeline.
+
+Ported from Nova's sibling project (Jarvis), where this module ran in
+production. Kept as a standalone pure-function module on purpose: the NL layer
+(intent detection, LLM extraction, spoken confirmations) lives separately in
+``calendar_intents.py`` so this file stays deterministic and easy to test.
+"""
+
+import datetime
+import logging
+import re
+import subprocess
+import threading
+import time
+from typing import Optional
+
+log = logging.getLogger("nova.calendar")
+
+# Calendar-read backend switch. "eventkit" (default) uses the native
+# EKEventStore API — 10-20x faster than AppleScript because it doesn't
+# cold-launch Calendar.app and doesn't scan calendars serially with a
+# `whose` clause. "applescript" forces the legacy path for debugging.
+# Any other value is treated as "eventkit".
+CALENDAR_READ_BACKEND = "eventkit"
+
+# EventKit via PyObjC is Apple's native Calendar/Reminders API — dramatically
+# faster than AppleScript for reads. A Reminders fetch with AppleScript's
+# `whose completed is false` takes 24+ seconds against a list with 1700+
+# historical items; the same fetch via EventKit completes in ~0.1 seconds.
+try:
+    import EventKit as _EK
+    _EK_AVAILABLE = True
+except ImportError:
+    _EK_AVAILABLE = False
+
+
+# Delimiters used inside AppleScript output so we can parse free-form text
+# back into structured Python dicts. These are unlikely to appear in real
+# calendar entries.
+_REC = "~~~"
+_FIELD = "|||"
+
+# Default subprocess timeout for osascript calls. Short enough that a
+# stuck permission dialog can't hang the pipeline indefinitely. The first
+# invocation in a session may need to cold-launch Calendar.app, which
+# takes ~2-3s before events can be queried.
+_DEFAULT_TIMEOUT_S = 20
+
+# Calendars to SKIP during read operations.
+#
+# The AppleScript `whose start date ≥ X and start date < Y` filter on
+# Calendar.app events is catastrophically slow on certain calendars
+# (Scheduled Reminders 70+s, Holidays 10+s, Birthdays 2+s). The user
+# rarely wants these in a "what's on my calendar this week?" summary —
+# they're subscriptions, auto-generated, or already visible elsewhere.
+# EventKit reads apply the same skip list for parity.
+#
+# CREATE operations target an explicit calendar name and are unaffected.
+_READ_SKIP_CALENDAR_NAMES = (
+    "Scheduled Reminders",
+    "Siri Suggestions",
+    "Birthdays",
+    "Holidays in United States",
+    "US Holidays",
+)
+
+
+# ── Target-app launch helper ─────────────────────────────────────────────────
+#
+# macOS normally auto-launches the target of `tell application "Foo"` if Foo
+# isn't running. That auto-launch is silently blocked when osascript runs
+# inside an LSUIElement app → Python → osascript chain, and every query fails
+# with error -600 "Application isn't running".
+#
+# AppleScript's own `launch` / `activate` commands get blocked the same way.
+# The one mechanism that still works is the shell's `open -a Foo -j`, which
+# launches the app hidden without going through AppleEvents.
+#
+# We check `pgrep` first so the helper is effectively free once Calendar or
+# Reminders is already running — only the first query in a session pays the
+# ~1 second cold-launch cost.
+
+def _ensure_app_running(app_name: str, max_wait_s: float = 4.0) -> None:
+    """Start the given GUI app (by `.app` bundle name) if it isn't already
+    running, and wait briefly for its process to appear so subsequent Apple
+    Event queries actually have a target."""
+    try:
+        check = subprocess.run(
+            ["pgrep", "-x", app_name],
+            capture_output=True, text=True, timeout=3,
+        )
+        if check.returncode == 0:
+            return  # Already running — nothing to do.
+    except Exception:
+        pass  # Fall through to launch attempt.
+
+    # `-j` = launch hidden (no window steals focus). Still appears briefly
+    # in the Dock, which is fine — we just need the process alive.
+    try:
+        subprocess.run(
+            ["open", "-a", app_name, "-j"],
+            capture_output=True, timeout=10,
+        )
+    except Exception as e:
+        log.warning(f"open -a {app_name} failed: {e}")
+        return
+
+    # Poll for the process to appear, then give it a moment to be ready to
+    # answer Apple Events. Calendar.app typically takes 0.5-1.5s cold.
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        time.sleep(0.2)
+        try:
+            check = subprocess.run(
+                ["pgrep", "-x", app_name],
+                capture_output=True, text=True, timeout=2,
+            )
+            if check.returncode == 0:
+                # Small extra settle delay — process exists but may not yet
+                # have its Apple Event handlers wired up.
+                time.sleep(0.4)
+                return
+        except Exception:
+            pass
+    # Ran out of time — let the caller's osascript attempt fail with a clear
+    # error rather than hanging here indefinitely.
+    log.warning(f"{app_name} did not appear after {max_wait_s}s")
+
+
+# ── Internals ────────────────────────────────────────────────────────────
+
+def _run_osa(script: str, timeout: int = _DEFAULT_TIMEOUT_S) -> str:
+    """Execute an AppleScript via osascript (fed on stdin) and return
+    stdout stripped. Raises RuntimeError on any failure, including timeout."""
+    try:
+        result = subprocess.run(
+            ["osascript"],
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"AppleScript timed out after {timeout}s — "
+            f"Calendar or Reminders may be waiting on a permission dialog"
+        ) from e
+    except Exception as e:
+        raise RuntimeError(f"osascript failed to launch: {e}") from e
+
+    if result.returncode != 0:
+        err = (result.stderr or "").strip() or "unknown AppleScript error"
+        raise RuntimeError(err)
+    return (result.stdout or "").strip()
+
+
+def format_time_for_speech(dt: datetime.datetime) -> str:
+    """Format just the time portion for TTS. Drops ':00' when minutes are
+    zero so Nova says '7 PM' instead of '7:00 PM'."""
+    if dt.minute == 0:
+        return dt.strftime("%-I %p")
+    return dt.strftime("%-I:%M %p")
+
+
+def format_datetime_for_speech(dt: datetime.datetime) -> str:
+    """Format a full day + time for TTS. Drops ':00' when minutes are
+    zero — 'Saturday, April 18 at 7 PM' vs 'Saturday, April 18 at 6:30 PM'."""
+    if dt.minute == 0:
+        return dt.strftime("%A, %B %-d at %-I %p")
+    return dt.strftime("%A, %B %-d at %-I:%M %p")
+
+
+def _escape(s: Optional[str]) -> str:
+    """Escape a Python string for safe embedding inside an AppleScript
+    double-quoted literal."""
+    if s is None:
+        return ""
+    return str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _as_date_block(var: str, dt: datetime.datetime) -> str:
+    """Emit AppleScript lines that build an AppleScript date object
+    in `var` from a Python datetime. Sets day=1 first so the year/month
+    assignments don't overflow (going from Jan 31 to Feb would otherwise
+    roll into March)."""
+    return (
+        f'set {var} to current date\n'
+        f'set day of {var} to 1\n'
+        f'set year of {var} to {dt.year}\n'
+        f'set month of {var} to {dt.month}\n'
+        f'set day of {var} to {dt.day}\n'
+        f'set hours of {var} to {dt.hour}\n'
+        f'set minutes of {var} to {dt.minute}\n'
+        f'set seconds of {var} to {dt.second}\n'
+    )
+
+
+def _parse_records(raw: str, fields: list) -> list:
+    """Parse delimiter-separated AppleScript output into a list of dicts."""
+    if not raw:
+        return []
+    out = []
+    for chunk in raw.split(_REC):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        parts = chunk.split(_FIELD)
+        while len(parts) < len(fields):
+            parts.append("")
+        record = {fields[i]: parts[i].strip() for i in range(len(fields))}
+        if record.get(fields[0]):
+            out.append(record)
+    return out
+
+
+# ── Read operations ─────────────────────────────────────────────────────
+
+_EVENT_FIELDS = ["title", "start", "end", "location", "notes", "calendar"]
+
+
+def _read_events_script(start_dt: datetime.datetime, end_dt: datetime.datetime) -> str:
+    """Build an AppleScript that dumps every event in [start_dt, end_dt)
+    across every calendar, skipping known-slow/synthetic ones."""
+    # Build AppleScript list literal of calendars to skip: {"a", "b", ...}
+    skip_list_as = (
+        "{" + ", ".join(f'"{_escape(n)}"' for n in _READ_SKIP_CALENDAR_NAMES) + "}"
+    )
+    return (
+        _as_date_block("theStart", start_dt)
+        + _as_date_block("theEnd", end_dt)
+        + f'set skipNames to {skip_list_as}\n'
+        + 'set recSep to "' + _REC + '"\n'
+        + 'set fldSep to "' + _FIELD + '"\n'
+        + 'set outputText to ""\n'
+        + 'tell application "Calendar"\n'
+        + '  repeat with cal in calendars\n'
+        + '    set calName to name of cal as string\n'
+        + '    if calName is not in skipNames then\n'
+        + '      try\n'
+        # Switch into the calendar's tell scope before querying events.
+        # Without this, `every event of cal whose ...` returns partial
+        # references that error out (-1728) on bulk property fetches.
+        + '        tell cal\n'
+        + '          set theEvents to (every event whose start date is greater than or equal to theStart and start date is less than theEnd)\n'
+        + '          if (count of theEvents) > 0 then\n'
+        + '            repeat with evt in theEvents\n'
+        + '              set evTitle to ""\n'
+        + '              try\n'
+        + '                set evTitle to summary of evt as string\n'
+        + '              end try\n'
+        + '              set evStart to ""\n'
+        + '              try\n'
+        + '                set evStart to (start date of evt) as string\n'
+        + '              end try\n'
+        + '              set evEnd to ""\n'
+        + '              try\n'
+        + '                set evEnd to (end date of evt) as string\n'
+        + '              end try\n'
+        + '              set evLoc to ""\n'
+        + '              try\n'
+        + '                set l to location of evt\n'
+        + '                if l is not missing value then set evLoc to l as string\n'
+        + '              end try\n'
+        + '              set evNotes to ""\n'
+        + '              try\n'
+        + '                set n to description of evt\n'
+        + '                if n is not missing value then set evNotes to n as string\n'
+        + '              end try\n'
+        + '              set outputText to outputText & evTitle & fldSep & evStart & fldSep & evEnd & fldSep & evLoc & fldSep & evNotes & fldSep & calName & recSep\n'
+        + '            end repeat\n'
+        + '          end if\n'
+        + '        end tell\n'
+        + '      end try\n'
+        + '    end if\n'
+        + '  end repeat\n'
+        + 'end tell\n'
+        + 'return outputText\n'
+    )
+
+
+def _get_today_events_applescript() -> list:
+    """Legacy AppleScript reader for today's events — kept as a fallback
+    for `get_today_events` when CALENDAR_READ_BACKEND is 'applescript' or
+    the EventKit path raises."""
+    _ensure_app_running("Calendar")
+    today = datetime.date.today()
+    start = datetime.datetime.combine(today, datetime.time(0, 0, 0))
+    end = start + datetime.timedelta(days=1)
+    raw = _run_osa(_read_events_script(start, end), timeout=20)
+    return _parse_records(raw, _EVENT_FIELDS)
+
+
+def _get_upcoming_events_applescript() -> list:
+    """Legacy AppleScript reader for the rest-of-week events — see
+    _get_today_events_applescript for the fallback rationale."""
+    _ensure_app_running("Calendar")
+    today = datetime.date.today()
+    # Python weekday: Mon=0 ... Sun=6. Cover [today, midnight-after-Saturday).
+    days_until_sat = (5 - today.weekday()) % 7
+    start = datetime.datetime.combine(today, datetime.time(0, 0, 0))
+    end = start + datetime.timedelta(days=days_until_sat + 1)
+    raw = _run_osa(_read_events_script(start, end), timeout=25)
+    return _parse_records(raw, _EVENT_FIELDS)
+
+
+# ── EventKit-backed event reads ─────────────────────────────────────────
+#
+# EKEventStore.eventsMatchingPredicate_ is synchronous and bypasses both
+# the Calendar.app cold-launch cost and the per-calendar `whose` clause.
+# We match the legacy record shape exactly so the migration is a drop-in.
+
+def _ns_date_to_applescript_str(ns_date) -> str:
+    """Render an EventKit NSDate using the same format AppleScript emits
+    ('Friday, April 17, 2026 at 10:00:00 AM') so downstream parsers keep
+    working without modification."""
+    if ns_date is None:
+        return ""
+    try:
+        ts = ns_date.timeIntervalSince1970()
+        dt = datetime.datetime.fromtimestamp(ts)
+        return dt.strftime("%A, %B %d, %Y at %I:%M:%S %p")
+    except Exception:
+        return ""
+
+
+def _ek_event_to_record(ek_event) -> dict:
+    """Convert an EKEvent to the dict shape the rest of the codebase
+    expects from get_today_events / get_upcoming_events. Every field
+    is a string so json/formatting paths stay identical."""
+    def _safe(attr, default=""):
+        try:
+            v = getattr(ek_event, attr)()
+        except Exception:
+            return default
+        if v is None:
+            return default
+        return v
+
+    title = _safe("title") or ""
+    start = _ns_date_to_applescript_str(_safe("startDate", None))
+    end = _ns_date_to_applescript_str(_safe("endDate", None))
+    location = _safe("location") or ""
+    notes = _safe("notes") or ""
+
+    cal_name = ""
+    try:
+        cal = ek_event.calendar()
+        if cal is not None:
+            cal_name = cal.title() or ""
+    except Exception:
+        pass
+
+    return {
+        "title": str(title),
+        "start": start,
+        "end": end,
+        "location": str(location),
+        "notes": str(notes),
+        "calendar": str(cal_name),
+    }
+
+
+def _eventkit_events_in_range(start_dt: datetime.datetime,
+                              end_dt: datetime.datetime) -> list:
+    """Query EventKit for every event in [start_dt, end_dt), filter out
+    calendars in _READ_SKIP_CALENDAR_NAMES, sort by start time, and
+    return the legacy dict shape."""
+    if not _EK_AVAILABLE:
+        raise RuntimeError("EventKit not available")
+
+    import Foundation
+    store = _EK.EKEventStore.alloc().init()
+
+    # Trigger a calendar-events permission request on first use. The
+    # completion handler is optional — we continue immediately and the
+    # predicate call itself will fail cleanly if access is denied.
+    try:
+        if hasattr(store, "requestFullAccessToEventsWithCompletion_"):
+            # macOS 14+ API. Fire-and-forget; the OS caches the grant.
+            store.requestFullAccessToEventsWithCompletion_(lambda *_: None)
+        elif hasattr(store, "requestAccessToEntityType_completion_"):
+            store.requestAccessToEntityType_completion_(
+                _EK.EKEntityTypeEvent, lambda *_: None,
+            )
+    except Exception as e:
+        log.warning(f"event access request raised (non-fatal): {e}")
+
+    ns_start = Foundation.NSDate.dateWithTimeIntervalSince1970_(start_dt.timestamp())
+    ns_end = Foundation.NSDate.dateWithTimeIntervalSince1970_(end_dt.timestamp())
+
+    # Scope to non-skipped calendars so the synthetic / subscription
+    # calendars stay out of the results — identical behaviour to AppleScript.
+    try:
+        all_cals = store.calendarsForEntityType_(_EK.EKEntityTypeEvent) or []
+    except Exception:
+        all_cals = []
+    kept = []
+    for cal in all_cals:
+        try:
+            if (cal.title() or "") not in _READ_SKIP_CALENDAR_NAMES:
+                kept.append(cal)
+        except Exception:
+            continue
+
+    # Passing None for the calendars arg queries every calendar — used
+    # as the fallback if we couldn't enumerate for any reason.
+    predicate = store.predicateForEventsWithStartDate_endDate_calendars_(
+        ns_start, ns_end, kept if kept else None,
+    )
+    events = store.eventsMatchingPredicate_(predicate) or []
+
+    records = []
+    for e in events:
+        try:
+            records.append(_ek_event_to_record(e))
+        except Exception as ex:
+            log.warning(f"event record build failed: {ex}")
+    # Stable sort by startDate — we already have the string, so sort by the
+    # underlying timestamp to get correct chronological order.
+    def _sort_key(rec):
+        try:
+            return datetime.datetime.strptime(
+                rec.get("start", ""), "%A, %B %d, %Y at %I:%M:%S %p",
+            )
+        except Exception:
+            return datetime.datetime.max
+    records.sort(key=_sort_key)
+    return records
+
+
+def _get_today_events_eventkit() -> list:
+    today = datetime.date.today()
+    start = datetime.datetime.combine(today, datetime.time(0, 0, 0))
+    end = start + datetime.timedelta(days=1)
+    return _eventkit_events_in_range(start, end)
+
+
+def _get_upcoming_events_eventkit() -> list:
+    today = datetime.date.today()
+    days_until_sat = (5 - today.weekday()) % 7
+    start = datetime.datetime.combine(today, datetime.time(0, 0, 0))
+    end = start + datetime.timedelta(days=days_until_sat + 1)
+    return _eventkit_events_in_range(start, end)
+
+
+# ── Public dispatch ──────────────────────────────────────────────────────
+
+def get_today_events() -> list:
+    """Return every calendar event scheduled for today, across all calendars.
+
+    Dispatches to the EventKit or AppleScript backend based on
+    CALENDAR_READ_BACKEND. When EventKit raises (e.g. permission denied),
+    falls back to the AppleScript implementation automatically."""
+    t0 = time.time()
+    if CALENDAR_READ_BACKEND == "applescript":
+        result = _get_today_events_applescript()
+        log.info(f"get_today_events (AppleScript) in {time.time()-t0:.2f}s")
+        return result
+    try:
+        result = _get_today_events_eventkit()
+        log.info(f"get_today_events (EventKit) in {time.time()-t0:.2f}s")
+        return result
+    except Exception as e:
+        log.warning(f"EventKit calendar read failed, falling back to AppleScript: {e}")
+        result = _get_today_events_applescript()
+        log.info(f"get_today_events (AppleScript fallback) in {time.time()-t0:.2f}s")
+        return result
+
+
+def get_upcoming_events() -> list:
+    """Return every event from today through the end of this coming Saturday.
+
+    If today is Sunday, covers Sun through next Saturday (7 days).
+    If today is Saturday, covers only today.
+    Otherwise covers today through Saturday of the current week.
+
+    Backend dispatch identical to get_today_events()."""
+    t0 = time.time()
+    if CALENDAR_READ_BACKEND == "applescript":
+        result = _get_upcoming_events_applescript()
+        log.info(f"get_upcoming_events (AppleScript) in {time.time()-t0:.2f}s")
+        return result
+    try:
+        result = _get_upcoming_events_eventkit()
+        log.info(f"get_upcoming_events (EventKit) in {time.time()-t0:.2f}s")
+        return result
+    except Exception as e:
+        log.warning(f"EventKit calendar read failed, falling back to AppleScript: {e}")
+        result = _get_upcoming_events_applescript()
+        log.info(f"get_upcoming_events (AppleScript fallback) in {time.time()-t0:.2f}s")
+        return result
+
+
+_REMINDER_FIELDS = ["title", "due", "notes"]
+
+
+def get_all_reminders() -> list:
+    """Return every incomplete reminder across all Reminders lists.
+
+    Uses EventKit (PyObjC) when available — Apple's native API, which
+    completes this query in ~0.1s even against a list with thousands of
+    historical completed reminders. AppleScript's `whose completed is
+    false` takes 20+ seconds on the same data and has been timing out.
+    Falls back to the AppleScript implementation if EventKit isn't
+    installed."""
+    if _EK_AVAILABLE:
+        return _get_reminders_via_eventkit()
+    return _get_reminders_via_applescript()
+
+
+def _get_reminders_via_eventkit() -> list:
+    """Fetch incomplete reminders via the native EventKit API, sorted by
+    due date (earliest first; no-due-date items come last).
+    Result shape matches the AppleScript path: dicts with title/due/notes."""
+    store = _EK.EKEventStore.alloc().init()
+    # Request reminders access on first use (macOS 14+ split events/reminders).
+    try:
+        if hasattr(store, "requestFullAccessToRemindersWithCompletion_"):
+            store.requestFullAccessToRemindersWithCompletion_(lambda *_: None)
+        elif hasattr(store, "requestAccessToEntityType_completion_"):
+            store.requestAccessToEntityType_completion_(
+                _EK.EKEntityTypeReminder, lambda *_: None,
+            )
+    except Exception as e:
+        log.warning(f"reminder access request raised (non-fatal): {e}")
+
+    # Predicate for all incomplete reminders in all calendars.
+    predicate = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+        None, None, None
+    )
+
+    # fetchReminders... uses an async completion handler. Run it synchronously
+    # by blocking on a threading.Event.
+    result = {"reminders": None, "done": threading.Event()}
+
+    def _completion(reminders):
+        try:
+            result["reminders"] = list(reminders) if reminders else []
+        except Exception:
+            result["reminders"] = []
+        finally:
+            result["done"].set()
+
+    store.fetchRemindersMatchingPredicate_completion_(predicate, _completion)
+    if not result["done"].wait(timeout=10):
+        raise RuntimeError("EventKit reminder fetch timed out")
+
+    # Collect with a parallel Python datetime for sorting, then strip it.
+    rows = []
+    for r in result["reminders"] or []:
+        try:
+            title = r.title() or ""
+        except Exception:
+            title = ""
+        if not title:
+            continue  # No title → skip (matches AppleScript behavior)
+
+        # Due date, if any. dueDateComponents() returns NSDateComponents.
+        due_str = ""
+        due_dt: Optional[datetime.datetime] = None
+        try:
+            comps = r.dueDateComponents()
+            if comps is not None:
+                y = comps.year()
+                mo = comps.month()
+                d = comps.day()
+                h = comps.hour()
+                mi = comps.minute()
+                if y and mo and d:
+                    due_dt = datetime.datetime(
+                        y, mo, d,
+                        h if (h is not None and h >= 0) else 0,
+                        mi if (mi is not None and mi >= 0) else 0,
+                    )
+                    # Drops ":00" when minutes are zero → "7 PM" not "7:00 PM".
+                    due_str = format_datetime_for_speech(due_dt)
+        except Exception:
+            pass
+
+        # Notes
+        try:
+            notes = r.notes() or ""
+        except Exception:
+            notes = ""
+
+        rows.append((due_dt, {"title": title, "due": due_str, "notes": notes}))
+
+    # Sort by due date ascending. Items with no due date sort LAST so
+    # "what's due soon" comes first and untimed tasks trail.
+    _max_dt = datetime.datetime.max
+    rows.sort(key=lambda x: (x[0] is None, x[0] or _max_dt))
+    return [row[1] for row in rows]
+
+
+def _get_reminders_via_applescript() -> list:
+    """AppleScript fallback for environments without PyObjC EventKit.
+    Slow (20+ seconds on large reminder lists) but portable."""
+    _ensure_app_running("Reminders")
+    script = (
+        'set recSep to "' + _REC + '"\n'
+        + 'set fldSep to "' + _FIELD + '"\n'
+        + 'set outputText to ""\n'
+        + 'tell application "Reminders"\n'
+        + '  repeat with lst in lists\n'
+        + '    try\n'
+        + '      tell lst\n'
+        + '        set openReminders to (every reminder whose completed is false)\n'
+        + '        repeat with r in openReminders\n'
+        + '          set rName to ""\n'
+        + '          try\n'
+        + '            set rName to name of r as string\n'
+        + '          end try\n'
+        + '          set rDue to ""\n'
+        + '          try\n'
+        + '            set d to due date of r\n'
+        + '            if d is not missing value then set rDue to d as string\n'
+        + '          end try\n'
+        + '          set rBody to ""\n'
+        + '          try\n'
+        + '            set b to body of r\n'
+        + '            if b is not missing value then set rBody to b as string\n'
+        + '          end try\n'
+        + '          set outputText to outputText & rName & fldSep & rDue & fldSep & rBody & recSep\n'
+        + '        end repeat\n'
+        + '      end tell\n'
+        + '    end try\n'
+        + '  end repeat\n'
+        + 'end tell\n'
+        + 'return outputText\n'
+    )
+    raw = _run_osa(script, timeout=20)
+    return _parse_records(raw, _REMINDER_FIELDS)
+
+
+def get_calendar_names() -> list:
+    """Return the names of every calendar in Apple Calendar."""
+    _ensure_app_running("Calendar")
+    script = (
+        'set outputText to ""\n'
+        + 'tell application "Calendar"\n'
+        + '  repeat with cal in calendars\n'
+        + '    try\n'
+        + '      set outputText to outputText & (name of cal as string) & "' + _FIELD + '"\n'
+        + '    end try\n'
+        + '  end repeat\n'
+        + 'end tell\n'
+        + 'return outputText\n'
+    )
+    raw = _run_osa(script, timeout=10)
+    return [n.strip() for n in raw.split(_FIELD) if n.strip()]
+
+
+# ── Write operations ────────────────────────────────────────────────────
+
+def create_calendar_event(
+    title: str,
+    calendar_name: str,
+    start_datetime: datetime.datetime,
+    end_datetime: Optional[datetime.datetime] = None,
+    location: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> None:
+    """Create an event in the specified Apple Calendar.
+    If end_datetime is None, defaults to 1 hour after start_datetime."""
+    _ensure_app_running("Calendar")
+    if end_datetime is None:
+        end_datetime = start_datetime + datetime.timedelta(hours=1)
+
+    props = [
+        f'summary:"{_escape(title)}"',
+        'start date:theStart',
+        'end date:theEnd',
+    ]
+    if location:
+        props.append(f'location:"{_escape(location)}"')
+    if notes:
+        props.append(f'description:"{_escape(notes)}"')
+    props_str = ", ".join(props)
+
+    script = (
+        _as_date_block("theStart", start_datetime)
+        + _as_date_block("theEnd", end_datetime)
+        + f'tell application "Calendar"\n'
+        + f'  tell calendar "{_escape(calendar_name)}"\n'
+        + f'    make new event with properties {{{props_str}}}\n'
+        + '  end tell\n'
+        + 'end tell\n'
+    )
+    _run_osa(script, timeout=20)
+
+
+def create_reminder(
+    title: str,
+    due_datetime: Optional[datetime.datetime] = None,
+    notes: Optional[str] = None,
+) -> None:
+    """Create a reminder in the default Reminders list."""
+    _ensure_app_running("Reminders")
+    props = [f'name:"{_escape(title)}"']
+    date_block = ""
+    if due_datetime is not None:
+        date_block = _as_date_block("theDue", due_datetime)
+        props.append('due date:theDue')
+    if notes:
+        props.append(f'body:"{_escape(notes)}"')
+    props_str = ", ".join(props)
+
+    script = (
+        date_block
+        + 'tell application "Reminders"\n'
+        + '  tell default list\n'
+        + f'    make new reminder with properties {{{props_str}}}\n'
+        + '  end tell\n'
+        + 'end tell\n'
+    )
+    _run_osa(script, timeout=20)
+
+
+# ── Classification ─────────────────────────────────────────────────────
+
+_WORK_KEYWORDS = (
+    "working", "shift", "meeting", "office", "job", "client",
+    "stand-up", "standup", "sprint", "scrum", "1:1", "one on one",
+)
+_FAMILY_KEYWORDS = (
+    "mom", "dad", "family", "kids", "dinner with", "birthday",
+    "brother", "sister", "grandma", "grandpa", "aunt", "uncle",
+)
+_HOME_KEYWORDS = (
+    "appointment", "dentist", "doctor", "groceries",
+    "haircut", "errand", "pickup",
+)
+
+
+def classify_calendar(user_text: str) -> str:
+    """Pick the most appropriate calendar name based on keywords in the
+    user's utterance. Falls back to 'Home' by default. If the classified
+    calendar does not exist in the user's actual calendar list, falls back
+    to the first available calendar instead."""
+    t = (user_text or "").lower()
+    chosen = "Home"
+    if any(k in t for k in _WORK_KEYWORDS):
+        chosen = "Work"
+    elif any(k in t for k in _FAMILY_KEYWORDS):
+        chosen = "Family"
+    elif any(k in t for k in _HOME_KEYWORDS):
+        chosen = "Home"
+
+    try:
+        available = get_calendar_names()
+    except Exception:
+        return chosen
+    if not available:
+        return chosen
+    if chosen in available:
+        return chosen
+    return available[0]
+
+
+# ── Edit / delete / complete operations (EventKit-backed) ─────────────────────
+#
+# All mutations return a 2-tuple: (success: bool, matched_title_or_error: str).
+# The matched title (on success) is what callers speak back to the user so they
+# can confirm we acted on the right item. Failures return a short human-readable
+# error string.
+#
+# Target items are found by fuzzy title match — users won't repeat exact titles
+# out loud, so we take a title HINT ("Amazon smartwatch") and find the best
+# match among open reminders / upcoming events ("Contact Amazon smart watch
+# refund").
+
+
+def _fuzzy_match_score(query: str, candidate: str) -> float:
+    """Return 0.0 to 1.0 — fraction of significant query words that appear
+    inside the candidate title. Space-insensitive: 'smartwatch' matches
+    'smart watch'. Words shorter than 3 characters are ignored so filler
+    like 'the', 'my', 'a' doesn't dilute the score."""
+    if not query or not candidate:
+        return 0.0
+    q_words = [w for w in re.findall(r"\w+", query.lower()) if len(w) > 2]
+    if not q_words:
+        return 0.0
+    c_lower = candidate.lower()
+    c_nospace = c_lower.replace(" ", "")
+    matches = 0
+    for w in q_words:
+        if w in c_lower or w in c_nospace:
+            matches += 1
+    return matches / len(q_words)
+
+
+def _find_best_reminder(title_hint: str, store=None):
+    """Fetch incomplete reminders via EventKit, return the EKReminder whose
+    title best matches title_hint. Returns None if nothing scores above 0.5."""
+    if not _EK_AVAILABLE:
+        return None
+    if store is None:
+        store = _EK.EKEventStore.alloc().init()
+
+    predicate = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+        None, None, None
+    )
+    result = {"reminders": None, "done": threading.Event()}
+
+    def _completion(reminders):
+        try:
+            result["reminders"] = list(reminders) if reminders else []
+        except Exception:
+            result["reminders"] = []
+        finally:
+            result["done"].set()
+
+    store.fetchRemindersMatchingPredicate_completion_(predicate, _completion)
+    if not result["done"].wait(timeout=10):
+        return None
+
+    best_score = 0.0
+    best = None
+    for r in result["reminders"] or []:
+        try:
+            title = r.title() or ""
+        except Exception:
+            title = ""
+        score = _fuzzy_match_score(title_hint, title)
+        if score > best_score:
+            best_score = score
+            best = r
+    return best if best_score >= 0.5 else None
+
+
+def complete_reminder(title_hint: str) -> tuple:
+    """Find and mark-complete the incomplete reminder best matching title_hint.
+    Returns (True, matched_title) on success, (False, error_message) otherwise.
+    EventKit-based — a full mark-complete operation takes <0.2 seconds."""
+    if not _EK_AVAILABLE:
+        return (False, "EventKit is not available")
+    store = _EK.EKEventStore.alloc().init()
+    reminder = _find_best_reminder(title_hint, store=store)
+    if reminder is None:
+        return (False, f"no open reminder matches {title_hint!r}")
+
+    try:
+        title = reminder.title() or title_hint
+    except Exception:
+        title = title_hint
+
+    try:
+        reminder.setCompleted_(True)
+        success, err = store.saveReminder_commit_error_(reminder, True, None)
+        if success:
+            return (True, title)
+        return (False, f"save failed: {err}")
+    except Exception as e:
+        return (False, f"error: {e}")
+
+
+def delete_reminder(title_hint: str) -> tuple:
+    """Find and permanently delete the reminder best matching title_hint.
+    Returns (True, matched_title) on success, (False, error_message) otherwise."""
+    if not _EK_AVAILABLE:
+        return (False, "EventKit is not available")
+    store = _EK.EKEventStore.alloc().init()
+    reminder = _find_best_reminder(title_hint, store=store)
+    if reminder is None:
+        return (False, f"no open reminder matches {title_hint!r}")
+
+    try:
+        title = reminder.title() or title_hint
+    except Exception:
+        title = title_hint
+
+    try:
+        success, err = store.removeReminder_commit_error_(reminder, True, None)
+        if success:
+            return (True, title)
+        return (False, f"delete failed: {err}")
+    except Exception as e:
+        return (False, f"error: {e}")
+
+
+def update_reminder(
+    title_hint: str,
+    new_title: Optional[str] = None,
+    new_due: Optional[datetime.datetime] = None,
+    new_notes: Optional[str] = None,
+) -> tuple:
+    """Find the best-matching open reminder and update any non-None fields.
+    Returns (True, matched_original_title) or (False, error)."""
+    if not _EK_AVAILABLE:
+        return (False, "EventKit is not available")
+    store = _EK.EKEventStore.alloc().init()
+    reminder = _find_best_reminder(title_hint, store=store)
+    if reminder is None:
+        return (False, f"no open reminder matches {title_hint!r}")
+
+    try:
+        original_title = reminder.title() or title_hint
+    except Exception:
+        original_title = title_hint
+
+    try:
+        import Foundation
+        if new_title:
+            reminder.setTitle_(new_title)
+        if new_due is not None:
+            # EKReminder expects NSDateComponents for its due date AND the
+            # components need an explicit NSCalendar attached, otherwise
+            # EventKit can't resolve them to a real date and silently
+            # discards the new value — the save reports success but the
+            # reminder keeps its old due time.
+            gregorian = Foundation.NSCalendar.alloc().initWithCalendarIdentifier_(
+                Foundation.NSCalendarIdentifierGregorian
+            )
+            comps = Foundation.NSDateComponents.alloc().init()
+            comps.setCalendar_(gregorian)
+            comps.setYear_(new_due.year)
+            comps.setMonth_(new_due.month)
+            comps.setDay_(new_due.day)
+            comps.setHour_(new_due.hour)
+            comps.setMinute_(new_due.minute)
+            reminder.setDueDateComponents_(comps)
+
+            # Reminders created with a due date also carry an NSAlarm that
+            # fires at the old time. Setting dueDateComponents does not
+            # update the alarm, and the alarm's trigger date is what
+            # Reminders.app sorts and displays by on macOS 14+ — so the
+            # UI still shows the old time unless we also replace the alarm.
+            existing = list(reminder.alarms() or [])
+            for a in existing:
+                try:
+                    reminder.removeAlarm_(a)
+                except Exception:
+                    pass
+            try:
+                ns_due = Foundation.NSDate.dateWithTimeIntervalSince1970_(
+                    new_due.timestamp()
+                )
+                new_alarm = _EK.EKAlarm.alarmWithAbsoluteDate_(ns_due)
+                reminder.addAlarm_(new_alarm)
+            except Exception as e:
+                log.warning(f"alarm update warning: {e}")
+        if new_notes is not None:
+            reminder.setNotes_(new_notes)
+        success, err = store.saveReminder_commit_error_(reminder, True, None)
+        if success:
+            # Force a store refresh so subsequent reads see the change.
+            try:
+                store.refreshSourcesIfNecessary()
+            except Exception:
+                pass
+            return (True, original_title)
+        return (False, f"save failed: {err}")
+    except Exception as e:
+        return (False, f"error: {e}")
+
+
+def _find_best_event(
+    title_hint: str,
+    date_hint: Optional[datetime.date] = None,
+    window_days: int = 60,
+    store=None,
+):
+    """Search events in a date window around date_hint (or today +/- window_days),
+    return the EKEvent whose title best matches title_hint. None if no match."""
+    if not _EK_AVAILABLE:
+        return None
+    if store is None:
+        store = _EK.EKEventStore.alloc().init()
+
+    # Define the search window. When the user named a specific day, search
+    # EXACTLY that day (00:00 to 24:00 local) so "delete the Monday work
+    # event" doesn't also match a Saturday "Work" event with an identical
+    # title. A single-day window physically excludes neighbouring days.
+    if date_hint is not None:
+        anchor = datetime.datetime.combine(date_hint, datetime.time(0, 0, 0))
+        start_dt = anchor
+        end_dt = anchor + datetime.timedelta(days=1)
+    else:
+        start_dt = datetime.datetime.now() - datetime.timedelta(days=2)
+        end_dt = datetime.datetime.now() + datetime.timedelta(days=window_days)
+
+    import Foundation
+    ns_start = Foundation.NSDate.dateWithTimeIntervalSince1970_(start_dt.timestamp())
+    ns_end = Foundation.NSDate.dateWithTimeIntervalSince1970_(end_dt.timestamp())
+
+    predicate = store.predicateForEventsWithStartDate_endDate_calendars_(
+        ns_start, ns_end, None
+    )
+    events = store.eventsMatchingPredicate_(predicate) or []
+
+    best_score = 0.0
+    best = None
+    for e in events:
+        try:
+            title = e.title() or ""
+        except Exception:
+            title = ""
+        score = _fuzzy_match_score(title_hint, title)
+        if score > best_score:
+            best_score = score
+            best = e
+    return best if best_score >= 0.5 else None
+
+
+def delete_calendar_event(
+    title_hint: str,
+    date_hint: Optional[datetime.date] = None,
+) -> tuple:
+    """Find and delete the calendar event best matching title_hint.
+    An optional date_hint narrows the search window. Returns
+    (True, matched_title) on success or (False, error)."""
+    if not _EK_AVAILABLE:
+        return (False, "EventKit is not available")
+    store = _EK.EKEventStore.alloc().init()
+    event = _find_best_event(title_hint, date_hint=date_hint, store=store)
+    if event is None:
+        return (False, f"no upcoming event matches {title_hint!r}")
+
+    try:
+        title = event.title() or title_hint
+    except Exception:
+        title = title_hint
+
+    try:
+        # EKSpanThisEvent = only this occurrence, not future repeats. Safer.
+        success, err = store.removeEvent_span_commit_error_(
+            event, _EK.EKSpanThisEvent, True, None
+        )
+        if success:
+            return (True, title)
+        return (False, f"delete failed: {err}")
+    except Exception as e:
+        return (False, f"error: {e}")

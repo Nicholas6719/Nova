@@ -5,7 +5,7 @@ macOS backend · Entry point
 
 Pipeline:
   Wake word → STT (faster-whisper + webrtcvad)
-  → Fast-path routing → Memory → Tools
+  → Fast-path routing → Memory → Calendar/Reminders → Tools
   → LLM (MLX Llama, streaming) → Sentence-chunked TTS (Kokoro ONNX)
 
 Communication with SwiftUI:
@@ -94,9 +94,10 @@ class VoiceAssistant:
       2. Pending confirmation flow
       3. Memory intents   (remember / recall / update / forget)
       4. Fast-path intents (greeting / date / time / repeat)
-      5. Tool intents     (open app / volume / battery / search / screenshot)
-      6. RAG context enrichment
-      7. LLM fallback     (MLX streaming + sentence-chunked TTS)
+      5. Calendar intents (read/create/complete/delete/update events + reminders)
+      6. Tool intents     (open app / volume / battery / search / screenshot)
+      7. RAG context enrichment
+      8. LLM fallback     (MLX streaming + sentence-chunked TTS)
     """
 
     # ── Init ──────────────────────────────────────────────────────────────────────
@@ -130,6 +131,7 @@ class VoiceAssistant:
         self._init_memory()
         self._init_rag()
         self._init_tools()
+        self._init_calendar()
         self._init_ws()
         log.info("Nova ready.")
 
@@ -223,6 +225,13 @@ class VoiceAssistant:
     def _init_tools(self) -> None:
         from tools import NovaTools
         self.tools = NovaTools(self.config)
+
+    def _init_calendar(self) -> None:
+        # NovaCalendar's LLM extraction/summarize calls run on the nova-llm
+        # worker thread (calendar handling is dispatched from _handle_turn_impl,
+        # which is already on that thread), so passing self.llm is thread-safe.
+        from calendar_intents import NovaCalendar
+        self.calendar = NovaCalendar(self.config, self.llm, self.memory)
 
     def _init_ws(self) -> None:
         from ws_server import NovaWSServer
@@ -447,13 +456,21 @@ class VoiceAssistant:
             self._respond(resp)
             return
 
-        # ── 5. Tool intents ──────────────────────────────────────────────────
+        # ── 5. Calendar / reminders intents ──────────────────────────────────
+        # Placed before Tools so calendar commands win over the greedy tool
+        # regexes (e.g. web-search "find X", app-launch "open X").
+        cal_intent = self.calendar.detect_intent(text)
+        if cal_intent is not None:
+            self._respond(self.calendar.handle(cal_intent, text))
+            return
+
+        # ── 6. Tool intents ──────────────────────────────────────────────────
         resp = self.tools.match(text)
         if resp is not None:
             self._respond(resp)
             return
 
-        # ── 6. RAG context enrichment ────────────────────────────────────────
+        # ── 7. RAG context enrichment ────────────────────────────────────────
         rag_ctx = ""
         if self._rag_ready and self._rag:
             try:
@@ -461,7 +478,7 @@ class VoiceAssistant:
             except Exception:
                 pass
 
-        # ── 7. LLM fallback (streaming) ──────────────────────────────────────
+        # ── 8. LLM fallback (streaming) ──────────────────────────────────────
         self.set_state("thinking")
         self._stream_response(text, rag_context=rag_ctx)
 
