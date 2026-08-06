@@ -9,9 +9,10 @@ Design (see the memory-engine design notes):
     correction supersedes the old value instead of piling up contradictions
     (the #1 flaw in the Jarvis design we improved on). Values render to natural
     English at injection time.
-  - Extraction is HYBRID: a cheap per-turn regex fast-path proposes obvious
-    facts; a wake-mode LLM reconciliation pass (in nova.py, off the live path)
-    decides insert / update / delete / ignore against what's already stored.
+  - Extraction runs OFF the live path: a wake-mode LLM reconciliation pass
+    (fact_reconciler, dispatched from nova.py when a conversation ends) decides
+    insert / update / delete / ignore against what's already stored. Values must
+    be grounded in what the user actually said — never fabricated.
   - Injection is CAPPED and RANKED — not every fact every turn — so a small
     model's context window isn't flooded.
   - The memory layer NEVER speaks. Confirmations ("got it") are a conversational
@@ -150,15 +151,6 @@ class NovaMemory:
             log.debug(f"Fact deleted: {category}/{key}")
         return deleted
 
-    def get_fact(self, category: str, key: str) -> Optional[str]:
-        category = _norm(category)
-        key      = _norm(key)
-        with self._lock:
-            conn = self._conn()
-            row = conn.execute(
-                "SELECT value FROM facts WHERE category = ? AND key = ?", (category, key)
-            ).fetchone()
-        return row["value"] if row else None
 
     def find_fact(self, key: str) -> Optional[tuple[str, str]]:
         """Look up a fact by key across ALL categories, returning
@@ -203,16 +195,6 @@ class NovaMemory:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def facts_in_category(self, category: str) -> list[dict]:
-        category = _norm(category)
-        with self._lock:
-            conn = self._conn()
-            rows = conn.execute(
-                """SELECT category, key, value FROM facts
-                   WHERE category = ? ORDER BY updated_at DESC""",
-                (category,),
-            ).fetchall()
-        return [dict(r) for r in rows]
 
     def last_identity(self) -> Optional[tuple[str, str]]:
         """(category, key) of the most recent upsert — for 'actually, it's X'."""

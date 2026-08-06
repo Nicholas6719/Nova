@@ -104,7 +104,7 @@ class VoiceAssistant:
 
     Routing order (first match wins):
       1. System commands  (sleep / wake / mute)
-      2. Pending confirmation flow
+      2. Calendar follow-up offer ("want to hear what's coming up?" -> yes/no)
       3. Calendar intents (read/create/complete/delete/update events + reminders)
       4. Memory intents   (remember / recall / update / forget)
       5. Fast-path intents (greeting / date / time / repeat)
@@ -119,10 +119,9 @@ class VoiceAssistant:
         self.is_muted         = False
         self.is_awake         = True
         self._last_response   = ""
-        self._pending_action: Optional[Callable[[], str]] = None
         # A SOFT one-shot follow-up armed by a calendar read ("want to hear
-        # what's coming up?"). Unlike _pending_action it only fires on an
-        # affirmative reply and never eats an unrelated next command.
+        # what's coming up?"). It only fires on an affirmative reply and never
+        # eats an unrelated next command.
         self._calendar_offer: Optional[Callable[[], str]] = None
         self._rag_ready       = False
         self._rag             = None
@@ -458,14 +457,7 @@ class VoiceAssistant:
             self._respond(resp)
             return
 
-        # ── 2. Pending confirmation flow ─────────────────────────────────────
-        if self._pending_action is not None:
-            resp = self._resume_pending(text)
-            if resp is not None:
-                self._respond(resp)
-                return
-
-        # ── 2b. Soft calendar follow-up offer ────────────────────────────────
+        # ── 2. Soft calendar follow-up offer ─────────────────────────────────
         # A read may have offered "want to hear what's coming up?". Honor a
         # yes/no reply here, but if the user says something else, drop the offer
         # and let their command flow normally (never eat an unrelated command).
@@ -627,7 +619,7 @@ class VoiceAssistant:
 
     # Explicit user-directed memory commands store under the 'explicit' category,
     # source='explicit', so they supersede by canonical key and sit alongside the
-    # facts Nova learns passively (via regex fast-path + wake-mode reconciliation).
+    # facts Nova learns passively (via wake-mode reconciliation).
     _EXPLICIT_CAT = "explicit"
 
     # Nouns that mean "ask the system", not "recall a stored fact". "what's my
@@ -806,24 +798,6 @@ class VoiceAssistant:
     def _build_system_prompt(self, memory_ctx: str, rag_ctx: str) -> str:
         from system_prompt import build_system_prompt
         return build_system_prompt(self.config, memory_context=memory_ctx, rag_context=rag_ctx)
-
-    # ═════════════════════════════════════════════════════════════════════════════
-    # Confirmation flow
-    # ═════════════════════════════════════════════════════════════════════════════
-    def _resume_pending(self, text: str) -> Optional[str]:
-        low = text.lower()
-        if any(w in low for w in ("yes", "yeah", "yep", "do it", "confirm", "go ahead", "sure", "ok")):
-            result = self._pending_action()
-            self._pending_action = None
-            return result
-        else:
-            self._pending_action = None
-            return "Cancelled."
-
-    def set_pending(self, action: Callable[[], str], prompt: str) -> None:
-        """Register a pending confirmation action and speak the prompt."""
-        self._pending_action = action
-        self._respond(prompt)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────────

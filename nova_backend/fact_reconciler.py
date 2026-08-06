@@ -2,8 +2,7 @@
 Fact reconciler — the LLM SLOW PATH of Nova's hybrid memory learning.
 
 Runs once per conversation, in wake mode (after the user stops talking), on the
-nova-llm worker thread. It reviews the conversation plus the regex fast-path
-candidates and decides — as strict JSON — what to remember, update, or forget.
+nova-llm worker thread. It reviews the conversation and decides — as strict JSON — what to remember, update, or forget.
 
 This is where the "self-actuation" lives: the model judges what is actually
 important about Nicholas and reconciles it against what's already stored, so a

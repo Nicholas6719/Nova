@@ -118,13 +118,6 @@ class STTEngine:
         self._stream.start()
         log.info("Persistent mic stream started.")
 
-    def _drain_q(self) -> None:
-        """Discard any queued frames (e.g. residual TTS echo)."""
-        try:
-            while True:
-                self._audio_q.get_nowait()
-        except queue.Empty:
-            pass
 
     # ── Wake-word detection (engine dispatch) ───────────────────────────────────────
     def record_wake(self, wake_keywords: list[str], timeout_s: float = 300.0) -> bool:

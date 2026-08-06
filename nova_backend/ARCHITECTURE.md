@@ -34,12 +34,13 @@ nova_backend/
 Wake word
   → STT (faster-whisper + webrtcvad VAD)
   → [1] System commands      (sleep / wake / mute)
-  → [2] Pending confirmation (yes/no flow for destructive actions)
-  → [3] Memory intents       (remember / recall / update / forget)
-  → [4] Fast-path intents    (greeting / date / time / repeat)
-  → [5] Tool intents         (open app / volume / battery / search / screenshot)
-  → [6] RAG context enrichment
-  → [7] LLM (MLX streaming) → sentence chunking → TTS (Kokoro ONNX)
+  → [2] Calendar follow-up    (answers "want to hear what's coming up?")
+  → [3] Calendar intents      (read / create / complete / delete / update)
+  → [4] Memory intents        (remember / recall / update / forget)
+  → [5] Fast-path intents     (greeting / date / time / repeat)
+  → [6] Tool intents          (open app / volume / battery / search / screenshot)
+  → [7] RAG context enrichment
+  → [8] LLM (MLX streaming) → sentence chunking → TTS (Kokoro ONNX)
 ```
 
 ---

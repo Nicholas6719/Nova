@@ -23,17 +23,23 @@ Nova has two parts:
   NovaTests/
   NovaUITests/
   Nova.xcodeproj
-  nova_backend/          ← Python backend (new — already placed here)
-    nova.py
-    config.json
-    system_prompt.py
-    stt_engine.py
-    llm_engine.py
-    tts_engine.py
-    memory.py
-    ws_server.py
-    tools.py
-    rag.py
+  nova_backend/          ← Python backend (the brain)
+    nova.py                  entry point + routing pipeline
+    config.json              all tuneables
+    system_prompt.py         Nova's personality
+    stt_engine.py            mic capture, wake dispatch, transcription
+    wake_openwakeword.py     neural wake-word detector
+    nova.onnx                trained "Nova" wake model
+    llm_engine.py            MLX inference (streaming + blocking)
+    tts_engine.py            Kokoro TTS + SeamlessPlayer
+    memory.py                SQLite facts + rendering
+    fact_reconciler.py       wake-mode passive learning
+    calendar_reminders.py    EventKit engine (pure functions)
+    calendar_intents.py      calendar NL dispatch
+    tools.py                 macOS system tools
+    rag.py                   local document retrieval
+    ws_server.py             HTTP :5001 + WS :8766 bridge
+    training/                wake-model training kit (Colab)
     requirements.txt
     ARCHITECTURE.md
   CLAUDE.md              ← this file
@@ -43,7 +49,7 @@ Nova has two parts:
 
 ## Python Backend — What Each File Does
 
-**`nova.py`** — Main entry point. `VoiceAssistant` class owns the entire pipeline. Initializes all engines, runs the wake word loop, routes every user utterance through a 7-stage handler chain (first match wins).
+**`nova.py`** — Main entry point. `VoiceAssistant` class owns the entire pipeline. Initializes all engines, runs the wake word loop, routes every user utterance through an 8-stage handler chain (first match wins).
 
 **`config.json`** — All tuneable settings. Model name, ports, voice, user name, silence timing, RAG toggle. Edit this without touching Python code.
 
@@ -57,7 +63,9 @@ Nova has two parts:
 
 **`tts_engine.py`** — Text to speech. Primary: Kokoro ONNX (local, no cloud). Fallback: macOS `say`. Background queue worker for gapless playback. TTS overlaps with LLM streaming — Nova speaks sentence 1 while still generating sentence 2.
 
-**`memory.py`** — SQLite persistent memory at `~/Library/Application Support/Nova/nova_memory.db`. Four tables: facts (explicit), episodes (semantic), conversations (turn history), user_profile (inferred). Background summarization thread — never blocks the pipeline.
+**`memory.py`** — SQLite persistent memory at `~/Library/Application Support/Nova/nova_memory.db`. Facts are STRUCTURED: `(category, key)` is a UNIQUE canonical identity, so a correction supersedes instead of piling up contradictions. `find_fact(key)` searches across ALL categories (recall must see passively-learned facts, not just explicit ones); `_render_fact` renders facts as English — third person for prompt injection, second person for spoken readback. Degenerate model-extracted facts (value merely restates the key) are rejected on write.
+
+**`fact_reconciler.py`** — The LLM slow path of passive learning. Runs once per conversation in wake mode, on the `nova-llm` thread, off the live path. Decides insert/update/delete as strict JSON, then validates: contradictory decisions collapse per key, and every value must be GROUNDED in what the user actually said (`_is_grounded`) so the small model can't fabricate detail it never heard.
 
 **`rag.py`** — Local document retrieval via ChromaDB. Watches `~/Documents`, indexes supported file types (.txt, .md, .pdf, .py, .swift, .js, .json), stores embeddings locally. Enriches LLM context with relevant personal documents. Zero network calls — all on-device.
 
@@ -76,7 +84,7 @@ Nova has two parts:
 ## Pipeline Routing Order (nova.py — first match wins)
 
 1. System commands — sleep / wake / mute (always intercepted first)
-2. Pending confirmation — yes/no flow for destructive actions
+2. Calendar follow-up offer — answers a "want to hear what's coming up?" with yes/no
 3. Calendar / reminders intents — read / create / complete / delete / update (EventKit)
 4. Memory intents — remember / recall / update / forget
 5. Fast-path intents — greetings / date / time / repeat last response
@@ -105,44 +113,33 @@ Nova has two parts:
 
 ---
 
-## Swift Side — What Needs to Change
+## Swift Side — Current State
 
-### Files to ADD to Nova.xcodeproj
+The migration to the Python backend is DONE. Every remaining Swift file is live
+and in the build (verified by removing the dead ones and rebuilding):
 
-**`Nova/SwiftBackend/BackendManager.swift`**
-- Locates Python and `nova_backend/nova.py`
-- Launches `python nova.py` as a subprocess
-- Sets `NOVA_DATA_DIR` environment variable to `~/Library/Application Support/Nova`
-- Polls `/api/status` until backend confirms ready
-- Restarts on crash
-- Exposes `start()`, `stop()`, `isRunning: Bool`
+- **`Nova/NovaApp.swift`** — app entry; starts `BackendManager`.
+- **`Nova/SwiftBackend/BackendManager.swift`** — locates Python + `nova_backend/nova.py`,
+  launches it as a child process with `NOVA_DATA_DIR` set, polls `/api/status`
+  until ready, restarts on crash, passes its own PID as `NOVA_PARENT_PID` so the
+  backend exits if the app is SIGKILLed. **Runs the backend from the REPO path
+  (nova_backend is NOT bundled) — so Python-only changes need only an app
+  relaunch, never an Xcode rebuild.**
+- **`Nova/SwiftBackend/NovaAPIClient.swift`** — HTTP (:5001) + WebSocket (:8766)
+  client; publishes state/messages/tokens via `@Published`.
+- **`Nova/ContentView.swift`**, **`Features/Chat/ChatViewModel.swift`**,
+  **`Features/Chat/Message.swift`** — the chat UI, wired to `NovaAPIClient`.
+- **`Nova/Core/DebugLog.swift`**, **`Nova/Core/NovaLogger.swift`** — logging (active).
+- **`Nova/Voice/SpeechManager.swift`**, **`SpeechRecognizer.swift`** — legacy
+  on-device voice. **Python owns all voice I/O now**, so these are effectively
+  inert, but `ChatViewModel` is still wired to them through Combine. Untangling
+  that is a real refactor, not a cleanup — do it deliberately, with a build to
+  verify, not as a drive-by.
 
-**`Nova/SwiftBackend/NovaAPIClient.swift`**
-- HTTP client: wraps GET /api/status, GET /api/messages, POST /api/message
-- WebSocket client connecting to ws://localhost:8766
-- On WS message: parses JSON, publishes state changes and messages via @Published / Combine
-- Exposes `sendMessage(_ text: String)`, `currentState: String`, `messages: [Message]`
-
-### Files to REMOVE (or gut) from Nova.xcodeproj
-
-These are replaced entirely by the Python backend:
-- `Nova/Core/NovaEngineCore.swift`
-- `Nova/Core/LLMClient.swift`
-- `Nova/Core/IntentDetector.swift`
-- `Nova/Core/MathRouter.swift`
-- `Nova/Core/NovaPersonality.swift`
-- `Nova/Core/APIKeyProvider.swift`
-- `Nova/Memory/` (entire directory)
-- `Nova/Tools/` (entire directory)
-
-### Files to KEEP and ADAPT
-
-- `Nova/ContentView.swift` — keep the UI, wire it to `NovaAPIClient` instead of `ChatViewModel`'s old engine
-- `Nova/Features/Chat/ChatViewModel.swift` — adapt to use `NovaAPIClient` for sending/receiving messages and state
-- `Nova/Features/Chat/Message.swift` — keep as-is
-- `Nova/NovaApp.swift` — add `BackendManager` initialization here
-- `Nova/Voice/SpeechManager.swift` — TTS is now handled by Python; simplify or remove
-- `Nova/Voice/SpeechRecognizer.swift` — STT is now handled by Python; simplify or remove
+Already deleted (2026-08-06 cleanup, build verified): `Nova/Core/`
+NovaEngine, NovaEngineCore, LLMClient, IntentDetector, MathRouter,
+NovaPersonality, APIKeyProvider; all of `Nova/Memory/` and `Nova/Tools/`;
+`Nova/Voice/AudioSessionQueue.swift`.
 
 ---
 
@@ -186,11 +183,12 @@ The MLX model (~2GB) downloads automatically on first run.
 
 ---
 
-## What Does Not Exist Yet (build in order)
+## Not Built Yet
 
-1. `Nova/SwiftBackend/BackendManager.swift` — launch and supervise Python process
-2. `Nova/SwiftBackend/NovaAPIClient.swift` — HTTP + WebSocket client
-3. `ChatViewModel.swift` adaptations — wire to NovaAPIClient
-4. Calendar integration — EventKit (same approach as Jarvis's `calendar_reminders.py`)
-5. Proactive notifications — background monitor for upcoming events
-6. iOS app — independent, on-device (future phase, separate architecture)
+1. Proactive notifications — background monitor for upcoming events / due reminders
+2. Barge-in over speakers — needs acoustic echo cancellation (see branch `feat/barge-in`;
+   measured: the wake model's score collapses to ~0 once Nova's own voice reaches the mic,
+   so this is NOT a tuning problem). Works on headphones today.
+3. UI overhaul — deliberately late, after capabilities are concrete
+4. iOS app — far back burner, separate on-device architecture
+
