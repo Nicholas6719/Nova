@@ -296,10 +296,18 @@ class STTEngine:
                 if processing_priming:
                     processing_priming = False
                 try:
-                    frame = self._audio_q.get(timeout=1.0)
+                    frame = self._audio_q.get(timeout=0.2)
                 except queue.Empty:
-                    # No audio at all and nothing captured yet → give up.
+                    # No frames right this moment. If we're still waiting for the
+                    # user to START speaking, keep waiting for the FULL silence
+                    # window rather than bailing on a brief mic-queue gap — the
+                    # conversation must only end after start_timeout_s of true
+                    # silence (and the top-of-loop start_deadline check handles
+                    # that). Bail early only when there's no start window at all
+                    # (post-wake) so we don't hang.
                     if not speaking:
+                        if start_deadline is not None and time.time() <= start_deadline:
+                            continue
                         break
                     continue
 
