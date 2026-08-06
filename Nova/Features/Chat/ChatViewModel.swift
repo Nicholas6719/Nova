@@ -206,11 +206,27 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Wake word (Slice A: detection only, no command capture)
 
-    /// Python backend owns all voice I/O (mic capture via faster-whisper, speech
-    /// via Kokoro). Swift's on-device wake-loop is disabled so the two engines
-    /// don't fight over the microphone or capture Nova's own TTS. Every guard in
-    /// startWakeListeningIfIdle()/startWakeListening() checks this first, so the
-    /// Swift mic is never opened while it's false.
+    // ┌──────────────────────────────────────────────────────────────────────┐
+    // │ DORMANT: the Swift on-device voice stack                             │
+    // │                                                                      │
+    // │ `wakeWordEnabled` is the ONE switch gating everything below. While it │
+    // │ is false, the Python backend owns all voice I/O and roughly half this │
+    // │ file never executes: recording sessions, VAD, the wake loop,          │
+    // │ hands-free auto-listen, sentence-by-sentence TTS, and the mic button  │
+    // │ (toggleRecording returns immediately). What IS live is the Python      │
+    // │ bridge — novaAPIClient.$messages / $currentState drive the UI.         │
+    // │                                                                      │
+    // │ It is gated rather than deleted on purpose:                           │
+    // │  1. Two processes holding the mic while the backend plays audio caused │
+    // │     a CoreAudio conflict (PaMacCore -50). Gating was the safe fix.     │
+    // │  2. AVFoundation can reach macOS Voice Processing I/O (real acoustic   │
+    // │     echo cancellation), which Python cannot. That is the missing piece │
+    // │     for barge-in over speakers, so this stack is the natural home for  │
+    // │     it if we build that (see branch feat/barge-in).                    │
+    // │                                                                      │
+    // │ Decide its fate during the UI overhaul — either revive it WITH AEC or  │
+    // │ delete it wholesale. Until then, don't wire new work into it.          │
+    // └──────────────────────────────────────────────────────────────────────┘
     private var wakeWordEnabled = false
     @Published private(set) var isWakeTriggered: Bool = false
     @Published private(set) var wakeTriggerPhrase: String?
@@ -344,6 +360,18 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Permissions
 
     func requestPermissions() {
+        // Swift voice is disabled (see `wakeWordEnabled`) — the Python backend
+        // owns all voice I/O and does STT locally with faster-whisper. Asking
+        // macOS for SPEECH RECOGNITION access Nova never uses just prompts the
+        // user for a permission that buys nothing, so skip it while disabled.
+        // Microphone access is unaffected: it's requested by the Python child
+        // process when it opens its input stream, attributed to this app bundle.
+        // Flipping `wakeWordEnabled` back on restores this along with the rest
+        // of the Swift voice stack.
+        guard wakeWordEnabled else {
+            DebugLog.d("[Chat] speech-recognition permission skipped — Python owns voice")
+            return
+        }
         speechRecognizer.requestPermissions()
         #if os(iOS)
         // iOS: explicitly request mic permission at startup and retry wake start
