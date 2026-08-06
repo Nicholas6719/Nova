@@ -92,9 +92,9 @@ class VoiceAssistant:
     Routing order (first match wins):
       1. System commands  (sleep / wake / mute)
       2. Pending confirmation flow
-      3. Memory intents   (remember / recall / update / forget)
-      4. Fast-path intents (greeting / date / time / repeat)
-      5. Calendar intents (read/create/complete/delete/update events + reminders)
+      3. Calendar intents (read/create/complete/delete/update events + reminders)
+      4. Memory intents   (remember / recall / update / forget)
+      5. Fast-path intents (greeting / date / time / repeat)
       6. Tool intents     (open app / volume / battery / search / screenshot)
       7. RAG context enrichment
       8. LLM fallback     (MLX streaming + sentence-chunked TTS)
@@ -444,24 +444,27 @@ class VoiceAssistant:
                 self._respond(resp)
                 return
 
-        # ── 3. Memory intents ────────────────────────────────────────────────
+        # ── 3. Calendar / reminders intents ──────────────────────────────────
+        # BEFORE memory + fast-path + tools: detection is strict (needs an
+        # unambiguous calendar word), and running it early stops the greedy
+        # memory-recall regex ("what's my X") from swallowing "what's my
+        # calendar today" and the tool regexes ("find X"/"open X") from
+        # grabbing calendar phrasing.
+        cal_intent = self.calendar.detect_intent(text)
+        if cal_intent is not None:
+            self._respond(self.calendar.handle(cal_intent, text))
+            return
+
+        # ── 4. Memory intents ────────────────────────────────────────────────
         resp = self._handle_memory_intent(text)
         if resp is not None:
             self._respond(resp)
             return
 
-        # ── 4. Fast-path intents ─────────────────────────────────────────────
+        # ── 5. Fast-path intents ─────────────────────────────────────────────
         resp = self._fast_path(text)
         if resp is not None:
             self._respond(resp)
-            return
-
-        # ── 5. Calendar / reminders intents ──────────────────────────────────
-        # Placed before Tools so calendar commands win over the greedy tool
-        # regexes (e.g. web-search "find X", app-launch "open X").
-        cal_intent = self.calendar.detect_intent(text)
-        if cal_intent is not None:
-            self._respond(self.calendar.handle(cal_intent, text))
             return
 
         # ── 6. Tool intents ──────────────────────────────────────────────────

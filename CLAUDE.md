@@ -75,9 +75,9 @@ Nova has two parts:
 
 1. System commands — sleep / wake / mute (always intercepted first)
 2. Pending confirmation — yes/no flow for destructive actions
-3. Memory intents — remember / recall / update / forget
-4. Fast-path intents — greetings / date / time / repeat last response
-5. Calendar / reminders intents — read / create / complete / delete / update (EventKit)
+3. Calendar / reminders intents — read / create / complete / delete / update (EventKit)
+4. Memory intents — remember / recall / update / forget
+5. Fast-path intents — greetings / date / time / repeat last response
 6. Tool intents — open app / volume / battery / search / screenshot
 7. RAG context enrichment — query personal documents for context
 8. LLM fallback — MLX streaming with sentence-chunked TTS overlap

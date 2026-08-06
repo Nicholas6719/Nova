@@ -72,31 +72,41 @@ class NovaCalendar:
             return None
 
         # ── Read reminders ───────────────────────────────────────────────
-        if re.search(r"\bwhat\s+are\s+my\s+reminders\b", t) or \
-           re.search(r"\bwhat\s+do\s+i\s+need\s+to\s+do\s+(?:today|this\s+week)\b", t) or \
-           re.search(r"\bshow\s+(?:me\s+)?my\s+reminders\b", t) or \
-           re.search(r"\bread\s+(?:me\s+)?my\s+reminders\b", t) or \
-           re.search(r"\blist\s+(?:all\s+)?my\s+reminders\b", t):
+        # Broad READ phrasings only (kept clear of the delete/complete/update
+        # verbs, which are matched further down). "what reminders do I have"
+        # and "do I have any reminders" were both missed before.
+        if re.search(r"\bwhat\s+(?:are|were)\s+my\s+reminders\b", t) or \
+           re.search(r"\bwhat\s+reminders\s+(?:do|have)\s+i\b", t) or \
+           re.search(r"\b(?:do|have)\s+i\s+have\s+any\s+reminders\b", t) or \
+           re.search(r"\bany\s+reminders\b", t) or \
+           re.search(r"\b(?:show|read|list|tell|give|check)\s+(?:me\s+)?(?:all\s+)?(?:my\s+)?reminders\b", t) or \
+           re.search(r"\bwhat(?:'?s|\s+is)\s+on\s+my\s+reminders?\s+list\b", t) or \
+           re.search(r"\bmy\s+reminders\s+(?:for\s+)?(?:today|this\s+week)\b", t) or \
+           re.search(r"\breminders\s+(?:for\s+)?today\b", t) or \
+           re.search(r"\bwhat\s+do\s+i\s+(?:need|have)\s+to\s+do\s+(?:today|this\s+week)\b", t):
             return "read_reminders"
 
-        # ── Read today's calendar ────────────────────────────────────────
-        if re.search(r"\bwhat(?:'?s|\s+is)\s+on\s+my\s+calendar\s+today\b", t) or \
-           re.search(r"\b(?:my\s+)?calendar\s+(?:for\s+)?today\b", t) or \
-           re.search(r"\b(?:my\s+)?schedule\s+for\s+today\b", t) or \
-           re.search(r"\bwhat(?:'?s|\s+is)\s+my\s+schedule\s+today\b", t) or \
-           re.search(r"\banything\s+on\s+(?:my\s+)?calendar\s+today\b", t):
-            return "read_today"
-
         # ── Read upcoming (rest of the week) ─────────────────────────────
-        # Deliberately REQUIRE "this week"/"the week" (not bare "week") so
-        # "calendar week starts on monday" doesn't false-fire. Tolerate an
-        # optional "for" between calendar/schedule and the week phrase.
+        # Checked BEFORE read_today so "calendar this week" doesn't get caught
+        # by the bare "what's on my calendar" catch-all in read_today. REQUIRE
+        # "this week"/"the week" (not bare "week") so "calendar week starts on
+        # monday" doesn't false-fire.
         if re.search(r"\bwhat(?:'?s|\s+is)\s+coming\s+up\s+on\s+(?:my\s+)?(?:calendar|schedule)\b", t) or \
            re.search(r"\b(?:my\s+)?calendar\s+(?:for\s+)?(?:this|the)\s+week\b", t) or \
            re.search(r"\b(?:my\s+)?schedule\s+(?:for\s+)?(?:this|the)\s+week\b", t) or \
            re.search(r"\bwhat\s+do\s+i\s+have\s+(?:for\s+)?(?:this|the)\s+week\b", t) or \
            re.search(r"\bwhat(?:'?s|\s+is)\s+on\s+(?:my\s+)?agenda\b", t):
             return "read_upcoming"
+
+        # ── Read today's calendar (explicit today, or a bare calendar ask) ──
+        if re.search(r"\b(?:my\s+)?calendar\s+(?:for\s+)?today\b", t) or \
+           re.search(r"\b(?:my\s+)?schedule\s+(?:for\s+)?today\b", t) or \
+           re.search(r"\bwhat(?:'?s|\s+is)\s+my\s+schedule\s+today\b", t) or \
+           re.search(r"\bwhat\s+do\s+i\s+have\s+(?:on\s+)?today\b", t) or \
+           re.search(r"\banything\s+on\s+(?:my\s+)?calendar\b", t) or \
+           re.search(r"\bwhat(?:'?s|\s+is)\s+on\s+(?:my\s+)?calendar\b", t) or \
+           re.search(r"\bwhat(?:'?s|\s+is)\s+my\s+schedule\b", t):
+            return "read_today"
 
         # ── Create reminder ──────────────────────────────────────────────
         # "reminder" is an unambiguous calendar word, so set/create/add/make +
@@ -388,6 +398,114 @@ class NovaCalendar:
             return hour + 12
         return hour
 
+    # ── Deterministic reminder parsing (no LLM) ──────────────────────────
+    _NUM_WORDS = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+        "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    }
+    _WEEKDAY_RE = r"monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+
+    def _strip_reminder_prefix(self, utterance: str) -> str:
+        """Remove a leading wake word + the create-reminder command verb, so
+        what's left is the task (+ any date/time). 'Nova, set a reminder to
+        call mom at five' -> 'call mom at five'."""
+        t = (utterance or "").strip()
+        t = re.sub(r"^\s*(?:hey\s+)?nova\b[\s,]*", "", t, flags=re.I)
+        t = re.sub(
+            r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|i\s+want\s+(?:you\s+)?to\s+|"
+            r"i\s+need\s+(?:you\s+)?to\s+)?",
+            "", t, flags=re.I,
+        )
+        # "set/create/add/make (a) reminder (to|for|about|that|saying|:)"
+        t2 = re.sub(
+            r"^\s*(?:set|create|add|make|new)\s+(?:a\s+|an\s+|another\s+)?reminders?\s*"
+            r"(?:to|for|about|that|saying|:)?\s*",
+            "", t, flags=re.I,
+        )
+        if t2 != t:
+            return t2.strip()
+        # "remind me (to|about|that)"
+        return re.sub(r"^\s*remind\s+me\s+(?:to|about|that)\s+", "", t, flags=re.I).strip()
+
+    # Time-phrase building blocks, reused for both parsing and title-stripping.
+    _T_DIGIT_AT = r"\b(?:at|by|around|@)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?"
+    _T_DIGIT_MER = r"\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)"  # requires am/pm
+
+    def _find_time(self, text: str):
+        """Return (hour, minute) parsed from a time phrase, or None."""
+        low = (text or "").lower()
+        if re.search(r"\b(?:noon|midday)\b", low):
+            return (12, 0)
+        if re.search(r"\bmidnight\b", low):
+            return (0, 0)
+        m = re.search(self._T_DIGIT_AT, low) or re.search(self._T_DIGIT_MER, low)
+        if m:
+            h, mi = int(m.group(1)), int(m.group(2) or 0)
+            mer = (m.group(3) or "").replace(".", "")
+            if mer == "pm" and h < 12:
+                h += 12
+            elif mer == "am" and h == 12:
+                h = 0
+            elif not mer:
+                h = self._default_bare_hour(h, text)
+            if 0 <= h <= 23 and 0 <= mi <= 59:
+                return (h, mi)
+        numw = "|".join(self._NUM_WORDS)
+        m = re.search(r"\b(?:at|by|around)\s+(" + numw + r")(?:\s+o'?clock)?\s*(a\.?m\.?|p\.?m\.?)?\b", low) \
+            or re.search(r"\b(" + numw + r")\s+(a\.?m\.?|p\.?m\.?)\b", low)
+        if m:
+            h = self._NUM_WORDS[m.group(1)]
+            mer = (m.group(2) or "").replace(".", "")
+            if mer == "pm" and h < 12:
+                h += 12
+            elif mer == "am" and h == 12:
+                h = 0
+            elif not mer:
+                h = self._default_bare_hour(h, text)
+            return (h, 0)
+        return None
+
+    def _strip_when_phrases(self, text: str) -> str:
+        """Remove date and time phrases so what remains is the reminder title."""
+        numw = "|".join(self._NUM_WORDS)
+        t = " " + (text or "") + " "
+        t = re.sub(self._T_DIGIT_AT, " ", t, flags=re.I)
+        t = re.sub(self._T_DIGIT_MER, " ", t, flags=re.I)
+        t = re.sub(r"\b(?:at|by|around)\s+(?:" + numw + r")(?:\s+o'?clock)?\s*(?:a\.?m\.?|p\.?m\.?)?\b", " ", t, flags=re.I)
+        t = re.sub(r"\b(?:" + numw + r")\s+(?:a\.?m\.?|p\.?m\.?)\b", " ", t, flags=re.I)
+        t = re.sub(r"\b(?:noon|midday|midnight)\b", " ", t, flags=re.I)
+        t = re.sub(r"\b(?:next\s+)?(?:today|tonight|tomorrow|" + self._WEEKDAY_RE + r")\b", " ", t, flags=re.I)
+        t = re.sub(r"\bthis\s+(?:morning|afternoon|evening)\b", " ", t, flags=re.I)
+        t = re.sub(r"\s+", " ", t).strip(" ,.!?;:-")
+        # Drop a dangling connective left behind by the removed when-phrase.
+        t = re.sub(r"^(?:to|for|on|at|about)\s+", "", t, flags=re.I)
+        t = re.sub(r"\s+(?:to|for|on|at|by|around|about)$", "", t, flags=re.I)
+        return t.strip(" ,.!?;:-").strip()
+
+    def _parse_reminder(self, utterance: str):
+        """Deterministically extract (title, due_datetime|None) from a
+        create-reminder utterance. title is None if nothing usable remains."""
+        body = self._strip_reminder_prefix(utterance)
+
+        date_obj = None
+        dm = re.search(r"\b(next\s+)?(today|tonight|tomorrow|" + self._WEEKDAY_RE + r")\b", body, re.I)
+        if dm:
+            date_obj = self._resolve_relative_date(
+                (("next " if dm.group(1) else "") + dm.group(2)).lower()
+            )
+
+        hm = self._find_time(body)
+
+        due_dt: Optional[datetime.datetime] = None
+        if hm is not None:
+            d = date_obj or datetime.date.today()
+            due_dt = datetime.datetime.combine(d, datetime.time(hm[0], hm[1]))
+        elif date_obj is not None:
+            due_dt = datetime.datetime.combine(date_obj, datetime.time(9, 0))
+
+        title = self._strip_when_phrases(body) or None
+        return title, due_dt
+
     @staticmethod
     def _clean_optional(value):
         """Normalize the LLM's string "null"/"none"/etc. to a real None."""
@@ -624,24 +742,32 @@ class NovaCalendar:
                 f"{loc_phrase}, ending at {end_str}, on your {cal_name} calendar.")
 
     def _create_reminder(self, user_input: str) -> str:
-        data_json = self._extract_event_json(user_input)
-        if not data_json:
-            return f"I didn't quite catch that, {self.name}. Could you say it again?"
+        # Deterministic first: strip the command prefix and pull the title +
+        # due date/time with regex. The 3B, fed the event-extraction prompt,
+        # hallucinated titles like "Work" from that prompt's own examples;
+        # regex keeps the title = exactly what the user said to do.
+        title, due_dt = self._parse_reminder(user_input)
 
-        title = (data_json.get("title") or "Reminder").strip()
-        notes = self._clean_optional(data_json.get("notes"))
-        date_field = self._clean_optional(data_json.get("date"))
-        start_time = self._clean_optional(data_json.get("start_time"))
-
-        due_dt: Optional[datetime.datetime] = None
-        if date_field or start_time:
-            resolved_date = self._resolve_relative_date(str(date_field or "today"))
-            st = self._parse_time(start_time) or (9, 0)
-            st = (self._default_bare_hour(st[0], user_input), st[1])
-            due_dt = datetime.datetime.combine(resolved_date, datetime.time(st[0], st[1]))
+        # Fallback to the LLM only if we couldn't isolate a title (unusual
+        # phrasing). Reject the known hallucinated fillers.
+        if not title:
+            data_json = self._extract_event_json(user_input) or {}
+            cand = self._clean_optional(data_json.get("title"))
+            if cand and cand.lower() not in ("work", "meeting", "reminder", "event", "nova"):
+                title = cand
+            if due_dt is None:
+                d = self._clean_optional(data_json.get("date"))
+                st_raw = self._clean_optional(data_json.get("start_time"))
+                if d or st_raw:
+                    rd = self._resolve_relative_date(str(d or "today"))
+                    st = self._parse_time(st_raw) or (9, 0)
+                    st = (self._default_bare_hour(st[0], user_input), st[1])
+                    due_dt = datetime.datetime.combine(rd, datetime.time(st[0], st[1]))
+        if not title:
+            return f"What should the reminder say, {self.name}?"
 
         try:
-            cal.create_reminder(title=title, due_datetime=due_dt, notes=notes)
+            cal.create_reminder(title=title, due_datetime=due_dt, notes=None)
         except Exception as e:
             log.error(f"create_reminder error: {e}")
             return (f"I wasn't able to create that reminder, {self.name}. "
