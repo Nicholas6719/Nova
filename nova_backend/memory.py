@@ -267,7 +267,8 @@ class NovaMemory:
         for r in self.all_facts():
             if r["category"] == "identity" and r["key"] == "name":
                 continue
-            out.append(_render_fact(r["category"], r["key"], r["value"]))
+            out.append(_render_fact(r["category"], r["key"], r["value"],
+                                    second_person=True))
         return out
 
 
@@ -276,14 +277,57 @@ def _norm(s: str) -> str:
     return s.lower().strip().replace(" ", "_")
 
 
-def _render_fact(category: str, key: str, value: str) -> str:
-    """Render a structured fact as a natural English clause for prompt injection.
+_IRREGULAR_2P = {"is": "are", "has": "have", "does": "do", "goes": "go", "was": "were"}
 
-    Kept deliberately simple and category-driven; the LLM turns these into
-    conversational phrasing when it speaks. Unknown categories fall back to a
-    readable 'key: value' form.
+
+def _verb_2p(clause: str) -> str:
+    """De-conjugate a third-person clause for second-person speech:
+    'goes to the gym at 5:30' -> 'go to the gym at 5:30'. Only the leading verb
+    changes."""
+    head, _, rest = clause.partition(" ")
+    low = head.lower()
+    if low in _IRREGULAR_2P:
+        head = _IRREGULAR_2P[low]
+    elif low.endswith("es") and low[:-2].endswith(("ch", "sh", "ss", "x", "z")):
+        head = head[:-2]
+    elif low.endswith("s") and not low.endswith("ss"):
+        head = head[:-1]
+    return f"{head} {rest}".strip()
+
+
+def _strip_category_prefix(category: str, k: str) -> str:
+    """The reconciler often encodes the category into the key ('favorite' +
+    'favorite_color'), which would otherwise read 'your favorite favorite
+    color'. Drop the redundant prefix."""
+    c = category.lower().strip()
+    if c and k.lower().startswith(c + " "):
+        return k[len(c) + 1:]
+    return k
+
+
+def _render_fact(category: str, key: str, value: str,
+                 second_person: bool = False) -> str:
+    """Render a structured fact as a natural English clause.
+
+    Third person is used for PROMPT INJECTION (describing the user to the
+    model). ``second_person=True`` is used for spoken readback ("what do you
+    know about me"), where Nova is talking TO Nicholas — third person there read
+    as "His favorite favorite color is red."
     """
-    k = key.replace("_", " ")
+    k = _strip_category_prefix(category, key.replace("_", " "))
+    if second_person:
+        if category == "allergy":
+            return f"You are allergic to {value}."
+        if category == "preference":
+            return f"You {_verb_2p(value)} {k}."
+        if category == "favorite":
+            return f"Your favorite {k} is {value}."
+        if category == "routine":
+            v = value[3:] if value.lower().startswith("he ") else value
+            return f"You {_verb_2p(v)}."
+        # identity / location / possession / anything else
+        return f"Your {k} is {value}."
+
     if category == "allergy":
         return f"He is allergic to {value}."
     if category == "identity":

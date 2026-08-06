@@ -707,7 +707,9 @@ class VoiceAssistant:
             facts = self.memory.facts_for_readback()
             if not facts:
                 return f"I don't have anything stored about you yet, {name}."
-            return "Here's what I know: " + "; ".join(facts) + "."
+            # Each rendered fact is already a full sentence, so join with spaces
+            # (a "; " join produced "coffee.; Your favorite…" and a doubled ".").
+            return "Here's what I know. " + " ".join(facts)
 
         return None
 
