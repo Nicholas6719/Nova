@@ -11,7 +11,7 @@ Nova's pipeline uses this for sentence-by-sentence TTS overlap.
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from typing import Callable, Optional
 
 log = logging.getLogger("nova.llm")
 
@@ -66,20 +66,24 @@ class LLMEngine:
         system_prompt: str,
         history: list[dict],
         user_message: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
-        """Blocking generation. Used internally for tool-assisted queries."""
+        """Blocking generation. Used internally for tool-assisted and structured
+        (JSON) tasks. Pass temperature=0 for deterministic structured output."""
         from mlx_lm import generate
         from mlx_lm.sample_utils import make_sampler
 
         messages = self._build_messages(system_prompt, history, user_message)
         prompt   = self._format_prompt(messages)
 
-        sampler = make_sampler(temp=self.config.get("temperature", 0.7))
+        temp = temperature if temperature is not None else self.config.get("temperature", 0.7)
+        sampler = make_sampler(temp=temp)
         return generate(
             self.model,
             self.tokenizer,
             prompt=prompt,
-            max_tokens=self.config.get("max_tokens", 512),
+            max_tokens=max_tokens if max_tokens is not None else self.config.get("max_tokens", 512),
             sampler=sampler,
         ).strip()
 

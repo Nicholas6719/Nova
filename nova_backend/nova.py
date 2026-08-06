@@ -111,6 +111,9 @@ class VoiceAssistant:
         # Set by a "return to wake mode" voice command to drop out of
         # conversation mode immediately (without full sleep).
         self._return_to_wake  = False
+        # Transcript of the CURRENT conversation (user+assistant), used by the
+        # wake-mode memory reconciliation pass. Reset when a conversation ends.
+        self._session_turns: list[dict] = []
 
         # Shared microphone gate. Set = capture allowed; cleared = mic paused.
         # A voice assistant must not record while it speaks — both to avoid
@@ -154,18 +157,21 @@ class VoiceAssistant:
 
     def _llm_worker(self) -> None:
         """Owns MLX for the process lifetime: loads the model, then serially
-        executes every turn submitted via ``self._llm_queue``."""
+        executes every job submitted via ``self._llm_queue``. A job is a
+        (callable, done_event) pair — usually a conversation turn, but also the
+        wake-mode fact-reconciliation pass. Serializing everything through this
+        one thread is required because MLX is thread-local."""
         log.info("Loading LLM (MLX)…")
         from llm_engine import LLMEngine
         self.llm = LLMEngine(self.config["llm"])
         self._llm_ready.set()
 
         while True:
-            text, done = self._llm_queue.get()
+            job, done = self._llm_queue.get()
             try:
-                self._handle_turn_impl(text)
+                job()
             except Exception:
-                log.exception("Turn handler failed")
+                log.exception("LLM job failed")
                 self.set_state("idle")
             finally:
                 if done is not None:
@@ -173,11 +179,19 @@ class VoiceAssistant:
                 self._llm_queue.task_done()
 
     def _submit_turn(self, text: str, wait: bool) -> None:
-        """Enqueue a turn for the MLX worker thread. Voice waits for completion
-        (so the wake loop doesn't resume mid-response); text input returns
-        immediately and receives results over the WebSocket."""
+        """Enqueue a conversation turn for the MLX worker thread. Voice waits for
+        completion (so the wake loop doesn't resume mid-response); text input
+        returns immediately and receives results over the WebSocket."""
         done = threading.Event() if wait else None
-        self._llm_queue.put((text, done))
+        self._llm_queue.put((lambda: self._handle_turn_impl(text), done))
+        if done is not None:
+            done.wait()
+
+    def _submit_job(self, fn, wait: bool = False) -> None:
+        """Enqueue an arbitrary LLM job (e.g. wake-mode reconciliation) onto the
+        MLX worker thread. Off the live path; not user-facing."""
+        done = threading.Event() if wait else None
+        self._llm_queue.put((fn, done))
         if done is not None:
             done.wait()
 
@@ -298,8 +312,10 @@ class VoiceAssistant:
 
             if command_audio is None:
                 if in_conversation:
-                    # Silence during conversation → return to wake mode quietly.
+                    # Silence during conversation → return to wake mode quietly,
+                    # and let Nova review the conversation for anything to learn.
                     log.info("Conversation timed out — returning to wake mode.")
+                    self._end_conversation()
                     in_conversation = False
                     continue
                 # Woke but heard nothing usable — just re-listen for the wake word.
@@ -314,11 +330,13 @@ class VoiceAssistant:
                 # Bare wake phrase / no command. Stay in conversation so the user
                 # can just speak, but don't get stuck: fall back to wake on repeat.
                 if in_conversation:
+                    self._end_conversation()
                     in_conversation = False
                 continue
 
             log.info(f"[user] {text}")
             self.memory.add_turn("user", text)
+            self._session_turns.append({"role": "user", "content": text})
             self.ws.send_message("user", text)
             # Run on the MLX worker thread and wait: capture must not resume
             # until the response (and its TTS) is done, or it self-captures.
@@ -327,11 +345,32 @@ class VoiceAssistant:
             # conversation immediately, without waiting for the silence timeout.
             if self._return_to_wake:
                 self._return_to_wake = False
+                self._end_conversation()
                 in_conversation = False
             else:
                 # Otherwise stay in conversation mode — the user and Nova are
                 # talking; only silence (Phase 2 timeout) returns us to wake mode.
                 in_conversation = True
+
+    def _end_conversation(self) -> None:
+        """Called when the conversation ends and Nova returns to wake mode.
+        Kicks off the memory reconciliation pass over what was just said — on the
+        nova-llm worker thread, off the live path, silent."""
+        turns = self._session_turns
+        self._session_turns = []
+        if not turns:
+            return
+
+        def job() -> None:
+            from fact_reconciler import reconcile
+            convo = "\n".join(f"{t['role']}: {t['content']}" for t in turns)
+            try:
+                reconcile(self.memory, self.llm, convo)
+            except Exception:
+                log.exception("Wake-mode memory reconciliation failed")
+
+        # Non-blocking: queued behind any in-flight turn, runs while idle.
+        self._submit_job(job, wait=False)
 
     def _strip_wake_prefix(self, text: str) -> str:
         """Remove a leading wake phrase from a single-breath command.
@@ -427,6 +466,7 @@ class VoiceAssistant:
             return
         self._last_response = text
         self.memory.add_turn("assistant", text)
+        self._session_turns.append({"role": "assistant", "content": text})
         self.ws.send_message("assistant", text)
         log.info(f"[nova] {text}")
         self.set_state("speaking")
@@ -515,51 +555,59 @@ class VoiceAssistant:
     _UPDATE_RE  = re.compile(r"actually (?:my ([\w][\w ]*?) is |it'?s )(.+)", re.I)
     _FORGET_RE  = re.compile(r"forget (?:that )?my ([\w][\w ]*?)$", re.I)
 
+    # Explicit user-directed memory commands store under the 'explicit' category,
+    # source='explicit', so they supersede by canonical key and sit alongside the
+    # facts Nova learns passively (via regex fast-path + wake-mode reconciliation).
+    _EXPLICIT_CAT = "explicit"
+
     def _handle_memory_intent(self, text: str) -> Optional[str]:
         name = self.config["user"]["address_as"]
 
-        # Save
+        # Save — "remember that my X is Y"
         m = self._SAVE_RE.search(text)
         if m:
             key   = m.group(1).strip()
             value = m.group(2).strip().rstrip(".")
-            self.memory.save_fact(key, value)
+            self.memory.upsert_fact(self._EXPLICIT_CAT, key, value, source="explicit")
             return f"Got it. I'll remember your {key} is {value}."
 
-        # Recall
+        # Recall — "what's my X"
         m = self._RECALL_RE.search(text)
         if m:
             key   = m.group(1).strip()
-            value = self.memory.recall_fact(key)
+            value = self.memory.get_fact(self._EXPLICIT_CAT, key)
             return (f"Your {key} is {value}." if value
                     else f"I don't have your {key} stored yet.")
 
-        # Update / correction
+        # Update / correction — "actually my X is Y" / "actually it's Y"
         m = self._UPDATE_RE.search(text)
         if m:
             key_part = m.group(1)
             value    = m.group(2).strip().rstrip(".")
-            key      = key_part.strip() if key_part else self.memory.last_key()
+            if key_part:
+                key = key_part.strip()
+            else:
+                last = self.memory.last_identity()
+                key = last[1] if last else None
             if key:
-                self.memory.save_fact(key, value)
+                self.memory.upsert_fact(self._EXPLICIT_CAT, key, value, source="explicit")
                 return f"Updated. Your {key} is now {value}."
             return "I'm not sure what you'd like me to update."
 
-        # Forget
+        # Forget — "forget that my X"
         m = self._FORGET_RE.search(text)
         if m:
             key = m.group(1).strip()
-            self.memory.delete_fact(key)
+            self.memory.delete_fact(self._EXPLICIT_CAT, key)
             return f"Done. I've forgotten your {key}."
 
-        # Meta-recall
+        # Meta-recall — "what do you know about me"
         low = text.lower()
         if any(p in low for p in ("what do you know about me", "what do you remember", "what have i told you")):
-            facts = self.memory.all_facts()
+            facts = self.memory.facts_for_readback()
             if not facts:
-                return f"I don't have any facts stored about you yet, {name}."
-            items = "; ".join(f"your {k.replace('_', ' ')} is {v}" for k, v in facts.items())
-            return f"Here's what I have: {items}."
+                return f"I don't have anything stored about you yet, {name}."
+            return "Here's what I know: " + "; ".join(facts) + "."
 
         return None
 
@@ -611,14 +659,11 @@ class VoiceAssistant:
 
         self._last_response = full_response
         self.memory.add_turn("assistant", full_response)
+        self._session_turns.append({"role": "assistant", "content": full_response})
         self.ws.send_message("assistant", full_response)
-
-        # Background summarization — yields immediately if pipeline is busy
-        threading.Thread(
-            target=self.memory.summarize_old_turns,
-            kwargs={"keep_recent": self.config["memory"]["max_recent_turns"]},
-            daemon=True,
-        ).start()
+        # Fact learning does NOT happen per-turn. The wake-mode reconciliation
+        # pass reviews the whole conversation when it ends (see _main_loop), so
+        # extraction stays off the live path and costs one LLM call per session.
 
         self.set_state("idle")
 
