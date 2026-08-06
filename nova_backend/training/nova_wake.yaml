@@ -1,0 +1,52 @@
+# OpenWakeWord training config for the "Nova" wake word.
+#
+# In the Colab notebook you normally only need target_phrase + model_name; the
+# notebook fills the dataset paths from what it downloads. This file documents
+# the full parameter set (keys match openwakeword.train in the installed 0.6.0)
+# for tuning, and for the local CLI path in the README.
+#
+#   python -m openwakeword.train --training_config nova_wake.yaml \
+#       --generate_clips --augment_clips --train_model
+
+# ── What we're training ──────────────────────────────────────────────────────
+target_phrase: ["nova"]        # the wake phrase (a list; add "hey nova" if you retrain wider)
+model_name: "nova"             # output filename stem -> nova.onnx / nova.tflite
+model_type: "dnn"              # small fully-connected head on the shared OWW embeddings
+
+# ── Synthetic data volume ────────────────────────────────────────────────────
+n_samples: 30000               # positive "nova" clips to generate (Piper TTS, many voices)
+n_samples_val: 2000            # held-out positives for validation
+tts_batch_size: 50             # Piper generation batch (raise if the GPU has headroom)
+
+# ── Augmentation (mix positives with noise + room reverb) ────────────────────
+augmentation_rounds: 1
+augmentation_batch_size: 16
+background_paths_duplication_rate: 1
+
+# ── Training ─────────────────────────────────────────────────────────────────
+steps: 50000                   # training steps
+batch_n_per_class: 1024
+layer_size: 32                 # hidden layer width of the classifier head
+max_negative_weight: 1500      # penalty on false accepts — higher = fewer false positives
+target_false_positives_per_hour: 0.2   # optimization target for the FP rate
+
+# Extra hard negatives: everyday words that sound close to "nova". More of these
+# = fewer false triggers (especially important for a single-word phrase).
+custom_negative_phrases:
+  - "over"
+  - "nova scotia"
+  - "no"
+  - "know"
+  - "innovate"
+  - "supernova"
+  - "not now"
+
+# ── Dataset + output paths ───────────────────────────────────────────────────
+# The Colab notebook sets these to the datasets it downloads. Only fill them in
+# for a LOCAL run (they must point at real files on disk):
+#   piper_sample_generator_path: "./piper-sample-generator"
+#   background_paths: ["./audioset_16k", "./fma_16k"]
+#   rir_paths: ["./mit_rirs"]
+#   feature_data_files: {"ACAV100M_sample": "./openwakeword_features_ACAV100M_2000_hrs_16bit.npy"}
+#   false_positive_validation_data_path: "./validation_set_features.npy"
+output_dir: "./"
