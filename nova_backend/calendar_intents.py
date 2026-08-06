@@ -85,7 +85,7 @@ class NovaCalendar:
         # Broad READ phrasings only (kept clear of the delete/complete/update
         # verbs, which are matched further down). "what reminders do I have"
         # and "do I have any reminders" were both missed before.
-        if re.search(r"\bwhat\s+(?:are|were)\s+my\s+reminders\b", t) or \
+        if re.search(r"\bwhat\s+(?:are|were)\s+(?:all\s+(?:of\s+)?)?my\s+reminders\b", t) or \
            re.search(r"\bwhat\s+reminders\s+(?:do|have)\s+i\b", t) or \
            re.search(r"\b(?:do|have)\s+i\s+have\s+any\s+reminders\b", t) or \
            re.search(r"\bany\s+reminders\b", t) or \

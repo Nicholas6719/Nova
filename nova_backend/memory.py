@@ -152,6 +152,39 @@ class NovaMemory:
             ).fetchone()
         return row["value"] if row else None
 
+    def find_fact(self, key: str) -> Optional[tuple[str, str]]:
+        """Look up a fact by key across ALL categories, returning
+        (category, value) or None.
+
+        Explicit recall ("what's my favorite color?") must not be limited to the
+        'explicit' category: facts learned passively by the reconciler land in
+        semantic categories ('favorite', 'movie', …). Searching only 'explicit'
+        made Nova deny knowing things it demonstrably knew. An explicitly-stated
+        fact still wins over an inferred one, then most-recently-updated."""
+        key = _norm(key)
+        with self._lock:
+            conn = self._conn()
+            row = conn.execute(
+                """SELECT category, value FROM facts WHERE key = ?
+                   ORDER BY (category = 'explicit') DESC, updated_at DESC
+                   LIMIT 1""",
+                (key,),
+            ).fetchone()
+        return (row["category"], row["value"]) if row else None
+
+    def delete_fact_anywhere(self, key: str) -> int:
+        """Forget a fact by key regardless of which category holds it.
+        Returns how many rows were removed."""
+        key = _norm(key)
+        with self._lock:
+            conn = self._conn()
+            cur = conn.execute("DELETE FROM facts WHERE key = ?", (key,))
+            conn.commit()
+            deleted = cur.rowcount
+        if deleted:
+            log.debug(f"Fact(s) deleted by key: {key} ({deleted})")
+        return deleted
+
     def all_facts(self) -> list[dict]:
         """All facts as structured dicts, most-recently-updated first."""
         with self._lock:

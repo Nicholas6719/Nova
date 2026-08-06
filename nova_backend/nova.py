@@ -630,6 +630,29 @@ class VoiceAssistant:
     # facts Nova learns passively (via regex fast-path + wake-mode reconciliation).
     _EXPLICIT_CAT = "explicit"
 
+    # Nouns that mean "ask the system", not "recall a stored fact". "what's my
+    # battery at?" matches the recall regex just as well as "what's my favorite
+    # colour?", and Memory routes BEFORE Tools — so without this, tool questions
+    # were answered with "I don't have your battery at stored yet."
+    _SYSTEM_QUERY_WORDS = frozenset({
+        "battery", "charge", "power", "ip", "wifi", "wi-fi", "network",
+        "internet", "connection", "volume", "sound", "brightness", "screen",
+        "storage", "disk", "cpu", "ram", "mac", "computer", "machine",
+        "system", "hostname", "uptime",
+    })
+
+    def _is_system_query(self, key: str) -> bool:
+        return bool(set(re.findall(r"[\w-]+", key.lower())) & self._SYSTEM_QUERY_WORDS)
+
+    def _remember_fact(self, key: str, value: str) -> None:
+        """Store a user-stated fact under the category that already holds it, so
+        an explicit correction UPDATES the passively-learned fact instead of
+        creating a rival copy under 'explicit' (which would make recall
+        ambiguous)."""
+        found = self.memory.find_fact(key)
+        category = found[0] if found else self._EXPLICIT_CAT
+        self.memory.upsert_fact(category, key, value, source="explicit")
+
     def _handle_memory_intent(self, text: str) -> Optional[str]:
         name = self.config["user"]["address_as"]
 
@@ -638,16 +661,21 @@ class VoiceAssistant:
         if m:
             key   = m.group(1).strip()
             value = m.group(2).strip().rstrip(".")
-            self.memory.upsert_fact(self._EXPLICIT_CAT, key, value, source="explicit")
+            self._remember_fact(key, value)
             return f"Got it. I'll remember your {key} is {value}."
 
-        # Recall — "what's my X"
+        # Recall — "what's my X" (searches EVERY category, not just 'explicit')
         m = self._RECALL_RE.search(text)
         if m:
             key   = m.group(1).strip()
-            value = self.memory.get_fact(self._EXPLICIT_CAT, key)
-            return (f"Your {key} is {value}." if value
-                    else f"I don't have your {key} stored yet.")
+            found = self.memory.find_fact(key)
+            if found:
+                return f"Your {key} is {found[1]}."
+            # Nothing stored. If this reads as a system question, fall through so
+            # Tools can answer it; otherwise say honestly that it isn't stored.
+            if self._is_system_query(key):
+                return None
+            return f"I don't have your {key} stored yet."
 
         # Update / correction — "actually my X is Y" / "actually it's Y"
         m = self._UPDATE_RE.search(text)
@@ -660,16 +688,18 @@ class VoiceAssistant:
                 last = self.memory.last_identity()
                 key = last[1] if last else None
             if key:
-                self.memory.upsert_fact(self._EXPLICIT_CAT, key, value, source="explicit")
+                self._remember_fact(key, value)   # updates in place, wherever it lives
                 return f"Updated. Your {key} is now {value}."
             return "I'm not sure what you'd like me to update."
 
-        # Forget — "forget that my X"
+        # Forget — "forget that my X" (removes it from whichever category holds it)
         m = self._FORGET_RE.search(text)
         if m:
             key = m.group(1).strip()
-            self.memory.delete_fact(self._EXPLICIT_CAT, key)
-            return f"Done. I've forgotten your {key}."
+            removed = self.memory.delete_fact_anywhere(key)
+            if removed:
+                return f"Done. I've forgotten your {key}."
+            return f"I don't have your {key} stored, {name}."
 
         # Meta-recall — "what do you know about me"
         low = text.lower()
