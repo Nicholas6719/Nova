@@ -37,15 +37,6 @@ log = logging.getLogger("nova.calendar.intents")
 
 
 class NovaCalendar:
-    # System prompt for all silent calendar LLM calls. Nova speaks its output
-    # aloud, so: no markdown, no lists, no em dashes (CLAUDE.md invariant #10).
-    _NOVA_CAL_SYSTEM = (
-        "You are Nova, a sharp, composed AI assistant. Speak naturally and "
-        "conversationally, the way a person would say it out loud. Never use "
-        "markdown, bullet points, numbered lists, or em dashes. Keep replies "
-        "brief. Address the user by name when it fits."
-    )
-
     def __init__(self, config: dict, llm, memory) -> None:
         self.config = config
         self.llm = llm
@@ -56,6 +47,22 @@ class NovaCalendar:
         # on the create path and can't drift a day/time. Reads still use the
         # LLM (that's the point of a natural read). Default: template.
         self._natural_confirmations = bool(cal_cfg.get("natural_confirmations", False))
+
+        # A read may leave a soft follow-up offer ("want to hear what's coming
+        # up?"). nova.py reads this after handle() and arms a one-shot offer
+        # that only fires on an affirmative reply. Reset before every handle().
+        self.pending_intent: Optional[str] = None
+
+        # System prompt for all silent calendar LLM calls. Includes the user's
+        # name so the 3B stops inventing one ("Samantha"). Nova speaks aloud,
+        # so: no markdown, no lists, no em dashes (CLAUDE.md invariant #10).
+        self._cal_system = (
+            "You are Nova, a sharp, composed AI assistant. Speak naturally and "
+            "conversationally, the way a person would say it out loud. Never use "
+            "markdown, bullet points, numbered lists, or em dashes. Keep replies "
+            f"brief. The user's name is {self.name}; address them as {self.name} "
+            "and never use any other name."
+        )
 
     # ═══════════════════════════════════════════════════════════════════════
     # Intent detection (strict regex; returns intent name or None)
@@ -192,11 +199,14 @@ class NovaCalendar:
 
         Any RuntimeError from the engine (permission/timeout) is turned into a
         speakable message so a calendar failure never crashes the pipeline."""
+        self.pending_intent = None  # cleared every turn; a read may re-arm it
         try:
             if intent == "read_today":
                 return self._read_today()
             if intent == "read_upcoming":
                 return self._read_upcoming()
+            if intent == "read_rest_of_week":
+                return self._read_rest_of_week()
             if intent == "read_reminders":
                 return self._read_reminders()
             if intent == "create_event":
@@ -230,7 +240,7 @@ class NovaCalendar:
         """One-shot generation with no history side effects."""
         try:
             return self.llm.generate(
-                system_prompt=self._NOVA_CAL_SYSTEM,
+                system_prompt=self._cal_system,
                 history=[],
                 user_message=user_prompt,
                 temperature=temperature,
@@ -507,6 +517,15 @@ class NovaCalendar:
         return title, due_dt
 
     @staticmethod
+    def _titlecase(s: str) -> str:
+        """Capitalize the first letter of each word for a tidy reminder title
+        ('call mom' -> 'Call Mom'), preserving the rest of each word so
+        apostrophes and existing capitals survive ('mom's' -> 'Mom's')."""
+        if not s:
+            return s
+        return " ".join(w[:1].upper() + w[1:] if w else w for w in s.split(" "))
+
+    @staticmethod
     def _clean_optional(value):
         """Normalize the LLM's string "null"/"none"/etc. to a real None."""
         if value is None:
@@ -520,38 +539,76 @@ class NovaCalendar:
     # Read handlers
     # ═══════════════════════════════════════════════════════════════════════
     def _read_today(self) -> str:
+        """Read TODAY's events, then softly offer the rest of the week. The
+        default is always today; the user opts into 'what's coming up'."""
         events = cal.get_today_events()
+        today_txt = self._summarize_today(events)
+
+        rest = self._rest_of_week_events()
+        if rest:
+            self.pending_intent = "read_rest_of_week"
+            n = len(rest)
+            today_txt += (
+                f" You've also got {n} thing{'s' if n != 1 else ''} coming up "
+                "later this week. Want me to run through those?"
+            )
+        return today_txt
+
+    def _summarize_today(self, events: list) -> str:
         if not events:
             return f"Your calendar is clear for today, {self.name}."
-        lines = self._format_event_lines(events)
+        lines = self._today_lines(events)
         prompt = (
-            "These are the events on my calendar for today. Summarize them "
-            "naturally and conversationally, not a list, just how a sharp "
-            "assistant would say it out loud. Keep it to two to four sentences.\n\n"
+            "These are the events on the user's calendar for TODAY. Summarize "
+            "them naturally and conversationally, the way a sharp assistant "
+            "would say it out loud, not a list. They are all today, so give the "
+            "time of each (for example 'at 7 AM'); do NOT state the date or day "
+            "of week. Do not invent events. Keep it to one to three sentences.\n\n"
             + "\n".join(lines)
         )
-        text = self._llm_silent(prompt, max_tokens=220)
-        return text or self._template_events(events, "today")
+        text = self._llm_silent(prompt, max_tokens=200)
+        return text or self._template_today(events)
 
     def _read_upcoming(self) -> str:
         events = cal.get_upcoming_events()
         if not events:
             return f"Nothing on the books for the rest of the week, {self.name}."
-        lines = self._format_event_lines(events)
+        return self._summarize_week(events)
+
+    def _read_rest_of_week(self) -> str:
+        rest = self._rest_of_week_events()
+        if not rest:
+            return f"Nothing else on your calendar this week, {self.name}."
+        return self._summarize_week(rest)
+
+    def _summarize_week(self, events: list) -> str:
+        lines = self._week_lines(events)
         prompt = (
-            "These are the events on my calendar between now and the end of "
-            "this coming Saturday. Summarize them naturally and "
-            "conversationally, not a list, just how a sharp assistant would "
-            "say it out loud.\n\n"
+            "These are upcoming events on the user's calendar. Summarize them "
+            "naturally and conversationally, not a list.\n\n"
             "CRITICAL RULES:\n"
-            "Read the day of week for each event EXACTLY as given in the input. "
-            "Read each time EXACTLY as written; do not change AM to PM. Do not "
-            "invent events that aren't in the input. Keep it to three to five "
-            "sentences.\n\n"
+            "Read the day of week and time for each event EXACTLY as given in "
+            "the input. Do not change AM to PM. Do not invent events. Keep it "
+            "to two to five sentences.\n\n"
             + "\n".join(lines)
         )
         text = self._llm_silent(prompt, max_tokens=260)
-        return text or self._template_events(events, "this week")
+        return text or self._template_week(events)
+
+    def _rest_of_week_events(self) -> list:
+        """Events from tomorrow through the end of this coming Saturday
+        (get_upcoming_events covers today..Saturday; drop today's)."""
+        today = datetime.date.today()
+        out = []
+        try:
+            upcoming = cal.get_upcoming_events()
+        except Exception:
+            return []
+        for e in upcoming:
+            dt = self._record_dt(e)
+            if dt is not None and dt.date() > today:
+                out.append(e)
+        return out
 
     def _read_reminders(self) -> str:
         reminders = cal.get_all_reminders()
@@ -578,32 +635,66 @@ class NovaCalendar:
         text = self._llm_silent(prompt, max_tokens=220)
         return text or self._template_reminders(reminders)
 
-    def _format_event_lines(self, events: list) -> list:
+    # ── Event formatting (clean times/days, so summaries don't garble) ───
+    @staticmethod
+    def _record_dt(record: dict) -> Optional[datetime.datetime]:
+        """Parse a record's 'start' string (the EventKit/AppleScript format)."""
+        try:
+            return datetime.datetime.strptime(
+                record.get("start", ""), "%A, %B %d, %Y at %I:%M:%S %p"
+            )
+        except Exception:
+            return None
+
+    def _today_lines(self, events: list) -> list:
         lines = []
         for e in events:
-            parts = [f"- {e.get('title', '')}"]
-            if e.get("start"):
-                parts.append(f"starts {e['start']}")
-            if e.get("end"):
-                parts.append(f"ends {e['end']}")
+            dt = self._record_dt(e)
+            when = cal.format_time_for_speech(dt) if dt else (e.get("start") or "")
+            seg = f"- {e.get('title', '')}"
+            if when:
+                seg += f" at {when}"
             if e.get("location"):
-                parts.append(f"at {e['location']}")
-            if e.get("calendar"):
-                parts.append(f"[{e['calendar']}]")
-            lines.append(" ".join(parts))
+                seg += f" ({e['location']})"
+            lines.append(seg)
         return lines
 
-    def _template_events(self, events: list, span: str) -> str:
+    def _week_lines(self, events: list) -> list:
+        lines = []
+        for e in events:
+            dt = self._record_dt(e)
+            when = cal.format_datetime_for_speech(dt) if dt else (e.get("start") or "")
+            seg = f"- {e.get('title', '')}"
+            if when:
+                seg += f" on {when}"
+            if e.get("location"):
+                seg += f" ({e['location']})"
+            lines.append(seg)
+        return lines
+
+    def _template_today(self, events: list) -> str:
         """Deterministic fallback — never hallucinates days/times."""
         n = len(events)
-        parts = [f"You have {n} event{'s' if n != 1 else ''} {span}, {self.name}."]
+        parts = [f"You have {n} event{'s' if n != 1 else ''} today, {self.name}."]
         for e in events:
-            segment = e.get("title", "Untitled")
-            if e.get("start"):
-                segment += f" on {e['start']}"
+            dt = self._record_dt(e)
+            seg = e.get("title", "Untitled")
+            if dt:
+                seg += f" at {cal.format_time_for_speech(dt)}"
             if e.get("location"):
-                segment += f" at {e['location']}"
-            parts.append(segment + ".")
+                seg += f" at {e['location']}"
+            parts.append(seg + ".")
+        return " ".join(parts)
+
+    def _template_week(self, events: list) -> str:
+        n = len(events)
+        parts = [f"You have {n} event{'s' if n != 1 else ''} coming up, {self.name}."]
+        for e in events:
+            dt = self._record_dt(e)
+            seg = e.get("title", "Untitled")
+            if dt:
+                seg += f" on {cal.format_datetime_for_speech(dt)}"
+            parts.append(seg + ".")
         return " ".join(parts)
 
     def _template_reminders(self, reminders: list) -> str:
@@ -765,6 +856,7 @@ class NovaCalendar:
                     due_dt = datetime.datetime.combine(rd, datetime.time(st[0], st[1]))
         if not title:
             return f"What should the reminder say, {self.name}?"
+        title = self._titlecase(title)  # 'call mom' -> 'Call Mom'
 
         try:
             cal.create_reminder(title=title, due_datetime=due_dt, notes=None)

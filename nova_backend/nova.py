@@ -107,6 +107,10 @@ class VoiceAssistant:
         self.is_awake         = True
         self._last_response   = ""
         self._pending_action: Optional[Callable[[], str]] = None
+        # A SOFT one-shot follow-up armed by a calendar read ("want to hear
+        # what's coming up?"). Unlike _pending_action it only fires on an
+        # affirmative reply and never eats an unrelated next command.
+        self._calendar_offer: Optional[Callable[[], str]] = None
         self._rag_ready       = False
         self._rag             = None
         # Set by a "return to wake mode" voice command to drop out of
@@ -444,6 +448,22 @@ class VoiceAssistant:
                 self._respond(resp)
                 return
 
+        # ── 2b. Soft calendar follow-up offer ────────────────────────────────
+        # A read may have offered "want to hear what's coming up?". Honor a
+        # yes/no reply here, but if the user says something else, drop the offer
+        # and let their command flow normally (never eat an unrelated command).
+        if self._calendar_offer is not None:
+            offer = self._calendar_offer
+            self._calendar_offer = None
+            low = text.lower().strip()
+            if re.match(r"^(ye(s|ah|p)|sure|please|ok|okay|go ahead|do it|yes\s+please)\b", low):
+                self._respond(offer())
+                return
+            if re.match(r"^(no|nope|nah|no\s+thanks|that'?s\s+all|i'?m\s+good)\b", low):
+                self._respond(f"Alright, {self.config['user']['address_as']}.")
+                return
+            # Otherwise: not a reply to the offer — fall through to normal routing.
+
         # ── 3. Calendar / reminders intents ──────────────────────────────────
         # BEFORE memory + fast-path + tools: detection is strict (needs an
         # unambiguous calendar word), and running it early stops the greedy
@@ -452,7 +472,13 @@ class VoiceAssistant:
         # grabbing calendar phrasing.
         cal_intent = self.calendar.detect_intent(text)
         if cal_intent is not None:
-            self._respond(self.calendar.handle(cal_intent, text))
+            resp = self.calendar.handle(cal_intent, text)
+            # A read handler may arm a soft follow-up (e.g. read_rest_of_week).
+            followup = self.calendar.pending_intent
+            self.calendar.pending_intent = None
+            if followup:
+                self._calendar_offer = lambda fi=followup: self.calendar.handle(fi, "")
+            self._respond(resp)
             return
 
         # ── 4. Memory intents ────────────────────────────────────────────────

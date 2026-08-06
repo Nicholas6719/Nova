@@ -476,8 +476,26 @@ def _eventkit_events_in_range(start_dt: datetime.datetime,
     )
     events = store.eventsMatchingPredicate_(predicate) or []
 
+    # EventKit's predicate returns any event that OVERLAPS the window, so a
+    # timed event that started before the window (e.g. last night's 10:15 PM
+    # movie running past midnight) shows up in "today". The user only wants
+    # events that actually START within the window. Drop earlier-starting
+    # TIMED events, but keep all-day events that span into the window (a
+    # multi-day vacation legitimately belongs on each of its days).
+    window_start_ts = start_dt.timestamp()
     records = []
     for e in events:
+        try:
+            sd = e.startDate()
+            start_ts = sd.timeIntervalSince1970() if sd is not None else None
+        except Exception:
+            start_ts = None
+        try:
+            is_all_day = bool(e.isAllDay())
+        except Exception:
+            is_all_day = False
+        if (start_ts is not None and start_ts < window_start_ts and not is_all_day):
+            continue
         try:
             records.append(_ek_event_to_record(e))
         except Exception as ex:
