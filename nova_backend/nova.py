@@ -82,6 +82,19 @@ def _spoken_date(now: datetime) -> str:
     return f"{now.strftime('%A, %B')} {_ordinal(now.day)}, {now.year}"
 
 
+def _clean_for_tts(text: str) -> str:
+    """Strip anything Nova shouldn't speak aloud before synthesis: markdown
+    emphasis/heading/quote/code marks, and em/en dashes (turned into a spoken
+    pause). Nova speaks its output, so these would be read literally or garble
+    phrasing (CLAUDE.md invariant #10)."""
+    if not text:
+        return ""
+    t = text.replace("—", ", ").replace("–", ", ")
+    t = re.sub(r"[*_`#>]+", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
 # ═══════════════════════════════════════════════════════════════════════════════════
 # VoiceAssistant
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -672,29 +685,61 @@ class VoiceAssistant:
     # LLM streaming with sentence-chunked TTS overlap
     # ═════════════════════════════════════════════════════════════════════════════
     _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+    # Sentence-boundary detector for INCREMENTAL emission during token streaming:
+    # terminal .?! (optionally followed by a closing quote/bracket) at a word end.
+    _TTS_SENT_END = re.compile(r"[.!?][\"')\]]?(?=\s|$)")
 
     def _stream_response(self, user_text: str, rag_context: str = "") -> None:
         """
-        Stream LLM tokens to the UI, then synthesize the whole reply into TTS.
+        Stream LLM tokens to the UI and speak sentences AS they complete, so
+        Nova starts talking on sentence 1 while it's still generating the rest
+        (the proven Jarvis 3-thread overlap: LLM → sentence queue → TTS worker →
+        SeamlessPlayer, which joins sentences at sample level so there's no gap).
 
-        Tokens are streamed to the WebSocket live (the UI shows text as it
-        generates), but TTS is NOT fed per-sentence during generation. Feeding
-        the audio player one sentence at a time while the LLM slowly produces the
-        next starved the player between sentences and caused crackle/stutter.
-        Instead, once the full reply is generated we split it into sentences and
-        speak them back-to-back, so the audio buffer stays full and playback is
-        gapless (matching the proven Jarvis behavior).
+        Overlap is gated by tts.stream_while_generating (default on). If it's
+        ever set false, we fall back to the blocking "generate fully, then speak"
+        path — an instant, code-free rollback if playback ever starves.
         """
         memory_ctx    = self.memory.get_context_for_llm()
         system_prompt = self._build_system_prompt(memory_ctx, rag_context)
         history       = self.memory.get_recent_turns(n=10)
+        stream_tts    = self.config["tts"].get("stream_while_generating", True)
 
         full_response = ""
+        pending       = ""            # tokens not yet emitted as a full sentence
+        state         = {"spoke": False}
+
+        def _emit(text: str) -> None:
+            text = _clean_for_tts(text)
+            if not text:
+                return
+            if not state["spoke"]:
+                self.set_state("speaking")   # first audio → flip orb to speaking
+                state["spoke"] = True
+            self.tts.speak(text)
+
+        def _flush(force: bool) -> None:
+            nonlocal pending
+            while True:
+                m = self._TTS_SENT_END.search(pending)
+                if not m:
+                    break
+                cut = m.end()
+                sentence = pending[:cut].strip()
+                pending = pending[cut:]
+                if sentence:
+                    _emit(sentence)
+            if force and pending.strip():
+                _emit(pending.strip())
+                pending = ""
 
         def on_token(token: str) -> None:
-            nonlocal full_response
+            nonlocal full_response, pending
             full_response += token
-            self.ws.stream_token(token)   # UI only; no TTS here
+            self.ws.stream_token(token)   # UI shows text live
+            if stream_tts:
+                pending += token
+                _flush(force=False)
 
         self.set_state("thinking")
         self.llm.stream(
@@ -704,13 +749,15 @@ class VoiceAssistant:
             on_token=on_token,
         )
 
-        # Full reply is ready — now speak it. Split into sentences and queue them
-        # rapidly so the player buffer fills and never starves between sentences.
-        self.set_state("speaking")
-        for sentence in self._SENT_SPLIT.split(full_response.strip()):
-            s = sentence.strip()
-            if s:
-                self.tts.speak(s)
+        if stream_tts:
+            _flush(force=True)            # speak the trailing partial sentence
+        else:
+            # Blocking fallback: whole reply generated, now speak it back-to-back.
+            self.set_state("speaking")
+            for sentence in self._SENT_SPLIT.split(full_response.strip()):
+                s = sentence.strip()
+                if s:
+                    self.tts.speak(_clean_for_tts(s))
 
         self.tts.wait_until_done(timeout=60)
 

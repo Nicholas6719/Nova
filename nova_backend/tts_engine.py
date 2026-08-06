@@ -222,11 +222,18 @@ class TTSEngine:
 
     def _finish_player(self) -> None:
         """Called when a response's sentences are all queued: drain the player,
-        then re-open the mic."""
+        settle briefly, then re-open the mic."""
         if self._player is not None:
             self._player.mark_done()
             self._player.wait()   # blocks until the buffer empties
             self._player = None
+        # Settle delay before re-opening the mic: the speaker's acoustic tail
+        # lingers a beat after the buffer drains, and re-capturing it makes Nova
+        # transcribe the end of its own voice. Frames aren't queued while the
+        # gate is closed, so this delay is what actually clears the tail.
+        delay = float(self.config.get("post_utterance_delay_s", 0.1))
+        if delay > 0:
+            time.sleep(delay)
         self._speaking = False
         self._mic_gate.set()
 

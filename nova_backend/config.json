@@ -25,7 +25,9 @@
     "kokoro_voice": "af_nova",
     "macos_say_voice": "Ava (Premium)",
     "rate_multiplier": 1.05,
-    "post_utterance_delay_s": 0.1
+    "post_utterance_delay_s": 0.1,
+    "stream_while_generating": true,
+    "_note": "stream_while_generating: speak each sentence as the LLM produces it (Nova starts talking on sentence 1). If playback ever starves/crackles, set false to fall back to generate-fully-then-speak. post_utterance_delay_s: settle time before the mic re-opens so Nova doesn't hear its own tail."
   },
 
   "wake_word": {
