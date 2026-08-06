@@ -26,6 +26,7 @@ Storage: ~/Library/Application Support/Nova/nova_memory.db (NOVA_DATA_DIR).
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -109,6 +110,13 @@ class NovaMemory:
         key      = _norm(key)
         value    = value.strip()
         if not category or not key or not value:
+            return
+        # Drop MODEL-EXTRACTED facts whose value merely restates the key — they
+        # carry no information and read back as nonsense ("Your iron man movie
+        # is Iron Man movie."). User-stated facts (source='explicit') are always
+        # honored: if Nicholas says it, we store it.
+        if source != "explicit" and _is_degenerate(category, key, value):
+            log.debug(f"Fact rejected as degenerate: {category}/{key} = {value!r}")
             return
         with self._lock:
             conn = self._conn()
@@ -275,6 +283,30 @@ class NovaMemory:
 # ── Helpers ───────────────────────────────────────────────────────────────────────
 def _norm(s: str) -> str:
     return s.lower().strip().replace(" ", "_")
+
+
+# Categories never subjected to the degenerate-fact filter. An allergy stores the
+# allergen as both key and value ('peanuts'/'peanuts'), which is legitimate — and
+# allergies are safety-critical, so they are never filtered.
+_NEVER_FILTER_CATEGORIES = frozenset({"allergy"})
+
+
+def _is_degenerate(category: str, key: str, value: str) -> bool:
+    """True when the value adds nothing beyond the key, so the fact is noise.
+
+    'iron_man_movie' = 'Iron Man movie' -> every value word already appears in
+    the key. Deliberately conservative: only MULTI-WORD values are considered,
+    so a legitimate single-word restatement (allergy 'peanuts'/'peanuts', or a
+    preference key='coffee' value='likes') is never dropped. Routine clauses
+    ('gym' = 'goes to the gym at 5:30') add words, so they pass.
+    """
+    if category in _NEVER_FILTER_CATEGORIES:
+        return False
+    k_words = set(re.findall(r"[a-z0-9]+", key.replace("_", " ").lower()))
+    v_words = re.findall(r"[a-z0-9]+", value.lower())
+    if not k_words or len(v_words) < 2:
+        return False
+    return set(v_words).issubset(k_words)
 
 
 _IRREGULAR_2P = {"is": "are", "has": "have", "does": "do", "goes": "go", "was": "were"}

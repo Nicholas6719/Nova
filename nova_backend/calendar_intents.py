@@ -64,7 +64,9 @@ class NovaCalendar:
             "conversationally, the way a person would say it out loud. Never use "
             "markdown, bullet points, numbered lists, or em dashes. Keep replies "
             f"brief. The user's name is {self.name}; address them as {self.name} "
-            "and never use any other name."
+            "and never use any other name. Speak TO them in the second person "
+            "(\"you have a dentist appointment at 7 AM\"), never about them in "
+            "the third person (\"Nicholas has a dentist appointment\")."
         )
 
     # ═══════════════════════════════════════════════════════════════════════
