@@ -317,6 +317,75 @@ def _get_upcoming_events_applescript() -> list:
     return _parse_records(raw, _EVENT_FIELDS)
 
 
+# ── EventKit access gate ─────────────────────────────────────────────────
+#
+# EventKit is silent when access is denied: eventsMatchingPredicate_ returns an
+# EMPTY array rather than raising, so "denied" looks identical to "no events" —
+# which made Nova report a full calendar as "clear". This gate makes access
+# explicit: it requests on first use, BLOCKS until the user answers the system
+# prompt, and RAISES on denial/restriction so a permission problem is loud (the
+# caller speaks a "grant permission" message) instead of a silent empty read.
+#
+# Under the Swift app the prompt only appears if the app bundle declares the
+# NSCalendars*/NSReminders* usage strings and the calendars resource-access
+# entitlement — see Nova.xcodeproj build settings. Standalone Python inherits
+# the interpreter's own TCC grant.
+
+# EKAuthorizationStatus: 0 notDetermined, 1 restricted, 2 denied,
+# 3 fullAccess/authorized, 4 writeOnly (events, macOS 14+).
+_EK_AUTH_OK = (3, 4)
+
+
+def _ensure_ek_access(entity: str, timeout_s: float = 60.0):
+    """Ensure EventKit access for 'event' or 'reminder', returning a granted
+    EKEventStore. Requests on first use and waits for the user's response.
+    Raises RuntimeError if denied, restricted, or the prompt times out."""
+    if not _EK_AVAILABLE:
+        raise RuntimeError("EventKit not available")
+    ek_type = _EK.EKEntityTypeEvent if entity == "event" else _EK.EKEntityTypeReminder
+    status = _EK.EKEventStore.authorizationStatusForEntityType_(ek_type)
+
+    if status in (1, 2):
+        raise RuntimeError(
+            f"{entity} access denied — enable Nova under System Settings > "
+            "Privacy & Security > " + ("Calendars" if entity == "event" else "Reminders")
+        )
+
+    store = _EK.EKEventStore.alloc().init()
+    if status in _EK_AUTH_OK:
+        return store
+
+    # notDetermined → request and block until the user answers the prompt.
+    done = threading.Event()
+    result = {"granted": False}
+
+    def _cb(granted, err):
+        result["granted"] = bool(granted)
+        done.set()
+
+    try:
+        if entity == "event" and hasattr(store, "requestFullAccessToEventsWithCompletion_"):
+            store.requestFullAccessToEventsWithCompletion_(_cb)
+        elif entity == "reminder" and hasattr(store, "requestFullAccessToRemindersWithCompletion_"):
+            store.requestFullAccessToRemindersWithCompletion_(_cb)
+        else:
+            store.requestAccessToEntityType_completion_(ek_type, _cb)
+    except Exception as e:
+        raise RuntimeError(f"{entity} access request failed: {e}") from e
+
+    if not done.wait(timeout_s):
+        raise RuntimeError(f"{entity} access request timed out (no response to the prompt)")
+    if not result["granted"]:
+        raise RuntimeError(f"{entity} access was not granted")
+    # Fresh store now that access is authorized.
+    return _EK.EKEventStore.alloc().init()
+
+
+def _ns_date(dt: datetime.datetime):
+    import Foundation
+    return Foundation.NSDate.dateWithTimeIntervalSince1970_(dt.timestamp())
+
+
 # ── EventKit-backed event reads ─────────────────────────────────────────
 #
 # EKEventStore.eventsMatchingPredicate_ is synchronous and bypasses both
@@ -379,28 +448,12 @@ def _eventkit_events_in_range(start_dt: datetime.datetime,
     """Query EventKit for every event in [start_dt, end_dt), filter out
     calendars in _READ_SKIP_CALENDAR_NAMES, sort by start time, and
     return the legacy dict shape."""
-    if not _EK_AVAILABLE:
-        raise RuntimeError("EventKit not available")
+    # Raises if access is denied/restricted so a permission problem is loud
+    # rather than a silently-empty read reported as "your calendar is clear".
+    store = _ensure_ek_access("event")
 
-    import Foundation
-    store = _EK.EKEventStore.alloc().init()
-
-    # Trigger a calendar-events permission request on first use. The
-    # completion handler is optional — we continue immediately and the
-    # predicate call itself will fail cleanly if access is denied.
-    try:
-        if hasattr(store, "requestFullAccessToEventsWithCompletion_"):
-            # macOS 14+ API. Fire-and-forget; the OS caches the grant.
-            store.requestFullAccessToEventsWithCompletion_(lambda *_: None)
-        elif hasattr(store, "requestAccessToEntityType_completion_"):
-            store.requestAccessToEntityType_completion_(
-                _EK.EKEntityTypeEvent, lambda *_: None,
-            )
-    except Exception as e:
-        log.warning(f"event access request raised (non-fatal): {e}")
-
-    ns_start = Foundation.NSDate.dateWithTimeIntervalSince1970_(start_dt.timestamp())
-    ns_end = Foundation.NSDate.dateWithTimeIntervalSince1970_(end_dt.timestamp())
+    ns_start = _ns_date(start_dt)
+    ns_end = _ns_date(end_dt)
 
     # Scope to non-skipped calendars so the synthetic / subscription
     # calendars stay out of the results — identical behaviour to AppleScript.
@@ -526,17 +579,7 @@ def _get_reminders_via_eventkit() -> list:
     """Fetch incomplete reminders via the native EventKit API, sorted by
     due date (earliest first; no-due-date items come last).
     Result shape matches the AppleScript path: dicts with title/due/notes."""
-    store = _EK.EKEventStore.alloc().init()
-    # Request reminders access on first use (macOS 14+ split events/reminders).
-    try:
-        if hasattr(store, "requestFullAccessToRemindersWithCompletion_"):
-            store.requestFullAccessToRemindersWithCompletion_(lambda *_: None)
-        elif hasattr(store, "requestAccessToEntityType_completion_"):
-            store.requestAccessToEntityType_completion_(
-                _EK.EKEntityTypeReminder, lambda *_: None,
-            )
-    except Exception as e:
-        log.warning(f"reminder access request raised (non-fatal): {e}")
+    store = _ensure_ek_access("reminder")
 
     # Predicate for all incomplete reminders in all calendars.
     predicate = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
@@ -647,7 +690,23 @@ def _get_reminders_via_applescript() -> list:
 
 
 def get_calendar_names() -> list:
-    """Return the names of every calendar in Apple Calendar."""
+    """Return the names of every calendar in Apple Calendar.
+    EventKit-first (no Automation permission); AppleScript fallback."""
+    if _EK_AVAILABLE:
+        try:
+            store = _ensure_ek_access("event")
+            names = []
+            for c in store.calendarsForEntityType_(_EK.EKEntityTypeEvent) or []:
+                try:
+                    n = c.title()
+                    if n:
+                        names.append(str(n))
+                except Exception:
+                    continue
+            return names
+        except Exception as e:
+            log.warning(f"EventKit calendar-name read failed, trying AppleScript: {e}")
+
     _ensure_app_running("Calendar")
     script = (
         'set outputText to ""\n'
@@ -675,22 +734,57 @@ def create_calendar_event(
     notes: Optional[str] = None,
 ) -> None:
     """Create an event in the specified Apple Calendar.
-    If end_datetime is None, defaults to 1 hour after start_datetime."""
-    _ensure_app_running("Calendar")
+    If end_datetime is None, defaults to 1 hour after start_datetime.
+
+    EventKit-first (native, one permission surface — the same calendars grant
+    the reads use). Falls back to AppleScript only if EventKit is unavailable,
+    so we never depend on the separate Automation TCC grant that controlling
+    Calendar.app via `tell application` would require."""
     if end_datetime is None:
         end_datetime = start_datetime + datetime.timedelta(hours=1)
 
-    props = [
-        f'summary:"{_escape(title)}"',
-        'start date:theStart',
-        'end date:theEnd',
-    ]
+    if _EK_AVAILABLE:
+        store = _ensure_ek_access("event")
+        event = _EK.EKEvent.eventWithEventStore_(store)
+        event.setTitle_(title)
+        event.setStartDate_(_ns_date(start_datetime))
+        event.setEndDate_(_ns_date(end_datetime))
+        if location:
+            event.setLocation_(location)
+        if notes:
+            event.setNotes_(notes)
+
+        # Pick the named calendar if it exists and is writable; otherwise the
+        # default new-event calendar.
+        target = None
+        try:
+            for c in store.calendarsForEntityType_(_EK.EKEntityTypeEvent) or []:
+                if (c.title() or "") == calendar_name and c.allowsContentModifications():
+                    target = c
+                    break
+        except Exception:
+            pass
+        if target is None:
+            target = store.defaultCalendarForNewEvents()
+        if target is None:
+            raise RuntimeError("no writable calendar available")
+        event.setCalendar_(target)
+
+        ok, err = store.saveEvent_span_commit_error_(
+            event, _EK.EKSpanThisEvent, True, None
+        )
+        if not ok:
+            raise RuntimeError(f"could not save event: {err}")
+        return
+
+    # ── AppleScript fallback (Automation permission) ──
+    _ensure_app_running("Calendar")
+    props = [f'summary:"{_escape(title)}"', 'start date:theStart', 'end date:theEnd']
     if location:
         props.append(f'location:"{_escape(location)}"')
     if notes:
         props.append(f'description:"{_escape(notes)}"')
     props_str = ", ".join(props)
-
     script = (
         _as_date_block("theStart", start_datetime)
         + _as_date_block("theEnd", end_datetime)
@@ -708,7 +802,56 @@ def create_reminder(
     due_datetime: Optional[datetime.datetime] = None,
     notes: Optional[str] = None,
 ) -> None:
-    """Create a reminder in the default Reminders list."""
+    """Create a reminder in the default Reminders list.
+
+    EventKit-first (same rationale as create_calendar_event). A due date also
+    gets an alarm at that time so Reminders.app actually notifies and sorts by
+    it on macOS 14+."""
+    if _EK_AVAILABLE:
+        import Foundation
+        store = _ensure_ek_access("reminder")
+        reminder = _EK.EKReminder.reminderWithEventStore_(store)
+        reminder.setTitle_(title)
+        if notes:
+            reminder.setNotes_(notes)
+
+        target = store.defaultCalendarForNewReminders()
+        if target is None:
+            # Fall back to the first writable reminders list.
+            try:
+                for c in store.calendarsForEntityType_(_EK.EKEntityTypeReminder) or []:
+                    if c.allowsContentModifications():
+                        target = c
+                        break
+            except Exception:
+                pass
+        if target is None:
+            raise RuntimeError("no writable reminders list available")
+        reminder.setCalendar_(target)
+
+        if due_datetime is not None:
+            gregorian = Foundation.NSCalendar.alloc().initWithCalendarIdentifier_(
+                Foundation.NSCalendarIdentifierGregorian
+            )
+            comps = Foundation.NSDateComponents.alloc().init()
+            comps.setCalendar_(gregorian)
+            comps.setYear_(due_datetime.year)
+            comps.setMonth_(due_datetime.month)
+            comps.setDay_(due_datetime.day)
+            comps.setHour_(due_datetime.hour)
+            comps.setMinute_(due_datetime.minute)
+            reminder.setDueDateComponents_(comps)
+            try:
+                reminder.addAlarm_(_EK.EKAlarm.alarmWithAbsoluteDate_(_ns_date(due_datetime)))
+            except Exception as e:
+                log.warning(f"reminder alarm add warning: {e}")
+
+        ok, err = store.saveReminder_commit_error_(reminder, True, None)
+        if not ok:
+            raise RuntimeError(f"could not save reminder: {err}")
+        return
+
+    # ── AppleScript fallback (Automation permission) ──
     _ensure_app_running("Reminders")
     props = [f'name:"{_escape(title)}"']
     date_block = ""
@@ -718,7 +861,6 @@ def create_reminder(
     if notes:
         props.append(f'body:"{_escape(notes)}"')
     props_str = ", ".join(props)
-
     script = (
         date_block
         + 'tell application "Reminders"\n'
@@ -809,7 +951,7 @@ def _find_best_reminder(title_hint: str, store=None):
     if not _EK_AVAILABLE:
         return None
     if store is None:
-        store = _EK.EKEventStore.alloc().init()
+        store = _ensure_ek_access("reminder")
 
     predicate = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
         None, None, None
@@ -848,7 +990,7 @@ def complete_reminder(title_hint: str) -> tuple:
     EventKit-based — a full mark-complete operation takes <0.2 seconds."""
     if not _EK_AVAILABLE:
         return (False, "EventKit is not available")
-    store = _EK.EKEventStore.alloc().init()
+    store = _ensure_ek_access("reminder")
     reminder = _find_best_reminder(title_hint, store=store)
     if reminder is None:
         return (False, f"no open reminder matches {title_hint!r}")
@@ -873,7 +1015,7 @@ def delete_reminder(title_hint: str) -> tuple:
     Returns (True, matched_title) on success, (False, error_message) otherwise."""
     if not _EK_AVAILABLE:
         return (False, "EventKit is not available")
-    store = _EK.EKEventStore.alloc().init()
+    store = _ensure_ek_access("reminder")
     reminder = _find_best_reminder(title_hint, store=store)
     if reminder is None:
         return (False, f"no open reminder matches {title_hint!r}")
@@ -902,7 +1044,7 @@ def update_reminder(
     Returns (True, matched_original_title) or (False, error)."""
     if not _EK_AVAILABLE:
         return (False, "EventKit is not available")
-    store = _EK.EKEventStore.alloc().init()
+    store = _ensure_ek_access("reminder")
     reminder = _find_best_reminder(title_hint, store=store)
     if reminder is None:
         return (False, f"no open reminder matches {title_hint!r}")
@@ -979,7 +1121,7 @@ def _find_best_event(
     if not _EK_AVAILABLE:
         return None
     if store is None:
-        store = _EK.EKEventStore.alloc().init()
+        store = _ensure_ek_access("event")
 
     # Define the search window. When the user named a specific day, search
     # EXACTLY that day (00:00 to 24:00 local) so "delete the Monday work
@@ -1025,7 +1167,7 @@ def delete_calendar_event(
     (True, matched_title) on success or (False, error)."""
     if not _EK_AVAILABLE:
         return (False, "EventKit is not available")
-    store = _EK.EKEventStore.alloc().init()
+    store = _ensure_ek_access("event")
     event = _find_best_event(title_hint, date_hint=date_hint, store=store)
     if event is None:
         return (False, f"no upcoming event matches {title_hint!r}")

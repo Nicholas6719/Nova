@@ -99,11 +99,12 @@ class NovaCalendar:
             return "read_upcoming"
 
         # ── Create reminder ──────────────────────────────────────────────
-        # MUST NOT match "remind me in <duration>" (a timer). The "to" suffix
-        # is the discriminator: "remind me TO buy milk" vs "remind me IN five".
-        if re.search(r"\bset\s+(?:a\s+)?reminder\s+to\b", t) or \
-           re.search(r"\bcreate\s+(?:a\s+)?reminder\b", t) or \
-           re.search(r"\badd\s+(?:a\s+)?reminder\b", t) or \
+        # "reminder" is an unambiguous calendar word, so set/create/add/make +
+        # "reminder" matches regardless of what follows ("set a reminder FOR
+        # five to call mom" was missed when we required "set a reminder TO").
+        # For the bare "remind me" verb we still require "to" so "remind me IN
+        # five minutes" (a timer) doesn't route here.
+        if re.search(r"\b(?:set|create|add|make|new)\s+(?:a\s+|an\s+|another\s+)?reminder\b", t) or \
            re.search(r"\bremind\s+me\s+to\b", t):
             return "create_reminder"
 
@@ -248,7 +249,11 @@ class NovaCalendar:
             "- date: YYYY-MM-DD, or the word today/tomorrow/yesterday, or a "
             "weekday name. If the user explicitly names a weekday, USE THAT "
             'WEEKDAY, do NOT substitute "today".\n'
-            "- start_time: HH:MM in 24-hour format\n"
+            "- start_time: HH:MM in 24-hour format. If the user says a bare "
+            "hour with no AM/PM (e.g. 'five', 'at eight'), pick the time of day "
+            "a person most likely means: hours 1 through 7 default to PM "
+            "(afternoon/evening), 8 through 11 to AM, unless the request "
+            "clearly says otherwise.\n"
             "- end_time: HH:MM in 24-hour format, or null\n"
             "- location: string, or null\n"
             "- notes: string, or null\n"
@@ -369,6 +374,19 @@ class NovaCalendar:
             return (h, mi)
         except Exception:
             return None
+
+    # Words that pin the time of day; if any is present we trust the extracted
+    # hour and never apply the bare-hour PM default below.
+    _MERIDIEM_RE = re.compile(r"\b(a\.?m\.?|p\.?m\.?|noon|midnight|morning)\b", re.I)
+
+    def _default_bare_hour(self, hour: int, utterance: str) -> int:
+        """Deterministic AM/PM default for a bare spoken hour. When the user
+        gave no AM/PM (and didn't say morning/noon/midnight), an hour of 1-7 is
+        far more likely PM for a personal reminder/event ('remind me at five'
+        means 5 PM). Idempotent: an already-PM hour (>=12) is untouched."""
+        if 1 <= hour <= 7 and not self._MERIDIEM_RE.search(utterance or ""):
+            return hour + 12
+        return hour
 
     @staticmethod
     def _clean_optional(value):
@@ -556,6 +574,7 @@ class NovaCalendar:
 
         resolved_date = self._resolve_relative_date(str(date_field))
         st = self._parse_time(start_time) or (9, 0)
+        st = (self._default_bare_hour(st[0], user_input), st[1])
         start_dt = datetime.datetime.combine(resolved_date, datetime.time(st[0], st[1]))
         end_dt = None
         et = self._parse_time(end_time)
@@ -618,6 +637,7 @@ class NovaCalendar:
         if date_field or start_time:
             resolved_date = self._resolve_relative_date(str(date_field or "today"))
             st = self._parse_time(start_time) or (9, 0)
+            st = (self._default_bare_hour(st[0], user_input), st[1])
             due_dt = datetime.datetime.combine(resolved_date, datetime.time(st[0], st[1]))
 
         try:

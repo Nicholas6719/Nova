@@ -546,7 +546,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
 				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
-				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = YES;
 				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
 				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
@@ -557,6 +557,10 @@
 				INFOPLIST_KEY_CFBundleDisplayName = NovaOS;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Nova uses the microphone for voice input.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Nova uses speech recognition to understand what you say.";
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Nova reads and manages your calendar events when you ask.";
+				INFOPLIST_KEY_NSCalendarsUsageDescription = "Nova reads and manages your calendar events when you ask.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Nova reads and manages your reminders when you ask.";
+				INFOPLIST_KEY_NSRemindersUsageDescription = "Nova reads and manages your reminders when you ask.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -604,7 +608,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
 				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
-				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = YES;
 				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
 				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
@@ -615,6 +619,10 @@
 				INFOPLIST_KEY_CFBundleDisplayName = NovaOS;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Nova uses the microphone for voice input.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Nova uses speech recognition to understand what you say.";
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Nova reads and manages your calendar events when you ask.";
+				INFOPLIST_KEY_NSCalendarsUsageDescription = "Nova reads and manages your calendar events when you ask.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Nova reads and manages your reminders when you ask.";
+				INFOPLIST_KEY_NSRemindersUsageDescription = "Nova reads and manages your reminders when you ask.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
