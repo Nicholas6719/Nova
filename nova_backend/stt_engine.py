@@ -43,8 +43,14 @@ FRAME_BYTES   = FRAME_SAMPLES * 2                    # int16 = 2 bytes/sample
 
 # Wake detection: keep a rolling ~2s buffer and transcribe it periodically.
 PRE_WAKE_SECONDS  = 2.0
-PRE_WAKE_FRAMES   = int(PRE_WAKE_SECONDS * 1000 / FRAME_MS)   # ~66 frames
-WAKE_SCAN_EVERY_S = 0.7   # transcribe the rolling window this often
+PRE_WAKE_FRAMES   = int(PRE_WAKE_SECONDS * 1000 / FRAME_MS)   # ~66 frames — command priming
+# Wake DETECTION scans a shorter window than the 2s command-priming buffer: a
+# spoken "Nova" should dominate its window rather than being diluted by ~2s of
+# surrounding background hum (which makes Whisper transcribe the whole window as
+# noise). ~1.2s is long enough to hold "hey nova", short enough to stay clean.
+WAKE_WINDOW_SECONDS = 1.2
+WAKE_WINDOW_FRAMES  = int(WAKE_WINDOW_SECONDS * 1000 / FRAME_MS)  # ~40 frames
+WAKE_SCAN_EVERY_S   = 0.5   # transcribe the wake window this often
 
 # Adaptive silence (ms). Short cutoff for quick commands; longer once the user
 # has been speaking a while, so long sentences aren't cut off on natural pauses.
@@ -125,8 +131,9 @@ class STTEngine:
         keywords_lower = [kw.lower() for kw in wake_keywords]
         start          = time.time()
         last_scan      = 0.0
-        # Local rolling window of raw frames to transcribe.
-        window: "collections.deque[bytes]" = collections.deque(maxlen=PRE_WAKE_FRAMES)
+        # Short rolling window for wake detection (separate from the longer
+        # pre-wake buffer, which primes command capture).
+        window: "collections.deque[bytes]" = collections.deque(maxlen=WAKE_WINDOW_FRAMES)
 
         while time.time() - start < timeout_s:
             try:
@@ -140,7 +147,7 @@ class STTEngine:
             # Only transcribe every WAKE_SCAN_EVERY_S so we're not running Whisper
             # continuously, and only once the window holds enough audio.
             now = time.time()
-            if now - last_scan < WAKE_SCAN_EVERY_S or len(window) < PRE_WAKE_FRAMES // 2:
+            if now - last_scan < WAKE_SCAN_EVERY_S or len(window) < WAKE_WINDOW_FRAMES // 2:
                 continue
             last_scan = now
 
@@ -154,7 +161,14 @@ class STTEngine:
             if not text:
                 continue
 
-            matched = any(kw in text for kw in keywords_lower)
+            # Steady background noise (a fan, AC) makes Whisper hallucinate a
+            # single word repeated many times ("no no no", "okay okay okay").
+            # These pollute detection and can drown out a real "Nova". Discard
+            # them so noise never blocks the wake word.
+            if _is_noise_hallucination(text):
+                continue
+
+            matched = _matches_wake(text, keywords_lower)
             log.info(f"[wake-heard] '{text}'" + ("  <-- MATCH" if matched else ""))
             if matched:
                 log.info(f"Wake word detected in transcript: '{text}'")
@@ -296,3 +310,40 @@ def _rms(audio: np.ndarray) -> float:
     if audio is None or len(audio) == 0:
         return 0.0
     return float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)))
+
+
+def _is_noise_hallucination(text: str) -> bool:
+    """True if a transcript looks like Whisper hallucinating from steady noise:
+    a small set of words repeated ('no no no', 'okay okay okay'). Real commands
+    have varied vocabulary, so they pass through. But NEVER discard a window that
+    contains a wake variant — a real 'Nova' must always win."""
+    words = re.findall(r"[a-z']+", text.lower())
+    if len(words) < 4:
+        return False
+    if any(v.replace(" ", "") in "".join(words) for v in ("nova", "novah")):
+        return False  # protect a real wake word from being filtered as noise
+    unique = set(words)
+    if len(unique) <= 2:
+        return True
+    # One token dominating the whole utterance is the repetition signature.
+    from collections import Counter
+    most = Counter(words).most_common(1)[0][1]
+    return most / len(words) >= 0.6
+
+
+# Close variants Whisper emits for "nova", especially with background noise.
+_NOVA_VARIANTS = ("nova", "novah", "no va", "nolva", "knova", "gnova")
+
+
+def _matches_wake(text: str, keywords_lower: list[str]) -> bool:
+    """Match the wake word, tolerant of the near-misses Whisper produces in
+    noise. Word-boundary aware so 'innovate' doesn't trigger 'nova'."""
+    # Normalize to space-separated tokens; match on whole words only.
+    padded = f" {re.sub(r'[^a-z ]', ' ', text.lower())} "
+    padded = re.sub(r"\s+", " ", padded)
+    for kw in keywords_lower:
+        if f" {kw} " in padded:
+            return True
+    if any("nova" in kw for kw in keywords_lower):
+        return any(f" {v} " in padded for v in _NOVA_VARIANTS)
+    return False
