@@ -23,8 +23,10 @@
     "primary": "kokoro",
     "fallback": "macos_say",
     "kokoro_voice": "af_nova",
+    "kokoro_voice_blend": [["af_aoede", 0.5], ["af_bella", 0.35], ["af_heart", 0.15]],
+    "_voice_note": "kokoro_voice_blend is Nova's custom designed voice (warm/round/calm). Weighted blend of stock Kokoro voices. Remove/empty it to fall back to the single kokoro_voice.",
     "macos_say_voice": "Ava (Premium)",
-    "rate_multiplier": 1.05,
+    "rate_multiplier": 0.98,
     "post_utterance_delay_s": 0.1,
     "stream_while_generating": true,
     "_note": "stream_while_generating: speak each sentence as the LLM produces it (Nova starts talking on sentence 1). If playback ever starves/crackles, set false to fall back to generate-fully-then-speak. post_utterance_delay_s: settle time before the mic re-opens so Nova doesn't hear its own tail."

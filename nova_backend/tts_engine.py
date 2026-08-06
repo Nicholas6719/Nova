@@ -141,15 +141,32 @@ class TTSEngine:
             self._primary = None
 
     def _load_kokoro(self) -> None:
+        import numpy as np
         from kokoro_onnx import Kokoro
-        self._kokoro_voice = self.config.get("kokoro_voice", "af_nova")
         self._primary = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin")
+
+        # Voice selection. A "kokoro_voice_blend" (list of [name, weight]) defines
+        # a CUSTOM voice by weighted-averaging the style vectors of several stock
+        # voices — this is Nova's designed voice. Falls back to the single
+        # "kokoro_voice" name if no blend is configured. create() accepts either
+        # a name string or a style ndarray, so downstream code is unchanged.
+        blend = self.config.get("kokoro_voice_blend")
+        if blend:
+            style = sum(
+                self._primary.get_voice_style(name) * float(w) for name, w in blend
+            ).astype(np.float32)
+            self._kokoro_voice = style
+            log.info(f"Kokoro voice: custom blend of {[b[0] for b in blend]}")
+        else:
+            self._kokoro_voice = self.config.get("kokoro_voice", "af_nova")
+            log.info(f"Kokoro voice: {self._kokoro_voice}")
+
         # Warm-up: synthesize a near-silent utterance to pre-load the ONNX graph.
         log.info("Warming up Kokoro…")
         self._primary.create(
             text=".",
             voice=self._kokoro_voice,
-            speed=1.0,
+            speed=self.config.get("rate_multiplier", 1.0),
             lang="en-us",
         )
 
