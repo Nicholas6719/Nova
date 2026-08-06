@@ -34,7 +34,7 @@
     "enabled": true,
     "keywords": ["nova", "hey nova"],
     "conversation_timeout_s": 15.0,
-    "engine": "transcript",
+    "engine": "openwakeword",
     "oww_model_path": "nova.onnx",
     "oww_threshold": 0.5,
     "oww_trigger_level": 2,
