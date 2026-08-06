@@ -62,8 +62,15 @@ NOISE_FLOOR_RMS          = 150    # below this RMS, treat the buffer as silence
 
 
 class STTEngine:
-    def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None) -> None:
+    def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None,
+                 wake_config: Optional[dict] = None) -> None:
         self.config = config
+        # Wake-word settings (engine choice + OpenWakeWord tuning). Kept separate
+        # from the stt block so the wake engine can be swapped without touching
+        # STT. Defaults keep the legacy transcript engine if unspecified.
+        self._wake_config = wake_config or {}
+        self._oww = None            # lazily-loaded OpenWakeWordDetector
+        self._oww_failed = False    # don't retry a broken OWW load every wait
         # Shared gate with the TTS engine: cleared while Nova is speaking so we
         # ignore mic audio during playback (avoids self-capture and the CoreAudio
         # input/output device conflict). If unset, defaults to always-open.
@@ -119,8 +126,67 @@ class STTEngine:
         except queue.Empty:
             pass
 
-    # ── Wake-word detection ───────────────────────────────────────────────────────
+    # ── Wake-word detection (engine dispatch) ───────────────────────────────────────
     def record_wake(self, wake_keywords: list[str], timeout_s: float = 300.0) -> bool:
+        """Wait for the wake word. Dispatches to the configured engine:
+        'openwakeword' (neural, noise-robust) or 'transcript' (legacy Whisper
+        scan). Falls back to transcript if OpenWakeWord can't load, so Nova is
+        never left unable to wake."""
+        engine = str(self._wake_config.get("engine", "transcript")).lower()
+        if engine == "openwakeword" and not self._oww_failed:
+            det = self._get_oww_detector()
+            if det is not None:
+                return self._record_wake_oww(det, timeout_s)
+            # OWW unavailable (model missing / load error) → transcript fallback.
+        return self._record_wake_transcript(wake_keywords, timeout_s)
+
+    def _get_oww_detector(self):
+        """Lazily construct the OpenWakeWord detector. Returns None (and latches
+        _oww_failed) if the model is missing or the load fails."""
+        if self._oww is not None:
+            return self._oww
+        try:
+            from pathlib import Path as _Path
+            from wake_openwakeword import OpenWakeWordDetector
+            model_path = self._wake_config.get("oww_model_path", "")
+            if model_path and not _Path(model_path).is_absolute():
+                # Resolve relative to this backend directory.
+                model_path = str(_Path(__file__).parent / model_path)
+            self._oww = OpenWakeWordDetector(
+                model_path=model_path,
+                threshold=float(self._wake_config.get("oww_threshold", 0.5)),
+                trigger_level=int(self._wake_config.get("oww_trigger_level", 2)),
+                vad_threshold=float(self._wake_config.get("oww_vad_threshold", 0.5)),
+            )
+            return self._oww
+        except Exception as e:
+            log.warning(f"OpenWakeWord unavailable ({e}); using transcript wake.")
+            self._oww_failed = True
+            return None
+
+    def _record_wake_oww(self, detector, timeout_s: float) -> bool:
+        """Neural wake wait: score every frame from the persistent stream, keep
+        the pre-wake ring buffer primed so a single-breath 'Nova, <command>' is
+        still captured, and return True on trigger."""
+        self._ensure_stream()
+        detector.reset()
+        start = time.time()
+        while time.time() - start < timeout_s:
+            try:
+                frame = self._audio_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if len(frame) != FRAME_BYTES:
+                continue
+            self._pre_wake_buf.append(frame)
+            if detector.process(frame):
+                self._pending_pre_wake = b"".join(self._pre_wake_buf)
+                self._pre_wake_buf.clear()
+                return True
+        return False
+
+    # ── Wake-word detection (legacy transcript engine) ──────────────────────────────
+    def _record_wake_transcript(self, wake_keywords: list[str], timeout_s: float = 300.0) -> bool:
         """
         Listen for a wake keyword on a rolling transcript window.
 

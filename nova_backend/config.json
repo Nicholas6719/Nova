@@ -32,7 +32,12 @@
     "enabled": true,
     "keywords": ["nova", "hey nova"],
     "conversation_timeout_s": 15.0,
-    "_note": "Using transcript-based wake detection by default. After Nova replies it stays in conversation mode (no wake word needed) until conversation_timeout_s of silence."
+    "engine": "transcript",
+    "oww_model_path": "nova.onnx",
+    "oww_threshold": 0.5,
+    "oww_trigger_level": 2,
+    "oww_vad_threshold": 0.5,
+    "_note": "engine: 'transcript' (legacy Whisper scan) or 'openwakeword' (neural, noise-robust). Stays 'transcript' until the trained nova.onnx is validated, then flip to 'openwakeword'. oww_* tune the neural detector: threshold=per-window score to count as a hit, trigger_level=consecutive hits to fire, vad_threshold=Silero speech gate (0 disables). After Nova replies it stays in conversation mode (no wake word) until conversation_timeout_s of silence."
   },
 
   "server": {

@@ -142,7 +142,11 @@ class VoiceAssistant:
     def _init_stt(self) -> None:
         log.info("Loading STT (faster-whisper)…")
         from stt_engine import STTEngine
-        self.stt = STTEngine(self.config["stt"], mic_gate=self.mic_gate)
+        self.stt = STTEngine(
+            self.config["stt"],
+            mic_gate=self.mic_gate,
+            wake_config=self.config.get("wake_word", {}),
+        )
 
     def _init_llm(self) -> None:
         # MLX arrays and Metal GPU streams are thread-local: the model must be
