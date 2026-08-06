@@ -122,7 +122,46 @@ def parse_decisions(raw: str) -> list[dict]:
 _REJECT_CATEGORIES = {"assistant", "ai", "nova", "system", "bot"}
 
 
-def apply_decisions(memory: "NovaMemory", decisions: list[dict]) -> int:
+# Filler words that may legitimately appear in a rendered fact without having
+# been said verbatim ("goes to the gym" from "I go to the gym every morning").
+_GROUNDING_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "but", "his", "her", "their", "its", "he",
+    "she", "they", "you", "your", "him", "them", "is", "are", "was", "were",
+    "be", "been", "has", "have", "had", "does", "do", "did", "to", "of", "in",
+    "on", "at", "for", "with", "from", "by", "as", "that", "this", "it",
+    "every", "each", "some", "any", "all", "very", "really", "am", "pm",
+})
+
+
+def _is_grounded(value: str, convo_text: str) -> bool:
+    """True if every substantive word in an extracted value actually traces back
+    to what the user said.
+
+    The small model sometimes FABRICATES detail: from "I go running every
+    morning at 6" it produced "walks his dog every morning at 6" — inventing a
+    dog. A fact Nova never heard is worse than no fact at all (see the
+    never-guess principle), so anything ungrounded is dropped and simply
+    re-learned later if the user mentions it again.
+
+    Matching is prefix-based in both directions so ordinary inflection
+    ("go" -> "goes", "run" -> "running") still counts as grounded.
+    """
+    convo = {w for w in re.findall(r"[a-z0-9]+", (convo_text or "").lower()) if w}
+    if not convo:
+        return True
+    words = [w for w in re.findall(r"[a-z0-9]+", (value or "").lower())
+             if len(w) > 2 and w not in _GROUNDING_STOPWORDS]
+    for w in words:
+        if any(w == c or w.startswith(c[:3]) or c.startswith(w[:3])
+               for c in convo if len(c) >= 2):
+            continue
+        log.info(f"Rejecting ungrounded fact value {value!r}: {w!r} was never said")
+        return False
+    return True
+
+
+def apply_decisions(memory: "NovaMemory", decisions: list[dict],
+                    convo_text: str = "") -> int:
     """Apply validated decisions to memory. Returns how many were applied.
 
     A small model sometimes emits CONTRADICTORY decisions for the same key in one
@@ -147,6 +186,9 @@ def apply_decisions(memory: "NovaMemory", decisions: list[dict]) -> int:
 
     applied = 0
     for (cat, key), value in upserts.items():
+        # Never store detail the user didn't actually say.
+        if convo_text and not _is_grounded(value, convo_text):
+            continue
         try:
             memory.upsert_fact(cat, key, value, source="llm")
             applied += 1
@@ -180,7 +222,7 @@ def reconcile(memory: "NovaMemory", llm, convo_text: str) -> int:
         log.exception("Reconciliation LLM call failed")
         return 0
     decisions = parse_decisions(raw)
-    n = apply_decisions(memory, decisions)
+    n = apply_decisions(memory, decisions, convo_text=convo_text)
     if n:
         log.info(f"Memory reconciliation applied {n} change(s).")
     return n

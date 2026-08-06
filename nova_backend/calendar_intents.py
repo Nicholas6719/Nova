@@ -499,6 +499,53 @@ class NovaCalendar:
         t = re.sub(r"\s+(?:to|for|on|at|by|around|about)$", "", t, flags=re.I)
         return t.strip(" ,.!?;:-").strip()
 
+    # "from 7 to 5", "9 to 5", "7am until 3:30pm" — an explicit time RANGE.
+    _RANGE_RE = re.compile(
+        r"\b(?:from\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\s*"
+        r"(?:to|until|till|through|\-)\s*"
+        r"(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\b", re.I)
+
+    def _parse_time_range(self, utterance: str):
+        """Deterministically parse an explicit start-to-end range, returning
+        ((sh, sm), (eh, em)) or None.
+
+        The 3B mangles ranges badly — it turned "I'm working Saturday from 7 to
+        5" into start 17:00 / end 17:00 (a zero-length 5 PM event instead of a
+        7 AM to 5 PM shift). Regex is exact, so it overrides the model whenever
+        the utterance actually contains a range.
+        """
+        m = self._RANGE_RE.search(utterance or "")
+        if not m:
+            return None
+        h1, m1, mer1, h2, m2, mer2 = m.groups()
+        h1, h2 = int(h1), int(h2)
+        m1, m2 = int(m1 or 0), int(m2 or 0)
+        if not (0 < h1 <= 12 and 0 < h2 <= 12) or m1 > 59 or m2 > 59:
+            return None
+
+        def candidates(h, mer):
+            if mer:
+                mer = mer.replace(".", "").lower()
+                if mer.startswith("p"):
+                    return [12 if h == 12 else h + 12]
+                return [0 if h == 12 else h]
+            return [12, 0] if h == 12 else [h, h + 12]   # AM form, PM form
+
+        starts, ends = candidates(h1, mer1), candidates(h2, mer2)
+        preferred = self._default_bare_hour(h1, utterance) if not mer1 else starts[0]
+        best = None
+        for s in starts:
+            for e in ends:
+                dur = (e * 60 + m2) - (s * 60 + m1)
+                if dur <= 0 or dur > 14 * 60:      # must move forward, ≤14h
+                    continue
+                # Prefer the start the bare-hour default would pick; then the
+                # shortest sensible duration.
+                rank = (0 if s == preferred else 1, dur)
+                if best is None or rank < best[0]:
+                    best = (rank, (s, m1), (e, m2))
+        return (best[1], best[2]) if best else None
+
     def _parse_reminder(self, utterance: str):
         """Deterministically extract (title, due_datetime|None) from a
         create-reminder utterance. title is None if nothing usable remains."""
@@ -899,13 +946,22 @@ class NovaCalendar:
                 date_field = user_weekday
 
         resolved_date = self._resolve_relative_date(str(date_field))
-        st = self._parse_time(start_time) or (9, 0)
-        st = (self._default_bare_hour(st[0], user_input), st[1])
-        start_dt = datetime.datetime.combine(resolved_date, datetime.time(st[0], st[1]))
-        end_dt = None
-        et = self._parse_time(end_time)
-        if et is not None:
-            end_dt = datetime.datetime.combine(resolved_date, datetime.time(et[0], et[1]))
+
+        # An explicit range in the utterance ("from 7 to 5") is parsed
+        # deterministically and OVERRIDES the model, which mangles ranges.
+        rng = self._parse_time_range(user_input)
+        if rng is not None:
+            (sh, sm), (eh, em) = rng
+            start_dt = datetime.datetime.combine(resolved_date, datetime.time(sh, sm))
+            end_dt   = datetime.datetime.combine(resolved_date, datetime.time(eh, em))
+        else:
+            st = self._parse_time(start_time) or (9, 0)
+            st = (self._default_bare_hour(st[0], user_input), st[1])
+            start_dt = datetime.datetime.combine(resolved_date, datetime.time(st[0], st[1]))
+            end_dt = None
+            et = self._parse_time(end_time)
+            if et is not None:
+                end_dt = datetime.datetime.combine(resolved_date, datetime.time(et[0], et[1]))
 
         cal_name = cal.classify_calendar(user_input)
 
