@@ -44,7 +44,8 @@ _INSTRUCTION = """Return a JSON array of changes. Each item:
 
 Rules:
 - "category" is a short lowercase noun like allergy, preference, favorite, identity, location, possession, routine.
-- "key" is the canonical thing (e.g. "peanuts", "favorite_color", "employer"). Same key = same fact, so a correction is an "update" with the same category+key and the new value.
+- "key" is the canonical thing this fact is ABOUT (e.g. "peanuts", "favorite_color", "employer", "gym"). Same key = same fact, so a correction is an "update" with the same category+key and the new value.
+- "value" must capture the FULL detail the user gave, not just one word. If they mention a time, days, place, or amount, include all of it in the value (e.g. "every morning at 5:30", "Monday through Friday at 5:30").
 - Use "delete" when the user says they no longer have/do something (e.g. cancelled a service, no longer likes something); give the category+key to remove.
 - If nothing is worth storing, return [].
 - Do not store the user's questions or requests.
@@ -53,6 +54,10 @@ Examples:
 Conversation:
 user: I'm allergic to peanuts. Also my favorite color is blue.
 Output: [{{"action":"insert","category":"allergy","key":"peanuts","value":"peanuts"}},{{"action":"insert","category":"favorite","key":"favorite_color","value":"blue"}}]
+
+Conversation:
+user: I walk my dog every evening around 7pm.
+Output: [{{"action":"insert","category":"routine","key":"dog_walk","value":"walks his dog every evening around 7pm"}}]
 
 Conversation:
 user: Actually my favorite color is red now.

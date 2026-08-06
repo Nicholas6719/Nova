@@ -261,7 +261,8 @@ def _render_fact(category: str, key: str, value: str) -> str:
     if category == "favorite":
         return f"His favorite {k} is {value}."
     if category == "routine":
-        return f"Routine: {value}."
+        # Value is a full clause, e.g. "goes to the gym every morning at 5:30".
+        return f"He {value}." if not value.lower().startswith("he ") else f"{value}."
     if category == "location":
         return f"His {k} is {value}."
     if category == "possession":
