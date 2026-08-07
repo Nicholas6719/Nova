@@ -123,6 +123,10 @@ class VoiceAssistant:
         # what's coming up?"). It only fires on an affirmative reply and never
         # eats an unrelated next command.
         self._calendar_offer: Optional[Callable[[], str]] = None
+        # A STRICT one-shot confirmation armed by a destructive tool action
+        # (shutdown / restart / sleep). Unlike the soft offer, anything that
+        # isn't a clear yes cancels it — we never guess about powering off.
+        self._tool_confirm: Optional[Callable[[], str]] = None
         self._rag_ready       = False
         self._rag             = None
         # Set by a "return to wake mode" voice command to drop out of
@@ -244,7 +248,9 @@ class VoiceAssistant:
 
     def _init_tools(self) -> None:
         from tools import NovaTools
-        self.tools = NovaTools(self.config)
+        # on_announce lets a timer speak when it fires — nothing is asking at
+        # that moment, so it needs its own safe path to the floor.
+        self.tools = NovaTools(self.config, on_announce=self._announce)
 
     def _init_calendar(self) -> None:
         # NovaCalendar's LLM extraction/summarize calls run on the nova-llm
@@ -457,6 +463,19 @@ class VoiceAssistant:
             self._respond(resp)
             return
 
+        # ── 1b. Destructive-action confirmation (STRICT yes/no) ──────────────
+        # Armed by a power command. Only an explicit yes proceeds; ANYTHING
+        # else cancels — we never power off the Mac on an ambiguous reply.
+        if self._tool_confirm is not None:
+            confirm = self._tool_confirm
+            self._tool_confirm = None
+            if re.match(r"^\s*(yes|yeah|yep|yup|do it|confirm|go ahead|please do)\b",
+                        text.lower().strip()):
+                self._respond(confirm())
+            else:
+                self._respond("Cancelled.")
+            return
+
         # ── 2. Soft calendar follow-up offer ─────────────────────────────────
         # A read may have offered "want to hear what's coming up?". Honor a
         # yes/no reply here, but if the user says something else, drop the offer
@@ -505,6 +524,10 @@ class VoiceAssistant:
         # ── 6. Tool intents ──────────────────────────────────────────────────
         resp = self.tools.match(text)
         if resp is not None:
+            # A destructive tool (power) asks first and hands back the action
+            # to run only if the user confirms on the next turn.
+            self._tool_confirm = self.tools.pending_confirm
+            self.tools.pending_confirm = None
             self._respond(resp)
             return
 
@@ -519,6 +542,31 @@ class VoiceAssistant:
         # ── 8. LLM fallback (streaming) ──────────────────────────────────────
         self.set_state("thinking")
         self._stream_response(text, rag_context=rag_ctx)
+
+    # ── Unprompted announcements (timers) ─────────────────────────────────────────
+    def _announce(self, text: str) -> None:
+        """Speak something the user did NOT just ask for (a timer firing).
+
+        Called from a timer thread, so it must find a safe moment rather than
+        cutting in: wait out any in-flight TTS, and hold while muted instead of
+        dropping the message. Nova is half-duplex, so speaking on top of a
+        response would also make it hear itself."""
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if self.is_muted:
+                time.sleep(0.5)
+                continue
+            if self.tts.is_speaking():
+                time.sleep(0.2)
+                continue
+            break
+        log.info(f"[announce] {text}")
+        self.memory.add_turn("assistant", text)
+        self.ws.send_message("assistant", text)
+        self.set_state("speaking")
+        self.tts.speak(text)
+        self.tts.wait_until_done(timeout=60)
+        self.set_state("idle")
 
     # ── Respond helper ────────────────────────────────────────────────────────────
     def _respond(self, text: str) -> None:
@@ -603,9 +651,14 @@ class VoiceAssistant:
             self.is_muted = True
             return "Muted."
 
-        if "unmute" in low or "start listening" in low:
-            self.is_muted = False
-            return "Unmuted."
+        # NOTE: "(un)mute the audio/sound/speakers/volume" is a SYSTEM-AUDIO
+        # command and belongs to Tools, not to Nova's own mute. Without this
+        # guard the bare "unmute" test below swallowed "unmute the audio" —
+        # Nova said "Unmuted" while the speakers stayed muted.
+        if not re.search(r"\b(audio|sound|speakers?|volume)\b", low):
+            if "unmute" in low or "start listening" in low:
+                self.is_muted = False
+                return "Unmuted."
 
         return None
 

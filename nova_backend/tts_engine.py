@@ -197,6 +197,12 @@ class TTSEngine:
         # Finalize the continuous player and drain any remaining audio.
         self._finish_player()
 
+    def is_speaking(self) -> bool:
+        """True while audio is playing or sentences are still queued. Used by
+        unprompted announcements (timers) to wait for a safe moment rather than
+        talking over an in-flight response."""
+        return self._speaking or not self._queue.empty()
+
     def stop_and_flush(self) -> None:
         """Barge-in: discard queued sentences and stop current playback."""
         while not self._queue.empty():
