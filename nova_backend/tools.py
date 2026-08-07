@@ -16,8 +16,11 @@ Routing order inside match() (first hit wins — put SPECIFIC before GENERAL):
   9.  Running / frontmost apps
   10. Screenshot
   11. System info (model + chip)
-  12. App launch
-  13. Web search
+  12. Minimize / restore windows
+  13. Finder folders          ← before app launch: "open downloads" is a folder
+  14. Quit / close an app
+  15. App launch              ← ~50 spoken aliases + dynamic install scan
+  16. Web search
 
 Two things flow OUT of this module besides the spoken string:
   * ``pending_confirm`` — set when an action is destructive enough to need a
@@ -50,6 +53,54 @@ _NUM_WORDS = {
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
     "twelve": 12, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40,
     "forty-five": 45, "fortyfive": 45, "sixty": 60, "ninety": 90,
+}
+
+
+# Finder locations Nova can open by spoken name.
+_FOLDERS: dict[str, str] = {
+    "downloads": "~/Downloads", "download": "~/Downloads",
+    "desktop": "~/Desktop",
+    "documents": "~/Documents", "document": "~/Documents", "docs": "~/Documents",
+    "pictures": "~/Pictures", "picture": "~/Pictures", "photos folder": "~/Pictures",
+    "movies": "~/Movies", "videos": "~/Movies",
+    "music folder": "~/Music",
+    "applications": "/Applications", "apps folder": "/Applications",
+    "home": "~", "home folder": "~", "user folder": "~",
+    "trash": "~/.Trash",
+    "library": "~/Library",
+    "icloud": "~/Library/Mobile Documents/com~apple~CloudDocs",
+    "icloud drive": "~/Library/Mobile Documents/com~apple~CloudDocs",
+}
+
+# Spoken names → exact macOS .app names. Only needed where the spoken form
+# DIFFERS from the real app name, or where Whisper reliably mishears it —
+# anything else is resolved dynamically against what's actually installed.
+_APP_ALIASES: dict[str, str] = {
+    # browsers
+    "brave": "Brave Browser", "brave browser": "Brave Browser",
+    "chrome": "Google Chrome", "google chrome": "Google Chrome",
+    # editors / dev
+    "vs code": "Visual Studio Code", "vscode": "Visual Studio Code",
+    "v s code": "Visual Studio Code", "code": "Visual Studio Code",
+    "x code": "Xcode", "excode": "Xcode",
+    # AI apps — Whisper mangles these constantly
+    "clawed": "Claude", "cloud": "Claude", "claud": "Claude", "clod": "Claude",
+    "chat gpt": "ChatGPT", "chatgbt": "ChatGPT", "chat g p t": "ChatGPT",
+    "gpt": "ChatGPT", "lm studio": "LM Studio", "elem studio": "LM Studio",
+    # Microsoft suite (installed as "Microsoft X")
+    "word": "Microsoft Word", "excel": "Microsoft Excel",
+    "powerpoint": "Microsoft PowerPoint", "power point": "Microsoft PowerPoint",
+    "outlook": "Microsoft Outlook",
+    # misc where spoken != bundle name
+    "zoom": "zoom.us", "system preferences": "System Settings",
+    "settings": "System Settings", "preferences": "System Settings",
+    "imessage": "Messages", "text messages": "Messages",
+    "apple music": "Music", "face time": "FaceTime",
+    "app store": "App Store", "appstore": "App Store",
+    "activity monitor": "Activity Monitor", "task manager": "Activity Monitor",
+    "quicktime": "QuickTime Player", "quick time": "QuickTime Player",
+    "voice memos": "VoiceMemos", "disc cord": "Discord",
+    "spotifi": "Spotify", "text edit": "TextEdit",
 }
 
 
@@ -173,12 +224,37 @@ class NovaTools:
         if any(p in low for p in ("what mac", "what computer", "what machine", "system info")):
             return self._system_info()
 
-        # ── 12. App launch ──────────────────────────────────────────────────
+        # ── 12. Minimize / restore windows ──────────────────────────────────
+        m = re.search(r"\b(?:minimi[sz]e|hide)\s+(?:the\s+|my\s+)?(.*)", low)
+        if m:
+            return self._minimize(m.group(1).strip().rstrip("."), minimize=True)
+        m = re.search(r"\b(?:unminimi[sz]e|restore|bring\s+back|un-?hide)\s+(?:the\s+|my\s+)?(.*)", low)
+        if m:
+            return self._minimize(m.group(1).strip().rstrip("."), minimize=False)
+
+        # ── 13. Finder folders (BEFORE app launch: "open downloads" is a
+        #        folder, not an app) ─────────────────────────────────────────
+        m = re.search(r"\b(?:open|show|go\s+to|take\s+me\s+to|bring\s+up|pull\s+up)\s+"
+                      r"(?:me\s+)?(?:my\s+|the\s+)?(.+)", low)
+        if m:
+            target = re.sub(r"\s+(?:folder|directory)$", "",
+                            m.group(1).strip().rstrip(".")).strip()
+            if target in _FOLDERS:
+                return self._open_folder(target)
+
+        # ── 14. Quit / close an app ─────────────────────────────────────────
+        m = re.search(r"\b(?:quit|close|exit|shut)\s+(?:down\s+)?(?:the\s+|my\s+)?(.+)", low)
+        if m:
+            resp = self._quit_app(m.group(1).strip().rstrip("."))
+            if resp is not None:      # None => not a real app, keep routing
+                return resp
+
+        # ── 15. App launch ──────────────────────────────────────────────────
         m = re.search(r"(?:open|launch|start|run)\s+(.+)", low)
         if m:
             return self._open_app(m.group(1).strip().rstrip("."))
 
-        # ── 13. Web search ──────────────────────────────────────────────────
+        # ── 16. Web search ──────────────────────────────────────────────────
         m = re.search(r"(?:search|look up|google|look for|find)\s+(?:for\s+)?(.+)", low)
         if m:
             return self._web_search(m.group(1).strip().rstrip("."))
@@ -558,19 +634,158 @@ class NovaTools:
             return f"You're on a {m.group(1).strip()}{detail}."
         return "I couldn't determine your Mac model."
 
+    # ── App name resolution ───────────────────────────────────────────────
+    _app_index: Optional[dict] = None      # lowercase name -> exact .app name
+
+    @classmethod
+    def _installed_apps(cls, refresh: bool = False) -> dict:
+        """Map of every installed app. Resolving against what's ACTUALLY
+        installed beats a hardcoded list — anything installed later just works.
+
+        Cached because the scan runs on every "open X", but `refresh=True`
+        re-scans so an app installed WHILE Nova is running is still found
+        without needing a restart (see _resolve_app's retry-on-miss)."""
+        if cls._app_index is None or refresh:
+            index = {}
+            for d in ("/Applications", "/System/Applications",
+                      "/System/Applications/Utilities",
+                      str(Path.home() / "Applications")):
+                try:
+                    for p in Path(d).glob("*.app"):
+                        index[p.stem.lower()] = p.stem
+                except Exception:
+                    continue
+            # Nested bundles (e.g. /Applications/Utilities/*.app) — one level.
+            try:
+                for sub in Path("/Applications").glob("*/*.app"):
+                    index.setdefault(sub.stem.lower(), sub.stem)
+            except Exception:
+                pass
+            cls._app_index = index
+        return cls._app_index
+
+    def _resolve_app(self, raw: str) -> Optional[str]:
+        """Spoken name -> exact app name. alias → exact → unique partial.
+
+        On a miss the installed-app index is re-scanned once and the lookup
+        retried, so an app installed since Nova started is still found."""
+        clean = re.sub(r"[^\w\s.]", "", raw or "").strip().lower()
+        clean = re.sub(r"^(?:the|a|an|my)\s+", "", clean)
+        clean = re.sub(r"\s+(?:app|application)$", "", clean).strip()
+        if not clean:
+            return None
+        if clean in _APP_ALIASES:
+            return _APP_ALIASES[clean]
+
+        for refresh in (False, True):        # second pass re-scans /Applications
+            apps = self._installed_apps(refresh=refresh)
+            if clean in apps:
+                return apps[clean]
+            # Unique partial ("visual studio" -> Visual Studio Code). Only accept
+            # a single match, so we never open the wrong app on an ambiguous name.
+            hits = {v for k, v in apps.items() if clean in k or k.startswith(clean)}
+            if len(hits) == 1:
+                return hits.pop()
+            if len(hits) > 1:
+                return None                  # ambiguous: don't guess
+        return None
+
     def _open_app(self, name: str) -> str:
-        result = subprocess.run(["open", "-a", name.title()], capture_output=True, text=True)
+        resolved = self._resolve_app(name)
+        target = resolved or name.title()
+        result = subprocess.run(["open", "-a", target], capture_output=True, text=True)
         if result.returncode == 0:
-            return f"Opening {name.title()}."
-        found = subprocess.run(
-            ["mdfind", "-onlyin", "/Applications",
-             f"kMDItemContentType == 'com.apple.application-bundle' && kMDItemDisplayName == '{name}'cdw"],
-            capture_output=True, text=True,
-        ).stdout.strip().splitlines()
-        if found:
-            subprocess.run(["open", found[0]], check=False)
-            return f"Opening {name.title()}."
+            return f"Opening {target}."
         return f"I couldn't find an app called {name}."
+
+    def _quit_app(self, name: str) -> Optional[str]:
+        """Quit an app by spoken name. Returns None when the name doesn't
+        resolve to something real, so an unrelated 'close ...' phrase falls
+        through to the rest of the pipeline instead of erroring."""
+        resolved = self._resolve_app(name)
+        if not resolved:
+            return None
+        running = subprocess.run(["pgrep", "-x", resolved], capture_output=True).returncode == 0
+        if not running:
+            # Some bundles run under a different process name; ask System Events.
+            check = subprocess.run(
+                ["osascript", "-e",
+                 f'tell application "System Events" to (name of processes) contains "{resolved}"'],
+                capture_output=True, text=True)
+            running = check.stdout.strip() == "true"
+        if not running:
+            return f"{resolved} isn't running."
+        subprocess.run(["osascript", "-e", f'tell application "{resolved}" to quit'],
+                       capture_output=True)
+        return f"Closing {resolved}."
+
+    # ── Window management ─────────────────────────────────────────────────
+    def _visible_apps(self) -> list:
+        r = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to get name of every application process '
+             'whose background only is false and visible is true'],
+            capture_output=True, text=True)
+        return [a.strip() for a in (r.stdout or "").split(",") if a.strip()]
+
+    def _set_miniaturized(self, app: str, value: bool) -> bool:
+        """Minimize/restore an app's windows. Prefers app-level scripting
+        (Automation permission) and falls back to System Events' accessibility
+        attribute, which some apps need. Returns True only if it worked."""
+        flag = "true" if value else "false"
+        r = subprocess.run(
+            ["osascript", "-e",
+             f'tell application "{app}" to set miniaturized of every window to {flag}'],
+            capture_output=True, text=True)
+        if r.returncode == 0:
+            return True
+        r = subprocess.run(
+            ["osascript", "-e",
+             f'tell application "System Events" to tell process "{app}" '
+             f'to set value of attribute "AXMinimized" of every window to {flag}'],
+            capture_output=True, text=True)
+        return r.returncode == 0
+
+    def _minimize(self, target: str, minimize: bool) -> Optional[str]:
+        verb = "Minimized" if minimize else "Restored"
+        target = re.sub(r"\b(window|windows|app|application)s?\b", "", target).strip()
+
+        # "minimize everything" / "minimize all"
+        if not target or re.fullmatch(r"(all|everything|them all|it all)?", target):
+            if target in ("all", "everything", "them all", "it all"):
+                done = [a for a in self._visible_apps() if self._set_miniaturized(a, minimize)]
+                if not done:
+                    return f"I wasn't able to {'minimize' if minimize else 'restore'} anything."
+                return f"{verb} {len(done)} app windows."
+            # bare "minimize this window" → whatever is in front
+            front = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to get name of first application '
+                 'process whose frontmost is true'],
+                capture_output=True, text=True).stdout.strip()
+            if not front:
+                return "I couldn't tell which window is in front."
+            if self._set_miniaturized(front, minimize):
+                return f"{verb} {front}."
+            return f"I wasn't able to {'minimize' if minimize else 'restore'} {front}."
+
+        # Named app. Answer honestly rather than falling through: letting an
+        # unresolved "minimize <x>" reach the LLM produced a confabulated
+        # "Flibbertigibbet minimized." — a success that never happened.
+        app = self._resolve_app(target)
+        if not app:
+            return f"I couldn't find an app called {target}."
+        if self._set_miniaturized(app, minimize):
+            return f"{verb} {app}."
+        return f"I wasn't able to {'minimize' if minimize else 'restore'} {app}."
+
+    def _open_folder(self, key: str) -> str:
+        path = Path(_FOLDERS[key]).expanduser()
+        if not path.exists():
+            return f"I couldn't find your {key} folder."
+        subprocess.run(["open", str(path)], check=False)
+        label = "Trash" if key == "trash" else key.replace(" folder", "").title()
+        return f"Opening {label}."
 
     def _web_search(self, query: str) -> str:
         url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
