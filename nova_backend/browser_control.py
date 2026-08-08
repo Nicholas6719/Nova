@@ -7,8 +7,12 @@ Improves on the Jarvis project's version in a few ways:
   * Back / forward / reload actually work — Chromium's AppleScript exposes
     `go back` natively, which the Jarvis notes assumed was impossible.
   * Tab awareness: list open tabs, switch to one by name, close others.
-  * Scroll via injected JavaScript, which needs a browser setting; when it's
-    off we say so instead of pretending it worked.
+  * Scroll via injected JavaScript. This needs "Allow JavaScript from Apple
+    Events" (Chromium: profile pref `browser.allow_javascript_apple_events`,
+    NOT an NSUserDefaults key; Safari: Develop menu). ENABLED on this machine
+    2026-08-08 — verified scrolling a real page 0 -> 712 -> 27848 -> 0. If it is
+    ever turned off, scroll degrades to an explanation rather than a fake
+    success.
 
 Chromium and Safari differ in their scripting vocabulary, so everything goes
 through the small adapter below rather than raw AppleScript at each call site:
