@@ -36,6 +36,20 @@ import calendar_reminders as cal
 log = logging.getLogger("nova.calendar.intents")
 
 
+# Words that mean "this is about a file on disk" and words that mean "this is
+# about the calendar". Used only by the guard at the top of detect_intent; the
+# authoritative file vocabulary lives in file_intents.py.
+_FILE_WORD_RE = re.compile(
+    r"\b(?:file|files|folder|document|documents|doc|docs|pdf|pdfs|"
+    r"spreadsheet|screenshot|screenshots)\b"
+    r"|\.(?:pdf|docx?|txt|md|png|jpe?g|csv|xlsx?|pptx?)\b"
+)
+_CALENDAR_WORD_RE = re.compile(
+    r"\b(?:calendar|schedule|scheduled|reminder|reminders|remind|event|events|"
+    r"appointment|appointments|meeting|meetings|agenda|shift|shifts)\b"
+)
+
+
 class NovaCalendar:
     def __init__(self, config: dict, llm, memory) -> None:
         self.config = config
@@ -81,6 +95,17 @@ class NovaCalendar:
         without a strong signal returns None and falls through to chat."""
         t = (text or "").lower().strip()
         if not t:
+            return None
+
+        # ── File requests are not calendar requests ──────────────────────
+        # The "rename X to Y" rule below carries no calendar word of its own
+        # (it predates file management), so it violated this module's own
+        # contract and swallowed every spoken file rename: "rename the budget
+        # file to Q3 numbers" was answered with "I couldn't find a reminder
+        # matching that". A file word with NO calendar word anywhere means the
+        # utterance belongs to file_intents. "remind me to read the report"
+        # keeps both words, so it still lands here.
+        if _FILE_WORD_RE.search(t) and not _CALENDAR_WORD_RE.search(t):
             return None
 
         # ── Read reminders ───────────────────────────────────────────────
