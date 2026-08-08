@@ -15,6 +15,7 @@ Routing order inside match() (first hit wins — put SPECIFIC before GENERAL):
   8.  System stats (RAM / CPU / disk)
   9.  Running / frontmost apps
   10. Screenshot
+  10b Browser control (sites / tabs / back / reload / scroll) — before maps
   11. System info (model + chip)
   11a Maps (how far / how long / navigate) — speaks the answer, offers directions
   11b Music control (Spotify / Apple Music) — before app launch
@@ -231,6 +232,12 @@ class NovaTools:
         # ── 11. System info ─────────────────────────────────────────────────
         if any(p in low for p in ("what mac", "what computer", "what machine", "system info")):
             return self._system_info()
+
+        # ── 10b. Browser control (BEFORE maps: "navigate to youtube.com" is a
+        #         website, while "navigate to Boston" is a drive) ────────────
+        resp = self._match_browser(low)
+        if resp is not None:
+            return resp
 
         # ── 11a. Maps: distance / travel time / navigation ──────────────────
         resp = self._match_maps(low)
@@ -737,6 +744,83 @@ class NovaTools:
         subprocess.run(["osascript", "-e", f'tell application "{resolved}" to quit'],
                        capture_output=True)
         return f"Closing {resolved}."
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Browser control
+    # ═══════════════════════════════════════════════════════════════════════
+    def _match_browser(self, low: str) -> Optional[str]:
+        import browser_control as bc
+
+        # ── page/tab state ──────────────────────────────────────────────
+        if re.search(r"\b(what|which)\s+(page|site|website)\b.*\b(am\s+i|is\s+this)\b", low) \
+           or re.search(r"\bwhere\s+am\s+i\b", low) \
+           or re.search(r"\bwhat(?:'?s| is)\s+(?:this|the)\s+(?:page|site|website|url)\b", low) \
+           or re.search(r"\bcurrent\s+(?:page|url|tab)\b", low):
+            return bc.where_am_i()
+        if re.search(r"\b(what|which|list|show)\b.*\btabs?\b.*\b(open|do\s+i\s+have)\b", low) \
+           or re.search(r"\blist\s+(?:my\s+)?tabs\b", low) \
+           or re.search(r"\bwhat\s+tabs\b", low):
+            return bc.list_tabs()
+
+        # ── tab management ──────────────────────────────────────────────
+        m = re.search(r"\bswitch\s+to\s+(?:the\s+)?(.+?)\s+tab\b", low) \
+            or re.search(r"\bgo\s+to\s+(?:the\s+)?(.+?)\s+tab\b", low)
+        if m:
+            return bc.switch_tab(m.group(1).strip())
+        if re.search(r"\bclose\s+(?:all\s+)?(?:the\s+)?other\s+tabs\b", low):
+            return bc.close_other_tabs()
+        if re.search(r"\b(close|shut)\s+(?:this\s+|the\s+|current\s+)?tab\b", low):
+            return bc.close_tab()
+        if re.search(r"\b(?:open|new)\s+(?:a\s+)?new\s+tab\b", low) \
+           or re.search(r"\bnew\s+tab\b", low):
+            return bc.new_tab()
+
+        # ── history / reload ────────────────────────────────────────────
+        if re.search(r"\bgo\s+back\b", low) and not re.search(r"\b(song|track|music)\b", low):
+            return bc.navigate_history("back")
+        if re.search(r"\bgo\s+forward\b", low):
+            return bc.navigate_history("forward")
+        if re.search(r"\b(reload|refresh)\s+(?:the\s+)?(?:page|tab|site)?\b", low):
+            return bc.reload_page()
+
+        # ── scrolling ───────────────────────────────────────────────────
+        if re.search(r"\bscroll\b", low):
+            if re.search(r"\b(top|beginning)\b", low):
+                return bc.scroll("top")
+            if re.search(r"\b(bottom|end)\b", low):
+                return bc.scroll("bottom")
+            return bc.scroll("up" if re.search(r"\bup\b", low) else "down")
+
+        # ── search the web ──────────────────────────────────────────────
+        m = re.search(r"\b(?:search|google|look\s+up)\s+(?:the\s+web\s+)?(?:for\s+)?(.+)", low)
+        if m:
+            q = re.sub(r"[?.!,]+$", "", m.group(1).strip())
+            if q and q not in _FOLDERS:
+                url, label = bc.resolve_target(q)
+                resp = bc.open_url(url, label)
+                # "Searching for X" reads better aloud than "Opening a search for X".
+                if resp.startswith("Opening") and label.startswith("a search"):
+                    return f"Searching for {q}."
+                return resp
+
+        # ── navigate to a site ──────────────────────────────────────────
+        m = (re.search(r"\b(?:go\s+to|pull\s+up|bring\s+up|visit|browse\s+to)\s+(.+)", low)
+             or re.search(r"\bnavigate\s+to\s+(.+)", low)
+             or re.search(r"\bopen\s+(.+)", low))
+        if m:
+            target = re.sub(r"[?.!,]+$", "", m.group(1).strip())
+            target = re.sub(r"^(?:the|a|an|my)\s+", "", target)
+            plain = re.sub(r"\s+(?:folder|directory)$", "", target).strip()
+            # Folders and real apps are NOT websites — let those routes win.
+            if plain in _FOLDERS or self._resolve_app(target):
+                return None
+            key = re.sub(r"\s+(?:website|site|page)$", "", target).strip().lower()
+            if key in bc.SITES or bc._DOMAIN_RE.match(target):
+                url, label = bc.resolve_target(target)
+                return bc.open_url(url, label)
+            return None      # unknown word → let app-launch report honestly
+
+        return None
 
     # ═══════════════════════════════════════════════════════════════════════
     # Maps: how far / how long / navigate

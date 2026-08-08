@@ -38,6 +38,7 @@ Nova has two parts:
     calendar_intents.py      calendar NL dispatch
     tools.py                 macOS system tools
     maps_engine.py           MapKit location / nearby / ETA (subprocess)
+    browser_control.py       Brave/Chrome/Safari: sites, tabs, history, scroll
     rag.py                   local document retrieval
     ws_server.py             HTTP :5001 + WS :8766 bridge
     training/                wake-model training kit (Colab)
@@ -71,6 +72,8 @@ Nova has two parts:
 **`rag.py`** — Local document retrieval via ChromaDB. Watches `~/Documents`, indexes supported file types (.txt, .md, .pdf, .py, .swift, .js, .json), stores embeddings locally. Enriches LLM context with relevant personal documents. Zero network calls — all on-device.
 
 **`maps_engine.py`** — Location, nearby search, and travel time via Apple MapKit. **Runs every MapKit call in a short-lived SUBPROCESS**: MapKit/CoreLocation deliver results on the MAIN queue, which the `nova-llm` worker thread never services — verified, an MKLocalSearch started from a worker thread hangs forever. The subprocess owns its own main thread, prints one JSON line, and gives us a hard timeout. Location needs a real app identity (headless auth stays `notDetermined`), so it only works under Nova.app with `NSLocationWhenInUseUsageDescription` + the location entitlement. See invariant 3 for the privacy tradeoff.
+
+**`browser_control.py`** — Brave / Chrome / Safari control. Picks whichever supported browser is RUNNING (Brave preferred) rather than hardcoding one, and never probes with `tell application "X"` — that would launch it. Chromium and Safari differ in vocabulary (`active tab` vs `current tab`, `title` vs `name`, native `go back` vs JavaScript-only), so everything goes through one adapter. Back/forward/reload work natively on Chromium. Scroll needs "Allow JavaScript from Apple Events" in the browser's Develop menu; when it's off Nova says so rather than pretending.
 
 **`tools.py`** — macOS system tools. App launch, volume control, battery status, web search, screenshot, system info. All deterministic — never touches the LLM. Easy to extend.
 
