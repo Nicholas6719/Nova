@@ -37,6 +37,7 @@ Nova has two parts:
     calendar_reminders.py    EventKit engine (pure functions)
     calendar_intents.py      calendar NL dispatch
     tools.py                 macOS system tools
+    maps_engine.py           MapKit location / nearby / ETA (subprocess)
     rag.py                   local document retrieval
     ws_server.py             HTTP :5001 + WS :8766 bridge
     training/                wake-model training kit (Colab)
@@ -68,6 +69,8 @@ Nova has two parts:
 **`fact_reconciler.py`** — The LLM slow path of passive learning. Runs once per conversation in wake mode, on the `nova-llm` thread, off the live path. Decides insert/update/delete as strict JSON, then validates: contradictory decisions collapse per key, and every value must be GROUNDED in what the user actually said (`_is_grounded`) so the small model can't fabricate detail it never heard.
 
 **`rag.py`** — Local document retrieval via ChromaDB. Watches `~/Documents`, indexes supported file types (.txt, .md, .pdf, .py, .swift, .js, .json), stores embeddings locally. Enriches LLM context with relevant personal documents. Zero network calls — all on-device.
+
+**`maps_engine.py`** — Location, nearby search, and travel time via Apple MapKit. **Runs every MapKit call in a short-lived SUBPROCESS**: MapKit/CoreLocation deliver results on the MAIN queue, which the `nova-llm` worker thread never services — verified, an MKLocalSearch started from a worker thread hangs forever. The subprocess owns its own main thread, prints one JSON line, and gives us a hard timeout. Location needs a real app identity (headless auth stays `notDetermined`), so it only works under Nova.app with `NSLocationWhenInUseUsageDescription` + the location entitlement. See invariant 3 for the privacy tradeoff.
 
 **`tools.py`** — macOS system tools. App launch, volume control, battery status, web search, screenshot, system info. All deterministic — never touches the LLM. Easy to extend.
 
@@ -147,7 +150,7 @@ NovaPersonality, APIKeyProvider; all of `Nova/Memory/` and `Nova/Tools/`;
 
 1. **Ports are 5001 (HTTP) and 8766 (WS).** These differ from Jarvis (3000/8765) intentionally so both apps can run simultaneously. Do not change them.
 2. **LLM n_ctx stays at 4096.** Do not raise the context window without explicit instruction.
-3. **No cloud dependencies.** Nova is fully local and private. Do not add any API keys, external HTTP calls, or cloud services.
+3. **No cloud dependencies — ONE narrow, documented exception.** Nova is local and private: no API keys, no third-party services, and the LLM/STT/TTS/memory NEVER leave the machine. The single exception is `maps_engine.py`: "how far is the nearest X" and travel times are Apple MapKit network lookups, and getting a location fix sends an approximate position to Apple. It is used only when the user asks a location question, is cached briefly, touches neither the LLM nor memory, and degrades gracefully to "open directions" when location is unavailable. Do not widen this: no other cloud service, no API keys.
 4. **Memory summarization runs on a daemon thread.** It must never block the main pipeline or the voice loop.
 5. **RAG loads in the background.** Queries must fail gracefully (return empty string) if the index is not yet ready.
 6. **TTS and LLM overlap.** The sentence-chunked streaming pipeline in `nova.py._stream_response` must not be changed to a blocking pattern.

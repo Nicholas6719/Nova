@@ -528,6 +528,12 @@ class VoiceAssistant:
             # to run only if the user confirms on the next turn.
             self._tool_confirm = self.tools.pending_confirm
             self.tools.pending_confirm = None
+            # A SOFT offer ("want me to pull up directions?") reuses the same
+            # one-shot slot as the calendar follow-up: yes runs it, anything
+            # else just drops it and routes normally.
+            if self.tools.pending_offer is not None:
+                self._calendar_offer = self.tools.pending_offer
+                self.tools.pending_offer = None
             self._respond(resp)
             return
 

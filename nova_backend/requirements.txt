@@ -39,6 +39,10 @@ websockets>=12.0
 # Used for EventKit calendar integration (implemented next phase)
 pyobjc-core>=10.0
 pyobjc-framework-EventKit>=10.0
+# Maps: location, nearby search, travel time (see maps_engine.py). This is the
+# one part of Nova that reaches Apple's network services.
+pyobjc-framework-CoreLocation>=10.0
+pyobjc-framework-MapKit>=10.0
 
 # ── Utilities ─────────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0

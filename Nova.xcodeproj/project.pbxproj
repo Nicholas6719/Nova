@@ -521,7 +521,7 @@
 				ENABLE_RESOURCE_ACCESS_CALENDARS = YES;
 				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
 				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
-				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = YES;
 				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -533,6 +533,8 @@
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Nova reads and manages your calendar events when you ask.";
 				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Nova reads and manages your reminders when you ask.";
 				INFOPLIST_KEY_NSRemindersUsageDescription = "Nova reads and manages your reminders when you ask.";
+				INFOPLIST_KEY_NSLocationUsageDescription = "Nova uses your location to answer questions like how far away the nearest store is.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Nova uses your location to answer questions like how far away the nearest store is.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -583,7 +585,7 @@
 				ENABLE_RESOURCE_ACCESS_CALENDARS = YES;
 				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
 				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
-				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = YES;
 				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -595,6 +597,8 @@
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Nova reads and manages your calendar events when you ask.";
 				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Nova reads and manages your reminders when you ask.";
 				INFOPLIST_KEY_NSRemindersUsageDescription = "Nova reads and manages your reminders when you ask.";
+				INFOPLIST_KEY_NSLocationUsageDescription = "Nova uses your location to answer questions like how far away the nearest store is.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Nova uses your location to answer questions like how far away the nearest store is.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;

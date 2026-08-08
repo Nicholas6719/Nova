@@ -16,6 +16,7 @@ Routing order inside match() (first hit wins — put SPECIFIC before GENERAL):
   9.  Running / frontmost apps
   10. Screenshot
   11. System info (model + chip)
+  11a Maps (how far / how long / navigate) — speaks the answer, offers directions
   11b Music control (Spotify / Apple Music) — before app launch
   12. Minimize / restore windows
   13. Finder folders          ← before app launch: "open downloads" is a folder
@@ -114,6 +115,9 @@ class NovaTools:
         self._on_announce = on_announce
         # Set to a zero-arg callable when the user must confirm before we act.
         self.pending_confirm: Optional[Callable[[], str]] = None
+        # SOFT follow-up ("want me to pull up directions?"). Unlike
+        # pending_confirm, a non-answer just drops it and routes normally.
+        self.pending_offer: Optional[Callable[[], str]] = None
         self._timers: dict[str, dict] = {}      # label -> {timer, kind, fires_at}
         self._timer_seq = 0
         self._lock = threading.Lock()
@@ -125,6 +129,7 @@ class NovaTools:
         """Return a response string if the text matches a tool intent, else None."""
         low = text.lower().strip()
         self.pending_confirm = None
+        self.pending_offer = None
 
         # ── 1. Mac power — CONFIRM FIRST, never act on the first utterance ──
         m = re.search(r"\b(shut\s*down|power\s*off|turn\s+off|restart|reboot|sleep)\b", low)
@@ -226,6 +231,11 @@ class NovaTools:
         # ── 11. System info ─────────────────────────────────────────────────
         if any(p in low for p in ("what mac", "what computer", "what machine", "system info")):
             return self._system_info()
+
+        # ── 11a. Maps: distance / travel time / navigation ──────────────────
+        resp = self._match_maps(low)
+        if resp is not None:
+            return resp
 
         # ── 11b. Music control (BEFORE app launch so "start the music" plays
         #         rather than opening an app called "the music") ─────────────
@@ -727,6 +737,120 @@ class NovaTools:
         subprocess.run(["osascript", "-e", f'tell application "{resolved}" to quit'],
                        capture_output=True)
         return f"Closing {resolved}."
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Maps: how far / how long / navigate
+    # ═══════════════════════════════════════════════════════════════════════
+    # "How long to the nearest CVS?" answers OUT LOUD without opening Maps, then
+    # offers directions — the answer is the point, not the map. `pending_offer`
+    # is picked up by nova.py exactly like the calendar follow-up.
+    _MODE_WORDS = ((r"\bwalk(?:ing)?\b", "walking"),
+                   (r"\b(transit|bus|train|subway|public\s+transport)\b", "transit"),
+                   (r"\b(driv(?:e|ing)|car)\b", "driving"))
+
+    def _travel_mode(self, low: str) -> str:
+        for pat, mode in self._MODE_WORDS:
+            if re.search(pat, low):
+                return mode
+        return "driving"
+
+    @staticmethod
+    def _clean_place(raw: str) -> str:
+        s = re.sub(r"[?.!,]+$", "", (raw or "").strip())
+        s = re.sub(r"^(the|a|an)\s+", "", s, flags=re.I)
+        s = re.sub(r"\s+(from here|from my location|by car|on foot|"
+                   r"driving|walking|by transit)$", "", s, flags=re.I)
+        return s.strip()
+
+    @staticmethod
+    def _spoken_place(s: str) -> str:
+        """Title-case a place for speech — routing lowercases the utterance, so
+        without this Nova says "directions to boston"."""
+        small = {"of", "the", "and", "at", "in", "on", "de", "la"}
+        words = [w for w in (s or "").split() if w]
+        return " ".join(
+            w if any(c.isupper() for c in w)                 # keep CVS, McDonald's
+            else (w if i and w.lower() in small else w.capitalize())
+            for i, w in enumerate(words))
+
+    def _match_maps(self, low: str) -> Optional[str]:
+        import maps_engine
+
+        # ── Distance / travel time, spoken (does NOT open Maps) ─────────
+        # Checked BEFORE navigation: "how long would it TAKE ME TO get to the
+        # nearest CVS" contains the words "take me to", which would otherwise
+        # be swallowed by the navigation pattern below.
+        m = (re.search(r"\bhow\s+long\s+(?:would\s+it\s+)?(?:take\s+)?(?:me\s+)?(?:to\s+)?"
+                       r"(?:get\s+to|drive\s+to|walk\s+to|reach)\s+(.+)", low)
+             or re.search(r"\bhow\s+(?:long|far)\s+(?:is\s+it\s+)?(?:to|from\s+here\s+to)\s+(.+)", low)
+             or re.search(r"\bhow\s+far\s+(?:away\s+)?is\s+(.+)", low)
+             or re.search(r"\b(?:where|how\s+close)\s+is\s+the\s+nearest\s+(.+)", low)
+             or re.search(r"\bnearest\s+(.+?)(?:\s+from\s+here)?$", low))
+        if m:
+            return self._maps_eta(low, m.group(1))
+
+        # ── Navigation: open Maps with the destination ──────────────────
+        m = (re.search(r"\b(?:navigate|directions?)\s+to\s+(.+)", low)
+             or re.search(r"\bgive\s+me\s+directions?\s+to\s+(.+)", low)
+             or re.search(r"\bhow\s+do\s+i\s+get\s+to\s+(.+)", low)
+             or re.search(r"\btake\s+me\s+to\s+(.+)", low))
+        if m:
+            place = self._clean_place(m.group(1))
+            # "take me to my downloads folder" is a Finder request, not a drive.
+            folder_key = re.sub(r"^my\s+", "", place)
+            folder_key = re.sub(r"\s+(?:folder|directory)$", "", folder_key).strip()
+            if not place or folder_key in _FOLDERS:
+                return None
+            mode = self._travel_mode(low)
+            spoken = self._spoken_place(place)
+            return (f"Opening directions to {spoken}." if maps_engine.open_directions(place, mode)
+                    else f"I couldn't open directions to {spoken}.")
+
+        return None
+
+    def _maps_eta(self, low: str, raw_place: str) -> Optional[str]:
+        """Speak how far/long away a place is, then offer directions."""
+        import maps_engine
+        place = self._clean_place(re.sub(r"^(?:the\s+)?nearest\s+", "", raw_place))
+        if not place:
+            return None
+        mode = self._travel_mode(low)
+
+        res = maps_engine.nearest(place, mode=mode)
+        if not res.get("ok"):
+            if res.get("error") == "no_location":
+                # Be useful anyway: we can still open directions without a fix.
+                sp = self._spoken_place(place)
+                self.pending_offer = lambda p=place, s=sp, md=mode: (
+                    f"Opening directions to {s}." if maps_engine.open_directions(p, md)
+                    else f"I couldn't open directions to {s}.")
+                return ("I don't have access to your location yet, so I can't "
+                        "measure the distance. You can enable it for Nova under "
+                        "Privacy and Security, Location Services. Want me to open "
+                        "directions instead?")
+            if res.get("error") == "no results":
+                return f"I couldn't find a {self._spoken_place(place)} nearby."
+            return f"I couldn't work out how far {place} is."
+
+        name = res.get("name") or place
+        miles = res.get("miles")
+        mins = res.get("minutes")
+        how = {"walking": "walking", "transit": "by transit"}.get(mode, "")
+        if mins is not None:
+            lead = (f"The nearest {name} is about {mins} minute"
+                    f"{'s' if mins != 1 else ''} away{(' ' + how) if how else ''}")
+            if miles:
+                lead += f", {miles} mile{'s' if miles != 1 else ''}"
+        else:
+            lead = f"The nearest {name} is about {miles} miles away"
+        addr = res.get("address")
+        lead += f", on {addr.split(',')[0]}." if addr else "."
+
+        # Offer directions — answered by nova.py's follow-up handler.
+        self.pending_offer = lambda p=name, md=mode: (
+            f"Opening directions to {p}." if maps_engine.open_directions(p, md)
+            else f"I couldn't open directions to {p}.")
+        return lead + " Want me to pull up directions?"
 
     # ═══════════════════════════════════════════════════════════════════════
     # Music control (Spotify + Apple Music)
