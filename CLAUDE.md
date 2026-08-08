@@ -39,6 +39,8 @@ Nova has two parts:
     tools.py                 macOS system tools
     maps_engine.py           MapKit location / nearby / ETA (subprocess)
     browser_control.py       Brave/Chrome/Safari: sites, tabs, history, scroll
+    file_manager.py          filesystem engine: search, read, move/copy/rename
+    file_intents.py          file NL dispatch: detect, disambiguate, confirm
     rag.py                   local document retrieval
     ws_server.py             HTTP :5001 + WS :8766 bridge
     training/                wake-model training kit (Colab)
@@ -75,6 +77,10 @@ Nova has two parts:
 
 **`browser_control.py`** — Brave / Chrome / Safari control. Picks whichever supported browser is RUNNING (Brave preferred) rather than hardcoding one, and never probes with `tell application "X"` — that would launch it. Chromium and Safari differ in vocabulary (`active tab` vs `current tab`, `title` vs `name`, native `go back` vs JavaScript-only), so everything goes through one adapter. Back/forward/reload work natively on Chromium. Scroll needs "Allow JavaScript from Apple Events" — for Chromium that is the PROFILE pref `browser.allow_javascript_apple_events` in `~/Library/Application Support/BraveSoftware/Brave-Browser/Default/Preferences` (not a `defaults write` key, and Brave must be CLOSED when editing it or it is overwritten on quit). Enabled 2026-08-08 and verified. If it is ever off, scroll explains how to enable it rather than pretending.
 
+**`file_manager.py`** — The filesystem engine. Search is three-pass and TCC-tolerant: Spotlight literal, Spotlight AND-tokens, then a direct walk of the user's common folders (Spotlight results are filtered per-process by macOS privacy, so `mdfind` can return nothing for a file plainly sitting on the Desktop). Permission errors are reported ONLY for top-level user folders — reporting every one made `~/Pictures/Photos Library.photoslibrary`, unreadable on every Mac, trigger a false "grant Nova folder access" on every miss. Nova's own project and data directories are PROTECTED: never surfaced as a candidate, and refused again at the filesystem call. Move and copy never overwrite. **There is deliberately no delete.**
+
+**`file_intents.py`** — Natural-language dispatch over `file_manager.py`. `detect_intent` is strict regex AND requires a distinctive search token to survive tokenizing, which is what keeps "open my photos" pointed at the Photos app instead of a file search. Extraction is fully deterministic (the 3B mangles "from Downloads to Documents"); the LLM is used only to summarize contents, at temperature 0 with an explicit no-arithmetic instruction after it invented a leftover-budget figure. Nothing on disk changes without an explicit spoken yes, and ambiguity is resolved by asking "which one?" BEFORE the confirmation rather than walking candidates one at a time. Runs on the `nova-llm` worker thread, so its `self.llm.generate` call is thread-safe.
+
 **`tools.py`** — macOS system tools. App launch, volume control, battery status, web search, screenshot, system info. All deterministic — never touches the LLM. Easy to extend.
 
 **`calendar_reminders.py`** — Apple Calendar & Reminders engine. Pure functions over EventKit (PyObjC), with an AppleScript fallback. Reads (today / this week / open reminders), writes (create event, create reminder), and edits (complete / delete / update by fuzzy title match). Zero side effects at import. Every function may raise RuntimeError — callers must catch. Ported from Jarvis, where it ran in production.
@@ -91,12 +97,14 @@ Nova has two parts:
 
 1. System commands — sleep / wake / mute (always intercepted first)
 2. Calendar follow-up offer — answers a "want to hear what's coming up?" with yes/no
+2b. Pending file question — "which one?" / "move it to Documents?" answered before routing
 3. Calendar / reminders intents — read / create / complete / delete / update (EventKit)
-4. Memory intents — remember / recall / update / forget
-5. Fast-path intents — greetings / date / time / repeat last response
-6. Tool intents — open app / volume / battery / search / screenshot
-7. RAG context enrichment — query personal documents for context
-8. LLM fallback — MLX streaming with sentence-chunked TTS overlap
+4. File intents — find / read / open / move / copy / rename
+5. Memory intents — remember / recall / update / forget
+6. Fast-path intents — greetings / date / time / repeat last response
+7. Tool intents — open app / volume / battery / search / screenshot
+8. RAG context enrichment — query personal documents for context
+9. LLM fallback — MLX streaming with sentence-chunked TTS overlap
 
 ---
 

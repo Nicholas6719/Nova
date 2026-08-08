@@ -23,6 +23,8 @@ nova_backend/
   memory.py         — SQLite: facts / episodes / conversations / user profile
   rag.py            — ChromaDB: local document retrieval (~/Documents)
   tools.py          — macOS tools: app launch, volume, battery, search, screenshot
+  file_manager.py   — Filesystem engine: search, read, move/copy/rename, guards
+  file_intents.py   — File NL dispatch: strict detection, disambiguation, confirm
   ws_server.py      — HTTP :5001 + WebSocket :8766 for SwiftUI communication
 ```
 
@@ -35,12 +37,14 @@ Wake word
   → STT (faster-whisper + webrtcvad VAD)
   → [1] System commands      (sleep / wake / mute)
   → [2] Calendar follow-up    (answers "want to hear what's coming up?")
+  → [2b] Pending file question ("which one?" / "move it to Documents?")
   → [3] Calendar intents      (read / create / complete / delete / update)
-  → [4] Memory intents        (remember / recall / update / forget)
-  → [5] Fast-path intents     (greeting / date / time / repeat)
-  → [6] Tool intents          (open app / volume / battery / search / screenshot)
-  → [7] RAG context enrichment
-  → [8] LLM (MLX streaming) → sentence chunking → TTS (Kokoro ONNX)
+  → [4] File intents          (find / read / open / move / copy / rename)
+  → [5] Memory intents        (remember / recall / update / forget)
+  → [6] Fast-path intents     (greeting / date / time / repeat)
+  → [7] Tool intents          (open app / volume / battery / search / screenshot)
+  → [8] RAG context enrichment
+  → [9] LLM (MLX streaming) → sentence chunking → TTS (Kokoro ONNX)
 ```
 
 ---
