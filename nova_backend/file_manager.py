@@ -416,7 +416,8 @@ def extract_text(filepath: str) -> tuple[str, Optional[str]]:
             with open(filepath, "rb") as fh:
                 raw = fh.read(_MAX_EXTRACT_CHARS * 2)
         except Exception as exc:
-            return "", f"I couldn't read that file. {exc}"
+            log.warning(f"read failed for {filepath}: {exc}")
+            return "", "I couldn't read that file."
         text = raw.decode("utf-8", errors="replace").strip()
         if not text:
             return "", f"{spoken_name(filepath)} is empty."
@@ -431,7 +432,10 @@ def extract_text(filepath: str) -> tuple[str, Optional[str]]:
             reader = pypdf.PdfReader(filepath)
             pages = [(pg.extract_text() or "") for pg in reader.pages[:_PDF_MAX_PAGES]]
         except Exception as exc:
-            return "", f"I couldn't open that PDF. {exc}"
+            # Never speak the raw exception: pypdf and python-docx both put the
+            # full absolute path in the message, and Nova reads its output aloud.
+            log.warning(f"PDF read failed for {filepath}: {exc}")
+            return "", "I couldn't open that PDF, it looks damaged."
         text = "\n".join(pages).strip()
         if not text:
             return "", (f"{spoken_name(filepath)} is a PDF with no selectable text, "
@@ -451,7 +455,8 @@ def extract_text(filepath: str) -> tuple[str, Optional[str]]:
                 for row in tbl.rows:
                     parts.append(" ".join(c.text for c in row.cells))
         except Exception as exc:
-            return "", f"I couldn't open that Word document. {exc}"
+            log.warning(f"docx read failed for {filepath}: {exc}")
+            return "", "I couldn't open that Word document, it looks damaged."
         text = "\n".join(parts).strip()
         if not text:
             return "", f"{spoken_name(filepath)} is empty."
@@ -510,7 +515,8 @@ def move_file(source_path: str, destination_path: str) -> tuple[bool, str]:
         shutil.move(str(src), str(dst))
         return True, str(dst)
     except Exception as exc:
-        return False, f"the move failed. {exc}"
+        log.warning(f"move failed {source_path} -> {destination_path}: {exc}")
+        return False, "the move failed"
 
 
 def copy_file(source_path: str, destination_path: str) -> tuple[bool, str]:
@@ -524,7 +530,8 @@ def copy_file(source_path: str, destination_path: str) -> tuple[bool, str]:
         shutil.copy2(str(src), str(dst))
         return True, str(dst)
     except Exception as exc:
-        return False, f"the copy failed. {exc}"
+        log.warning(f"copy failed {source_path} -> {destination_path}: {exc}")
+        return False, "the copy failed"
 
 
 def rename_file(filepath: str, new_name: str) -> tuple[bool, str]:
@@ -553,7 +560,8 @@ def rename_file(filepath: str, new_name: str) -> tuple[bool, str]:
         src.rename(target)
         return True, str(target)
     except Exception as exc:
-        return False, f"the rename failed. {exc}"
+        log.warning(f"rename failed {filepath} -> {new_name}: {exc}")
+        return False, "the rename failed"
 
 
 def reveal_in_finder(filepath: str) -> bool:
