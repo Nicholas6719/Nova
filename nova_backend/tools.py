@@ -16,6 +16,7 @@ Routing order inside match() (first hit wins — put SPECIFIC before GENERAL):
   9.  Running / frontmost apps
   10. Screenshot
   11. System info (model + chip)
+  11b Music control (Spotify / Apple Music) — before app launch
   12. Minimize / restore windows
   13. Finder folders          ← before app launch: "open downloads" is a folder
   14. Quit / close an app
@@ -177,7 +178,9 @@ class NovaTools:
         m = re.search(r"\b(un)?mute\b", low)
         if m and re.search(r"\b(audio|sound|speakers?|volume|mac|computer)\b", low):
             return self._mute_audio(mute=not bool(m.group(1)))
-        if "volume" in low:
+        # "music volume" / "Spotify volume" means the PLAYER's own volume — let
+        # it fall through to the music section rather than moving system audio.
+        if "volume" in low and not re.search(r"\b(music|spotify|song|track)\b", low):
             m = re.search(r"volume\s*(?:to|at)?\s*(\d{1,3})\b", low)
             if m:
                 return self._volume_set(int(m.group(1)))
@@ -223,6 +226,12 @@ class NovaTools:
         # ── 11. System info ─────────────────────────────────────────────────
         if any(p in low for p in ("what mac", "what computer", "what machine", "system info")):
             return self._system_info()
+
+        # ── 11b. Music control (BEFORE app launch so "start the music" plays
+        #         rather than opening an app called "the music") ─────────────
+        resp = self._match_music(low)
+        if resp is not None:
+            return resp
 
         # ── 12. Minimize / restore windows ──────────────────────────────────
         m = re.search(r"\b(?:minimi[sz]e|hide)\s+(?:the\s+|my\s+)?(.*)", low)
@@ -718,6 +727,271 @@ class NovaTools:
         subprocess.run(["osascript", "-e", f'tell application "{resolved}" to quit'],
                        capture_output=True)
         return f"Closing {resolved}."
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Music control (Spotify + Apple Music)
+    # ═══════════════════════════════════════════════════════════════════════
+    # The two apps differ in ways that matter, so everything goes through the
+    # adapters below rather than raw AppleScript at each call site:
+    #   duration  — Spotify reports MILLISECONDS, Music reports seconds
+    #   shuffle   — Spotify `shuffling` (bool), Music `shuffle enabled` (bool)
+    #   repeat    — Spotify `repeating` (bool), Music `song repeat` (off/one/all)
+    #   previous  — Music also has `back track` (restart-then-previous)
+    _PLAYERS = ("Spotify", "Music")     # preference order
+
+    def _running_player(self, launch_if_none: bool = False) -> Optional[str]:
+        """Which music app is running (Spotify preferred). Never auto-launches
+        unless asked — `tell application "X"` would otherwise silently start it."""
+        for app in self._PLAYERS:
+            r = subprocess.run(
+                ["osascript", "-e",
+                 f'tell application "System Events" to (name of processes) contains "{app}"'],
+                capture_output=True, text=True)
+            if r.stdout.strip() == "true":
+                return app
+        if launch_if_none:
+            subprocess.run(["open", "-a", "Spotify"], capture_output=True)
+            for _ in range(20):             # wait for it to accept AppleScript
+                time.sleep(0.5)
+                r = subprocess.run(
+                    ["osascript", "-e",
+                     'tell application "System Events" to (name of processes) contains "Spotify"'],
+                    capture_output=True, text=True)
+                if r.stdout.strip() == "true":
+                    time.sleep(1.0)
+                    return "Spotify"
+        return None
+
+    @staticmethod
+    def _osa(script: str) -> tuple[bool, str]:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        return r.returncode == 0, (r.stdout or "").strip()
+
+    def _player_get(self, app: str, prop: str) -> Optional[str]:
+        ok, out = self._osa(f'tell application "{app}" to get {prop}')
+        return out if ok else None
+
+    def _player_do(self, app: str, cmd: str) -> bool:
+        ok, _ = self._osa(f'tell application "{app}" to {cmd}')
+        return ok
+
+    def _now_playing(self, app: str) -> Optional[tuple]:
+        ok, out = self._osa(
+            f'tell application "{app}" to return (name of current track) & "||" & '
+            f'(artist of current track) & "||" & (player state as text)')
+        if not ok or "||" not in out:
+            return None
+        name, artist, state = (out.split("||") + ["", "", ""])[:3]
+        return name.strip(), artist.strip(), state.strip().lower()
+
+    def _track_seconds(self, app: str) -> tuple:
+        """(position, duration) in seconds — normalising Spotify's ms duration."""
+        pos = self._player_get(app, "player position")
+        dur = self._player_get(app, "duration of current track")
+        try:
+            pos = float(pos)
+        except (TypeError, ValueError):
+            pos = None
+        try:
+            dur = float(dur)
+            if app == "Spotify":
+                dur = dur / 1000.0
+        except (TypeError, ValueError):
+            dur = None
+        return pos, dur
+
+    @staticmethod
+    def _mmss(secs: float) -> str:
+        secs = int(round(secs))
+        m, s = divmod(max(0, secs), 60)
+        if m and s:
+            return f"{m} minute{'s' if m != 1 else ''} and {s} second{'s' if s != 1 else ''}"
+        if m:
+            return f"{m} minute{'s' if m != 1 else ''}"
+        return f"{s} second{'s' if s != 1 else ''}"
+
+    def _no_player(self) -> str:
+        return "Neither Spotify nor Apple Music is running."
+
+    def _match_music(self, low: str) -> Optional[str]:
+        """Music intents. Returns None when the phrase isn't about music, so
+        the rest of the tool router still gets a shot at it."""
+        MUSIC = r"(music|song|track|spotify|apple music|playback|tune)"
+
+        # ── what's playing ──────────────────────────────────────────────
+        if re.search(r"\bwhat(?:'?s| is)\s+(?:currently\s+)?playing\b", low) \
+           or re.search(r"\bwhat\s+song\s+is\s+(?:this|playing)\b", low) \
+           or re.search(r"\bwho\s+(?:sings|is\s+singing)\s+this\b", low) \
+           or re.search(r"\bname\s+of\s+(?:this|the)\s+song\b", low):
+            app = self._running_player()
+            if not app:
+                return self._no_player()
+            np = self._now_playing(app)
+            if not np or not np[0]:
+                return f"Nothing is playing in {self._say(app)} right now."
+            name, artist, state = np
+            verb = "Playing" if state == "playing" else "Paused on"
+            return f"{verb} {name}" + (f" by {artist}." if artist else ".")
+
+        # ── how much of the track is left ───────────────────────────────
+        if re.search(r"\bhow\s+(?:much\s+)?(?:long|time)\b.*\b(left|remaining)\b.*" + MUSIC, low) \
+           or re.search(r"\bhow\s+much\s+longer\b.*" + MUSIC, low) \
+           or re.search(r"\btime\s+left\s+(?:in|on)\s+(?:this|the)\s+" + MUSIC, low):
+            app = self._running_player()
+            if not app:
+                return self._no_player()
+            pos, dur = self._track_seconds(app)
+            if pos is None or dur is None:
+                return "I couldn't read the track position."
+            return f"{self._mmss(dur - pos)} left of {self._mmss(dur)}."
+
+        # ── transport: next / previous / restart ────────────────────────
+        if re.search(r"\b(next|skip)\b(\s+(the\s+)?(song|track))?\b", low) \
+           and not re.search(r"\bskip\s+(?:ahead|forward|back)\b", low):
+            app = self._running_player()
+            if not app:
+                return self._no_player()
+            self._player_do(app, "next track")
+            time.sleep(0.6)
+            np = self._now_playing(app)
+            return (f"Skipped to {np[0]}" + (f" by {np[1]}." if np[1] else ".")) if np and np[0] \
+                else "Skipped to the next track."
+        if re.search(r"\b(previous|last|go\s+back(?:\s+a)?)\b.*\b(song|track)\b", low) \
+           or re.search(r"\bplay\s+(?:the\s+)?(previous|last)\b", low):
+            app = self._running_player()
+            if not app:
+                return self._no_player()
+            self._player_do(app, "previous track")
+            time.sleep(0.6)
+            np = self._now_playing(app)
+            return (f"Back to {np[0]}" + (f" by {np[1]}." if np[1] else ".")) if np and np[0] \
+                else "Went back a track."
+        if re.search(r"\b(restart|start\s+over|from\s+the\s+(?:beginning|top)|replay)\b", low) \
+           and (re.search(MUSIC, low) or re.search(r"\bthis\b", low)):
+            app = self._running_player()
+            if not app:
+                return self._no_player()
+            self._player_do(app, "set player position to 0")
+            return "Starting the track over."
+
+        # ── seek ────────────────────────────────────────────────────────
+        m = re.search(r"\b(?:skip|jump|go|seek|fast[\s-]?forward)\s+(?:ahead\s+|forward\s+)?"
+                      r"(\d+)\s*(seconds?|secs?|minutes?|mins?)", low)
+        m_back = re.search(r"\b(?:skip|jump|go|rewind)\s+back(?:ward)?s?\s+"
+                           r"(\d+)\s*(seconds?|secs?|minutes?|mins?)", low)
+        if m or m_back:
+            app = self._running_player()
+            if not app:
+                return self._no_player()
+            src = m_back or m
+            amt = int(src.group(1)) * (60 if src.group(2).startswith(("min", "minute")) else 1)
+            if m_back:
+                amt = -amt
+            pos, dur = self._track_seconds(app)
+            if pos is None:
+                return "I couldn't read the track position."
+            new = max(0, pos + amt)
+            if dur is not None:
+                new = min(new, dur - 1)
+            self._player_do(app, f"set player position to {new:.1f}")
+            return f"{'Skipped ahead' if amt > 0 else 'Went back'} {self._mmss(abs(amt))}."
+
+        # ── shuffle / repeat ────────────────────────────────────────────
+        m = re.search(r"\b(shuffle|repeat|loop)\b", low)
+        if m:
+            app = self._running_player()
+            if not app:
+                return self._no_player()
+            want_off = bool(re.search(r"\b(off|stop|disable|turn\s+off|no)\b", low))
+            on = "false" if want_off else "true"
+            word = "off" if want_off else "on"
+            if m.group(1) == "shuffle":
+                prop = "shuffling" if app == "Spotify" else "shuffle enabled"
+                if self._player_do(app, f"set {prop} to {on}"):
+                    return f"Shuffle {word}."
+                return "I couldn't change shuffle."
+            if app == "Spotify":
+                ok = self._player_do(app, f"set repeating to {on}")
+            else:
+                ok = self._player_do(app, f'set song repeat to {"off" if want_off else "all"}')
+            return f"Repeat {word}." if ok else "I couldn't change repeat."
+
+        # ── music volume (the PLAYER's own volume, not system audio) ─────
+        if re.search(r"\b(music|spotify|song)\b", low) and "volume" in low:
+            app = self._running_player()
+            if not app:
+                return self._no_player()
+            mv = re.search(r"(\d{1,3})", low)
+            if mv:
+                lvl = max(0, min(100, int(mv.group(1))))
+                self._player_do(app, f"set sound volume to {lvl}")
+                # Read back: Spotify quantises its volume scale (asking for 30
+                # lands on 29), so report what it ACTUALLY is.
+                time.sleep(0.2)
+                actual = self._player_get(app, "sound volume")
+                try:
+                    lvl = int(float(actual))
+                except (TypeError, ValueError):
+                    pass
+                return f"{self._say(app)} volume set to {lvl}."
+            cur = self._player_get(app, "sound volume")
+            try:
+                cur_i = int(float(cur))
+            except (TypeError, ValueError):
+                return "I couldn't read the music volume."
+            if re.search(r"\b(up|louder|increase|raise)\b", low):
+                new = min(100, cur_i + 15)
+            elif re.search(r"\b(down|quieter|lower|decrease|softer)\b", low):
+                new = max(0, cur_i - 15)
+            else:
+                return f"{self._say(app)} volume is at {cur_i}."
+            self._player_do(app, f"set sound volume to {new}")
+            return f"{self._say(app)} volume {'up' if new > cur_i else 'down'} to {new}."
+
+        # ── pause / resume / play ───────────────────────────────────────
+        if re.search(r"\b(pause|hold)\b", low) and (re.search(MUSIC, low)
+                                                    or re.fullmatch(r"\s*pause\s*\.?\s*", low)):
+            app = self._running_player()
+            if not app:
+                return self._no_player()
+            self._player_do(app, "pause")
+            return "Paused."
+        if re.search(r"\b(stop)\b.*" + MUSIC, low):
+            app = self._running_player()
+            if not app:
+                return self._no_player()
+            self._player_do(app, "pause")
+            return "Stopped the music."
+        if re.search(r"\b(resume|unpause|keep\s+playing)\b", low) \
+           or re.search(r"\b(play|start)\b.*" + MUSIC, low) \
+           or re.fullmatch(r"\s*play\s*\.?\s*", low):
+            # This is the one place we'll start a player: asking to play music
+            # with nothing running clearly means "start some music".
+            app = self._running_player(launch_if_none=True)
+            if not app:
+                return "I couldn't start Spotify."
+            # VERIFY it actually started. Spotify's `play` sometimes no-ops
+            # (e.g. resuming after a pause with no active device), and reporting
+            # "Playing X" while it sits paused is a fake success.
+            self._player_do(app, "play")
+            time.sleep(0.7)
+            if (self._player_get(app, "player state") or "").lower() != "playing":
+                self._player_do(app, "playpause")     # nudge it
+                time.sleep(0.7)
+            state = (self._player_get(app, "player state") or "").lower()
+            np = self._now_playing(app)
+            if state != "playing":
+                return (f"I couldn't get {self._say(app)} to start playing. "
+                        "It may need a track or device selected.")
+            if np and np[0]:
+                return f"Playing {np[0]}" + (f" by {np[1]}." if np[1] else ".")
+            return f"Playing in {self._say(app)}."
+
+        return None
+
+    @staticmethod
+    def _say(app: str) -> str:
+        return "Apple Music" if app == "Music" else app
 
     # ── Window management ─────────────────────────────────────────────────
     def _visible_apps(self) -> list:
