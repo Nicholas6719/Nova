@@ -5,7 +5,7 @@ macOS backend · Entry point
 
 Pipeline:
   Wake word → STT (faster-whisper + webrtcvad)
-  → Fast-path routing → Memory → Calendar/Reminders → Tools
+  → Fast-path routing → Calendar/Reminders → Files → Memory → Tools
   → LLM (MLX Llama, streaming) → Sentence-chunked TTS (Kokoro ONNX)
 
 Communication with SwiftUI:
@@ -105,12 +105,14 @@ class VoiceAssistant:
     Routing order (first match wins):
       1. System commands  (sleep / wake / mute)
       2. Calendar follow-up offer ("want to hear what's coming up?" -> yes/no)
+      2b. Pending file question ("which one?" / "move it to Documents?")
       3. Calendar intents (read/create/complete/delete/update events + reminders)
-      4. Memory intents   (remember / recall / update / forget)
-      5. Fast-path intents (greeting / date / time / repeat)
-      6. Tool intents     (open app / volume / battery / search / screenshot)
-      7. RAG context enrichment
-      8. LLM fallback     (MLX streaming + sentence-chunked TTS)
+      4. File intents     (find / read / open / move / copy / rename)
+      5. Memory intents   (remember / recall / update / forget)
+      6. Fast-path intents (greeting / date / time / repeat)
+      7. Tool intents     (open app / volume / battery / search / screenshot)
+      8. RAG context enrichment
+      9. LLM fallback     (MLX streaming + sentence-chunked TTS)
     """
 
     # ── Init ──────────────────────────────────────────────────────────────────────
@@ -152,6 +154,7 @@ class VoiceAssistant:
         self._init_rag()
         self._init_tools()
         self._init_calendar()
+        self._init_files()
         self._init_ws()
         log.info("Nova ready.")
 
@@ -258,6 +261,13 @@ class VoiceAssistant:
         # which is already on that thread), so passing self.llm is thread-safe.
         from calendar_intents import NovaCalendar
         self.calendar = NovaCalendar(self.config, self.llm, self.memory)
+
+    def _init_files(self) -> None:
+        # Same thread story as the calendar: file handling is dispatched from
+        # _handle_turn_impl on the nova-llm worker, so its summarization call
+        # into self.llm is thread-safe.
+        from file_intents import NovaFiles
+        self.files = NovaFiles(self.config, self.llm)
 
     def _init_ws(self) -> None:
         from ws_server import NovaWSServer
@@ -492,6 +502,20 @@ class VoiceAssistant:
                 return
             # Otherwise: not a reply to the offer — fall through to normal routing.
 
+        # ── 2b. File question Nova is waiting on ─────────────────────────────
+        # "Which one?" or "Move it to Documents?" — answered here so the reply
+        # can't be re-read as a fresh command. resolve_pending returns None for
+        # anything that isn't an answer, which drops the question and lets the
+        # utterance route normally. Nothing on disk changes without a clear yes.
+        if self.files.has_pending():
+            resp = self.files.resolve_pending(text)
+            if resp is not None:
+                if self.files.pending_offer is not None:
+                    self._calendar_offer = self.files.pending_offer
+                    self.files.pending_offer = None
+                self._respond(resp)
+                return
+
         # ── 3. Calendar / reminders intents ──────────────────────────────────
         # BEFORE memory + fast-path + tools: detection is strict (needs an
         # unambiguous calendar word), and running it early stops the greedy
@@ -509,19 +533,34 @@ class VoiceAssistant:
             self._respond(resp)
             return
 
-        # ── 4. Memory intents ────────────────────────────────────────────────
+        # ── 4. File management intents ───────────────────────────────────────
+        # BEFORE memory and tools. Tools' web-search rule ("find X") and app
+        # launch ("open X") would both swallow file phrasing, and memory recall
+        # ("what's my X") would answer "I don't have your resume stored yet".
+        # Detection is strict — it needs a file word AND a searchable name —
+        # so ordinary conversation still falls straight through.
+        file_intent = self.files.detect_intent(text)
+        if file_intent is not None:
+            resp = self.files.handle(file_intent, text)
+            if self.files.pending_offer is not None:
+                self._calendar_offer = self.files.pending_offer
+                self.files.pending_offer = None
+            self._respond(resp)
+            return
+
+        # ── 5. Memory intents ────────────────────────────────────────────────
         resp = self._handle_memory_intent(text)
         if resp is not None:
             self._respond(resp)
             return
 
-        # ── 5. Fast-path intents ─────────────────────────────────────────────
+        # ── 6. Fast-path intents ─────────────────────────────────────────────
         resp = self._fast_path(text)
         if resp is not None:
             self._respond(resp)
             return
 
-        # ── 6. Tool intents ──────────────────────────────────────────────────
+        # ── 7. Tool intents ──────────────────────────────────────────────────
         resp = self.tools.match(text)
         if resp is not None:
             # A destructive tool (power) asks first and hands back the action
@@ -537,7 +576,7 @@ class VoiceAssistant:
             self._respond(resp)
             return
 
-        # ── 7. RAG context enrichment ────────────────────────────────────────
+        # ── 8. RAG context enrichment ────────────────────────────────────────
         rag_ctx = ""
         if self._rag_ready and self._rag:
             try:
@@ -545,7 +584,7 @@ class VoiceAssistant:
             except Exception:
                 pass
 
-        # ── 8. LLM fallback (streaming) ──────────────────────────────────────
+        # ── 9. LLM fallback (streaming) ──────────────────────────────────────
         self.set_state("thinking")
         self._stream_response(text, rag_context=rag_ctx)
 

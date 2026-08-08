@@ -30,7 +30,12 @@ openwakeword>=0.6.0
 
 # ── RAG — local vector store ──────────────────────────────────────────────────────
 chromadb>=0.5.0
-pypdf>=4.0.0                     # PDF reading for RAG ingestion
+pypdf>=4.0.0                     # PDF reading for RAG ingestion + spoken file summaries
+
+# ── File management (see file_manager.py) ─────────────────────────────────────────
+# Optional. Without it Nova says it can't read Word documents rather than
+# guessing at their contents; everything else in file management still works.
+python-docx>=1.1.0
 
 # ── WebSocket server ──────────────────────────────────────────────────────────────
 websockets>=12.0
