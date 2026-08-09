@@ -683,7 +683,12 @@ class VoiceAssistant:
             return f"Today is {datetime.now().strftime('%A')}."
 
         # Repeat last response
-        if any(p in low for p in ("say that again", "repeat that", "what did you say")):
+        # "what did you JUST say" is the natural phrasing and used to miss,
+        # because the literal list required "what did you say" with nothing
+        # in between.
+        if any(p in low for p in ("say that again", "repeat that", "come again")) \
+           or re.search(r"what did you (?:just )?say", low) \
+           or re.search(r"repeat (?:that|yourself|it)", low):
             return self._last_response or "I haven't said anything yet."
 
         return None

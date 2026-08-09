@@ -1038,8 +1038,12 @@ class NovaTools:
             if not np or not np[0]:
                 return f"Nothing is playing in {self._say(app)} right now."
             name, artist, state = np
-            verb = "Playing" if state == "playing" else "Paused on"
-            return f"{verb} {name}" + (f" by {artist}." if artist else ".")
+            by = f" by {artist}" if artist else ""
+            if state == "playing":
+                return f"Playing {name}{by}."
+            # NOT "Paused on X" — spoken aloud that sounds like Nova just
+            # paused it, when this is only a status report.
+            return f"{name}{by}, currently paused."
 
         # ── how much of the track is left ───────────────────────────────
         if re.search(r"\bhow\s+(?:much\s+)?(?:long|time)\b.*\b(left|remaining)\b.*" + MUSIC, low) \

@@ -83,6 +83,33 @@ def build_prompt(convo_text: str, known_facts: str) -> str:
     return _INSTRUCTION.format(convo=convo_text, known=known_facts or "(none yet)")
 
 
+# The 3B emits the right FIELDS with the wrong PUNCTUATION distressingly often:
+#   ["action":"insert","category":"routine","key":"guitar_lesson", ...]   ← no braces
+#   ["action":"insert","category":"allergy","key":"shellfish", ...}       ← mismatched
+# Both are invalid JSON, so a strict parse dropped the fact SILENTLY. Measured:
+# 3 of 4 fact-bearing sentences were lost this way, including an allergy. Since
+# the schema is fixed and tiny, we salvage by scanning the fields in order and
+# starting a new record at each "action" — punctuation is irrelevant to meaning.
+_FIELD_RE = re.compile(
+    r'"(action|category|key|value)"\s*:\s*"((?:[^"\\]|\\.)*)"'
+)
+
+
+def _salvage_objects(text: str) -> list[dict]:
+    """Recover decision records from malformed JSON by reading the fields."""
+    out: list[dict] = []
+    current: dict = {}
+    for field, value in _FIELD_RE.findall(text):
+        # A new "action" starts a new record.
+        if field == "action" and current:
+            out.append(current)
+            current = {}
+        current[field] = value.replace('\\"', '"')
+    if current:
+        out.append(current)
+    return out
+
+
 def parse_decisions(raw: str) -> list[dict]:
     """Parse the model output into a list of validated decision dicts. Defensive:
     finds the first JSON array, ignores malformed entries, never raises."""
@@ -90,14 +117,23 @@ def parse_decisions(raw: str) -> list[dict]:
         return []
     # Grab the first [...] block, tolerating any preamble the model adds.
     match = re.search(r"\[.*\]", raw, re.DOTALL)
-    if not match:
-        return []
+    blob = match.group(0) if match else raw
+
+    data: list = []
     try:
-        data = json.loads(match.group(0))
+        loaded = json.loads(blob)
+        if isinstance(loaded, list):
+            data = loaded
+        elif isinstance(loaded, dict):
+            data = [loaded]
     except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
+        data = []
+
+    if not data:
+        # Strict JSON failed (or produced nothing) — salvage the fields.
+        data = _salvage_objects(blob)
+        if data:
+            log.info(f"reconciler: salvaged {len(data)} record(s) from malformed JSON")
 
     out = []
     for item in data:

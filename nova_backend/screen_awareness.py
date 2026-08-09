@@ -161,19 +161,34 @@ def discard(path: Optional[str]) -> None:
 # Window structure — deterministic, always correct, no model involved
 # ═══════════════════════════════════════════════════════════════════════════
 def frontmost_app() -> Optional[str]:
+    """The app the user is actually working in.
+
+    A transient system overlay can hold focus for a moment — a notification
+    banner made Nova answer "you're in UserNotificationCenter", which is
+    literally true and completely useless. When focus is on system chrome we
+    fall back to the frontmost REAL window instead.
+    """
+    name = None
     try:
         from AppKit import NSWorkspace
         app = NSWorkspace.sharedWorkspace().frontmostApplication()
-        return str(app.localizedName()) if app else None
+        name = str(app.localizedName()) if app else None
     except Exception as exc:
         log.warning(f"frontmost app lookup failed: {exc}")
-        return None
+
+    if name and name not in _CHROME_OWNERS:
+        return name
+    for owner, _ in visible_windows():
+        return owner
+    return name
 
 
 # Owners that are always on screen but are never what the user means.
 _CHROME_OWNERS = {
     "Window Server", "Dock", "SystemUIServer", "Control Center",
-    "Notification Center", "Spotlight", "TextInputMenuAgent", "universalaccessd",
+    "Notification Center", "NotificationCenter", "UserNotificationCenter",
+    "Spotlight", "TextInputMenuAgent", "universalaccessd", "loginwindow",
+    "Screenshot", "CoreServicesUIAgent", "AirPlayUIAgent",
 }
 
 

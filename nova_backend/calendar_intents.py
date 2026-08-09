@@ -50,6 +50,13 @@ _CALENDAR_WORD_RE = re.compile(
 )
 
 
+# Measured: asked to summarize a real reminder, the 3B appended "This is a
+# critical deadline, so be sure to submit your reflection exactly as written"
+# — advice that appears nowhere in the data. Reads must report, never counsel.
+_NO_EDITORIAL = ("Report ONLY what is listed. Do not add advice, "
+                 "encouragement, urgency, warnings, or commentary of your own. ")
+
+
 class NovaCalendar:
     def __init__(self, config: dict, llm, memory) -> None:
         self.config = config
@@ -642,7 +649,7 @@ class NovaCalendar:
             "them naturally and conversationally, the way a sharp assistant "
             "would say it out loud, not a list. They are all today, so give the "
             "time of each (for example 'at 7 AM'); do NOT state the date or day "
-            "of week. Do not invent events. Keep it to one to three sentences.\n\n"
+            "of week. Do not invent events. " + _NO_EDITORIAL + "Keep it to one to three sentences.\n\n"
             + "\n".join(lines)
         )
         text = self._llm_silent(prompt, max_tokens=200)
@@ -667,8 +674,8 @@ class NovaCalendar:
             "naturally and conversationally, not a list.\n\n"
             "CRITICAL RULES:\n"
             "Read the day of week and time for each event EXACTLY as given in "
-            "the input. Do not change AM to PM. Do not invent events. Keep it "
-            "to two to five sentences.\n\n"
+            "the input. Do not change AM to PM. Do not invent events. " + _NO_EDITORIAL +
+            "Keep it to two to five sentences.\n\n"
             + "\n".join(lines)
         )
         text = self._llm_silent(prompt, max_tokens=260)
@@ -813,7 +820,8 @@ class NovaCalendar:
             "conversationally, not a list.\n\n"
             "CRITICAL RULES:\n"
             "Mention them in the given order. Do not invent reminders. " + rule +
-            " Keep it brief, one to four sentences.\n\n" + "\n".join(lines)
+            " " + _NO_EDITORIAL +
+            "Keep it brief, one to four sentences.\n\n" + "\n".join(lines)
         )
         text = self._llm_silent(prompt, max_tokens=220)
         return text or self._template_reminders(reminders, with_dates, when_label)
