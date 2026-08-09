@@ -107,12 +107,13 @@ class VoiceAssistant:
       2. Calendar follow-up offer ("want to hear what's coming up?" -> yes/no)
       2b. Pending file question ("which one?" / "move it to Documents?")
       3. Calendar intents (read/create/complete/delete/update events + reminders)
-      4. File intents     (find / read / open / move / copy / rename)
-      5. Memory intents   (remember / recall / update / forget)
-      6. Fast-path intents (greeting / date / time / repeat)
-      7. Tool intents     (open app / volume / battery / search / screenshot)
-      8. RAG context enrichment
-      9. LLM fallback     (MLX streaming + sentence-chunked TTS)
+      4. Screen awareness (what's on my screen / what app am I in)
+      5. File intents     (find / read / open / move / copy / rename)
+      6. Memory intents   (remember / recall / update / forget)
+      7. Fast-path intents (greeting / date / time / repeat)
+      8. Tool intents     (open app / volume / battery / search / screenshot)
+      9. RAG context enrichment
+      10. LLM fallback    (MLX streaming + sentence-chunked TTS)
     """
 
     # ── Init ──────────────────────────────────────────────────────────────────────
@@ -155,8 +156,29 @@ class VoiceAssistant:
         self._init_tools()
         self._init_calendar()
         self._init_files()
+        self._init_screen()
         self._init_ws()
+        self._verify_engines()
         log.info("Nova ready.")
+
+    # Every engine the router dereferences in _handle_turn_impl. A missing one
+    # is fatal: it raises on EVERY turn, so Nova starts, connects, and then
+    # fails silently on everything the user says. That happened — `screen` was
+    # added to the router while its `_init_screen()` call never made it into
+    # __init__, and the behaviour suite missed it because the test harness
+    # initialized engines by hand. Fail loudly at startup instead.
+    _REQUIRED_ENGINES = ("stt", "llm", "tts", "memory", "tools",
+                         "calendar", "files", "screen", "ws")
+
+    def _verify_engines(self) -> None:
+        missing = [name for name in self._REQUIRED_ENGINES
+                   if getattr(self, name, None) is None]
+        if missing:
+            raise RuntimeError(
+                "Nova cannot start: routing depends on engines that were never "
+                f"initialized: {', '.join(missing)}. Add the matching "
+                "_init_<name>() call to VoiceAssistant.__init__."
+            )
 
     def _init_stt(self) -> None:
         log.info("Loading STT (faster-whisper)…")

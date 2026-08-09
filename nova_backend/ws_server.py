@@ -167,12 +167,23 @@ class NovaWSServer:
 
                 if self.path == "/api/message":
                     content = (data.get("content") or "").strip()
-                    if content:
-                        threading.Thread(
-                            target=server_ref.on_text_message,
-                            args=(content,),
-                            daemon=True,
-                        ).start()
+                    if not content:
+                        # Do NOT report success for a no-op. This used to answer
+                        # {"ok": true} when the field was missing or misnamed, so
+                        # a caller posting {"text": ...} saw a 200 and silently
+                        # got nothing — which read like a broken pipeline rather
+                        # than a bad request.
+                        self._json(
+                            {"ok": False,
+                             "error": "missing 'content' (a non-empty string)"},
+                            status=400,
+                        )
+                        return
+                    threading.Thread(
+                        target=server_ref.on_text_message,
+                        args=(content,),
+                        daemon=True,
+                    ).start()
                     self._json({"ok": True})
 
                 elif self.path == "/api/mute":
@@ -190,9 +201,9 @@ class NovaWSServer:
                 self.send_header("Access-Control-Allow-Headers", "Content-Type")
                 self.end_headers()
 
-            def _json(self, payload: dict):
+            def _json(self, payload: dict, status: int = 200):
                 body = json.dumps(payload).encode()
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Access-Control-Allow-Origin", "*")
