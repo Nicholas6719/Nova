@@ -51,3 +51,9 @@ pyobjc-framework-MapKit>=10.0
 
 # ── Utilities ─────────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0
+
+# Screen awareness — Apple Vision OCR + window list, fully on-device.
+# Pure PyObjC bindings: no model download, no runtime, no network.
+# NOTE: do NOT add the `moondream` package. 2.x silently calls a cloud API,
+# and 0.0.6 pins huggingface-hub/tokenizers to versions mlx_lm cannot import.
+pyobjc-framework-Vision>=12.2.1

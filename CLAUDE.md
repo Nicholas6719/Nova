@@ -41,6 +41,7 @@ Nova has two parts:
     browser_control.py       Brave/Chrome/Safari: sites, tabs, history, scroll
     file_manager.py          filesystem engine: search, read, move/copy/rename
     file_intents.py          file NL dispatch: detect, disambiguate, confirm
+    screen_awareness.py      window list + Vision OCR: "what's on my screen"
     rag.py                   local document retrieval
     ws_server.py             HTTP :5001 + WS :8766 bridge
     training/                wake-model training kit (Colab)
@@ -79,6 +80,8 @@ Nova has two parts:
 
 **`file_manager.py`** — The filesystem engine. Search is three-pass and TCC-tolerant: Spotlight literal, Spotlight AND-tokens, then a direct walk of the user's common folders (Spotlight results are filtered per-process by macOS privacy, so `mdfind` can return nothing for a file plainly sitting on the Desktop). Permission errors are reported ONLY for top-level user folders — reporting every one made `~/Pictures/Photos Library.photoslibrary`, unreadable on every Mac, trigger a false "grant Nova folder access" on every miss. Nova's own project and data directories are PROTECTED: never surfaced as a candidate, and refused again at the filesystem call. Move and copy never overwrite. **There is deliberately no delete.**
 
+**`screen_awareness.py`** — "What's on my screen?" answered from GROUND TRUTH, never a guess: the frontmost app (NSWorkspace), real window titles (`CGWindowListCopyWindowInfo`), and the text actually on screen (Apple Vision OCR, on-device). The LLM only characterizes the OCR text and never sees the window list — measured, the 3B kept attaching one app's window title to another, so the "you're in X, on Y" lead is DETERMINISTIC. Deliberately not a vision model: Moondream 0.5B produced filler and the 2B invented a keyboard and mouse that weren't on screen, and it pins huggingface-hub/tokenizers to versions `mlx_lm` can't import. **The permission trap:** `screencapture` does NOT fail without Screen Recording permission, it writes a valid PNG of just the wallpaper — so permission is always preflighted with `CGPreflightScreenCaptureAccess` and declined honestly. "What app am I in" needs no permission and works regardless. The screenshot is deleted in a `finally` on every path; contents are never logged, stored, or transmitted.
+
 **`file_intents.py`** — Natural-language dispatch over `file_manager.py`. `detect_intent` is strict regex AND requires a distinctive search token to survive tokenizing, which is what keeps "open my photos" pointed at the Photos app instead of a file search. Extraction is fully deterministic (the 3B mangles "from Downloads to Documents"); the LLM is used only to summarize contents, at temperature 0 with an explicit no-arithmetic instruction after it invented a leftover-budget figure. Nothing on disk changes without an explicit spoken yes, and ambiguity is resolved by asking "which one?" BEFORE the confirmation rather than walking candidates one at a time. Runs on the `nova-llm` worker thread, so its `self.llm.generate` call is thread-safe.
 
 **`tools.py`** — macOS system tools. App launch, volume control, battery status, web search, screenshot, system info. All deterministic — never touches the LLM. Easy to extend.
@@ -99,12 +102,13 @@ Nova has two parts:
 2. Calendar follow-up offer — answers a "want to hear what's coming up?" with yes/no
 2b. Pending file question — "which one?" / "move it to Documents?" answered before routing
 3. Calendar / reminders intents — read / create / complete / delete / update (EventKit)
-4. File intents — find / read / open / move / copy / rename
-5. Memory intents — remember / recall / update / forget
-6. Fast-path intents — greetings / date / time / repeat last response
-7. Tool intents — open app / volume / battery / search / screenshot
-8. RAG context enrichment — query personal documents for context
-9. LLM fallback — MLX streaming with sentence-chunked TTS overlap
+4. Screen awareness — what's on my screen / what app am I in
+5. File intents — find / read / open / move / copy / rename
+6. Memory intents — remember / recall / update / forget
+7. Fast-path intents — greetings / date / time / repeat last response
+8. Tool intents — open app / volume / battery / search / screenshot
+9. RAG context enrichment — query personal documents for context
+10. LLM fallback — MLX streaming with sentence-chunked TTS overlap
 
 ---
 
@@ -199,10 +203,13 @@ The MLX model (~2GB) downloads automatically on first run.
 
 ## Not Built Yet
 
-1. Proactive notifications — background monitor for upcoming events / due reminders
-2. Barge-in over speakers — needs acoustic echo cancellation (see branch `feat/barge-in`;
+1. Describing IMAGES (photos) — screen awareness reads text and windows, it does not
+   describe pictures. `file_intents` still says "I can't see inside images yet".
+   Needs a real vision model; see screen_awareness.py for why Moondream was rejected.
+2. Proactive notifications — background monitor for upcoming events / due reminders
+3. Barge-in over speakers — needs acoustic echo cancellation (see branch `feat/barge-in`;
    measured: the wake model's score collapses to ~0 once Nova's own voice reaches the mic,
    so this is NOT a tuning problem). Works on headphones today.
-3. UI overhaul — deliberately late, after capabilities are concrete
-4. iOS app — far back burner, separate on-device architecture
+4. UI overhaul — deliberately late, after capabilities are concrete
+5. iOS app — far back burner, separate on-device architecture
 
