@@ -1,14 +1,12 @@
 {
   "_comment": "Nova backend configuration. Edit freely. Ports differ from Jarvis (3000/8765) so both can run simultaneously.",
-
   "llm": {
     "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
     "max_tokens": 512,
     "temperature": 0.7,
     "context_window": 4096,
-    "_note": "For higher quality at ~2x latency, swap to mlx-community/Llama-3.1-8B-Instruct-4bit. n_ctx is fixed at 4096 — do not raise without testing."
+    "_note": "For higher quality at ~2x latency, swap to mlx-community/Llama-3.1-8B-Instruct-4bit. n_ctx is fixed at 4096 \u2014 do not raise without testing."
   },
-
   "stt": {
     "model": "base.en",
     "language": "en",
@@ -18,12 +16,24 @@
     "min_speech_duration_s": 0.5,
     "command_max_duration_s": 15.0
   },
-
   "tts": {
     "primary": "kokoro",
     "fallback": "macos_say",
     "kokoro_voice": "af_nova",
-    "kokoro_voice_blend": [["af_aoede", 0.5], ["af_bella", 0.35], ["af_heart", 0.15]],
+    "kokoro_voice_blend": [
+      [
+        "af_aoede",
+        0.5
+      ],
+      [
+        "af_bella",
+        0.35
+      ],
+      [
+        "af_heart",
+        0.15
+      ]
+    ],
     "_voice_note": "kokoro_voice_blend is Nova's custom designed voice (warm/round/calm). Weighted blend of stock Kokoro voices. Remove/empty it to fall back to the single kokoro_voice.",
     "macos_say_voice": "Ava (Premium)",
     "rate_multiplier": 0.98,
@@ -31,10 +41,12 @@
     "stream_while_generating": true,
     "_note": "stream_while_generating: speak each sentence as the LLM produces it (Nova starts talking on sentence 1). If playback ever starves/crackles, set false to fall back to generate-fully-then-speak. post_utterance_delay_s: settle time before the mic re-opens so Nova doesn't hear its own tail."
   },
-
   "wake_word": {
     "enabled": true,
-    "keywords": ["nova", "hey nova"],
+    "keywords": [
+      "nova",
+      "hey nova"
+    ],
     "conversation_timeout_s": 15.0,
     "engine": "openwakeword",
     "oww_model_path": "nova.onnx",
@@ -43,27 +55,30 @@
     "oww_vad_threshold": 0.5,
     "_note": "engine: 'transcript' (legacy Whisper scan) or 'openwakeword' (neural, noise-robust). Stays 'transcript' until the trained nova.onnx is validated, then flip to 'openwakeword'. oww_* tune the neural detector: threshold=per-window score to count as a hit, trigger_level=consecutive hits to fire, vad_threshold=Silero speech gate (0 disables). After Nova replies it stays in conversation mode (no wake word) until conversation_timeout_s of silence."
   },
-
   "server": {
     "http_port": 5001,
     "ws_port": 8766
   },
-
   "user": {
     "name": "Nicholas",
     "address_as": "Nicholas",
     "_note": "Change address_as to 'sir' or any preferred form of address."
   },
-
   "memory": {
     "max_recent_turns": 20,
     "summarize_after_turns": 50,
     "rag_enabled": true,
     "rag_docs_dir": "~/Documents"
   },
-
   "calendar": {
     "natural_confirmations": false,
     "_note": "Reads are always summarized by the LLM (natural voice, with a deterministic template fallback). natural_confirmations=true also runs create/reminder confirmations through the LLM (~4-6s slower); false uses fast deterministic templates."
+  },
+  "screen": {
+    "enabled": true,
+    "min_confidence": 0.35,
+    "max_ocr_lines": 80,
+    "max_tokens": 90,
+    "_note": "Screen awareness reads real window titles + Vision OCR, fully on-device. Describing the screen needs Screen Recording permission for the APP BUNDLE; 'what app am I in' works without it."
   }
 }

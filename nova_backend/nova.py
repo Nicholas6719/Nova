@@ -269,6 +269,14 @@ class VoiceAssistant:
         from file_intents import NovaFiles
         self.files = NovaFiles(self.config, self.llm)
 
+    def _init_screen(self) -> None:
+        # Same thread story as the calendar and files: dispatched from
+        # _handle_turn_impl on the nova-llm worker, so the summarization call
+        # into self.llm is thread-safe. Nothing loads at import — the Vision
+        # framework is imported lazily inside ocr().
+        from screen_awareness import NovaScreen
+        self.screen = NovaScreen(self.config, self.llm)
+
     def _init_ws(self) -> None:
         from ws_server import NovaWSServer
         self.ws = NovaWSServer(
@@ -533,7 +541,16 @@ class VoiceAssistant:
             self._respond(resp)
             return
 
-        # ── 4. File management intents ───────────────────────────────────────
+        # ── 4. Screen awareness ──────────────────────────────────────────────
+        # BEFORE files: "screen" is not a file stopword, so "read my screen"
+        # would otherwise become a file search for a document named "screen".
+        # Detection is strict — it needs an explicit screen phrase.
+        screen_intent = self.screen.detect_intent(text)
+        if screen_intent is not None:
+            self._respond(self.screen.handle(screen_intent, text))
+            return
+
+        # ── 5. File management intents ───────────────────────────────────────
         # BEFORE memory and tools. Tools' web-search rule ("find X") and app
         # launch ("open X") would both swallow file phrasing, and memory recall
         # ("what's my X") would answer "I don't have your resume stored yet".
@@ -548,19 +565,19 @@ class VoiceAssistant:
             self._respond(resp)
             return
 
-        # ── 5. Memory intents ────────────────────────────────────────────────
+        # ── 6. Memory intents ────────────────────────────────────────────────
         resp = self._handle_memory_intent(text)
         if resp is not None:
             self._respond(resp)
             return
 
-        # ── 6. Fast-path intents ─────────────────────────────────────────────
+        # ── 7. Fast-path intents ─────────────────────────────────────────────
         resp = self._fast_path(text)
         if resp is not None:
             self._respond(resp)
             return
 
-        # ── 7. Tool intents ──────────────────────────────────────────────────
+        # ── 8. Tool intents ──────────────────────────────────────────────────
         resp = self.tools.match(text)
         if resp is not None:
             # A destructive tool (power) asks first and hands back the action
@@ -576,7 +593,7 @@ class VoiceAssistant:
             self._respond(resp)
             return
 
-        # ── 8. RAG context enrichment ────────────────────────────────────────
+        # ── 9. RAG context enrichment ────────────────────────────────────────
         rag_ctx = ""
         if self._rag_ready and self._rag:
             try:
@@ -584,7 +601,7 @@ class VoiceAssistant:
             except Exception:
                 pass
 
-        # ── 9. LLM fallback (streaming) ──────────────────────────────────────
+        # ── 10. LLM fallback (streaming) ──────────────────────────────────────
         self.set_state("thinking")
         self._stream_response(text, rag_context=rag_ctx)
 
