@@ -17,6 +17,7 @@ Run: python nova.py
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -35,6 +36,15 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("nova")
+
+# Priorities on the single MLX worker queue. Lower runs first.
+_PRIO_TURN       = 0    # the user is waiting on this
+_PRIO_BACKGROUND = 1    # reconciliation and friends
+
+# How many unintelligible turns in a row before conversation mode gives up.
+# 1 was the old behaviour and it ended the conversation on Nova's own audio
+# tail; too high and a noisy room keeps the mic open indefinitely.
+_MAX_EMPTY_TURNS = 3
 
 # ── Paths ─────────────────────────────────────────────────────────────────────────
 ROOT     = Path(__file__).parent
@@ -196,7 +206,15 @@ class VoiceAssistant:
         # loop (main thread) and text input (HTTP/WS threads) submit turns to it
         # via a queue, so MLX is never touched off-thread.
         self.llm: Optional["object"] = None
-        self._llm_queue: "queue.Queue[tuple]" = queue.Queue()
+        # PRIORITY queue, not FIFO. A user turn and the wake-mode fact
+        # reconciliation share this thread (MLX is thread-local, so everything
+        # must run here). Measured: a reconcile pass blocks for ~2.4s, and with
+        # a plain FIFO the user's next turn queued BEHIND it — so speaking again
+        # right after a conversation ended felt sluggish. User turns now jump
+        # ahead of background work. The tie-breaker counter is required because
+        # the payloads are callables and are not comparable.
+        self._llm_queue: "queue.PriorityQueue[tuple]" = queue.PriorityQueue()
+        self._llm_seq = itertools.count()
         self._llm_ready = threading.Event()
         self._llm_thread = threading.Thread(
             target=self._llm_worker, daemon=True, name="nova-llm"
@@ -218,7 +236,7 @@ class VoiceAssistant:
         self._llm_ready.set()
 
         while True:
-            job, done = self._llm_queue.get()
+            _prio, _seq, job, done = self._llm_queue.get()
             try:
                 job()
             except Exception:
@@ -234,15 +252,21 @@ class VoiceAssistant:
         completion (so the wake loop doesn't resume mid-response); text input
         returns immediately and receives results over the WebSocket."""
         done = threading.Event() if wait else None
-        self._llm_queue.put((lambda: self._handle_turn_impl(text), done))
+        self._llm_queue.put(
+            (_PRIO_TURN, next(self._llm_seq),
+             lambda: self._handle_turn_impl(text), done)
+        )
         if done is not None:
             done.wait()
 
-    def _submit_job(self, fn, wait: bool = False) -> None:
+    def _submit_job(self, fn, wait: bool = False,
+                    priority: int = None) -> None:
         """Enqueue an arbitrary LLM job (e.g. wake-mode reconciliation) onto the
-        MLX worker thread. Off the live path; not user-facing."""
+        MLX worker thread. Off the live path; not user-facing, so it runs at
+        BACKGROUND priority and never delays a turn the user is waiting on."""
         done = threading.Event() if wait else None
-        self._llm_queue.put((fn, done))
+        prio = _PRIO_BACKGROUND if priority is None else priority
+        self._llm_queue.put((prio, next(self._llm_seq), fn, done))
         if done is not None:
             done.wait()
 
@@ -354,6 +378,7 @@ class VoiceAssistant:
 
     def _main_loop(self) -> None:
         in_conversation = False   # once awake, keep listening without the wake word
+        empty_turns = 0           # consecutive unintelligible turns
         while True:
             if self.is_muted or not self.is_awake:
                 in_conversation = False
@@ -372,6 +397,7 @@ class VoiceAssistant:
                 if not wake_detected:
                     continue
                 just_woke = True
+                empty_turns = 0
             else:
                 just_woke = False
 
@@ -392,6 +418,7 @@ class VoiceAssistant:
                     log.info("Conversation timed out — returning to wake mode.")
                     self._end_conversation()
                     in_conversation = False
+                    empty_turns = 0
                     continue
                 # Woke but heard nothing usable — just re-listen for the wake word.
                 continue
@@ -402,13 +429,27 @@ class VoiceAssistant:
             if just_woke:
                 text = self._strip_wake_prefix(text)
             if not text or not text.strip():
-                # Bare wake phrase / no command. Stay in conversation so the user
-                # can just speak, but don't get stuck: fall back to wake on repeat.
+                # An empty transcription is NOT the user leaving. After Nova
+                # speaks, the mic routinely catches its own tail or a room noise:
+                # VAD fires, a fragment is recorded, and Whisper returns nothing.
+                # Ending the conversation on the FIRST one dropped him back to
+                # wake mode the instant Nova finished answering — and, because
+                # every end fires a reconciliation pass, it also queued LLM work
+                # that slowed his next turn. Tolerate a few, then give up so we
+                # can never get stuck listening to a noisy room forever.
                 if in_conversation:
-                    self._end_conversation()
-                    in_conversation = False
+                    empty_turns += 1
+                    if empty_turns >= _MAX_EMPTY_TURNS:
+                        log.info(f"{empty_turns} unintelligible turns — "
+                                 "returning to wake mode.")
+                        self._end_conversation()
+                        in_conversation = False
+                    else:
+                        log.info(f"Heard nothing usable ({empty_turns}/"
+                                 f"{_MAX_EMPTY_TURNS}) — still listening.")
                 continue
 
+            empty_turns = 0        # a real utterance resets the tolerance
             log.info(f"[user] {text}")
             self.memory.add_turn("user", text)
             self._session_turns.append({"role": "user", "content": text})

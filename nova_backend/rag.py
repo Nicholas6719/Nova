@@ -13,6 +13,7 @@ query() returns relevant text chunks for LLM context enrichment.
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -31,19 +32,65 @@ class NovaRAG:
         self.docs_dir  = docs_dir
         index_dir.mkdir(parents=True, exist_ok=True)
 
-        import chromadb
-        self._client = chromadb.PersistentClient(path=str(index_dir))
-        self._collection = self._client.get_or_create_collection(
-            name="nova_docs",
-            metadata={"hnsw:space": "cosine"},
-        )
-        log.info(
-            f"RAG collection: {self._collection.count()} chunks indexed"
-        )
+        self._open_collection()
 
         # Initial ingestion + periodic re-scan
         t = threading.Thread(target=self._ingest_loop, daemon=True)
         t.start()
+
+    def _open_collection(self, _retry: bool = True) -> None:
+        """Open the Chroma collection, rebuilding it once if it is corrupt.
+
+        The index is DERIVED data — every chunk can be re-read from the user's
+        documents — so a damaged index is a rebuild, not a loss. Chroma has no
+        concurrent-writer support, and two Nova backends pointed at the same
+        directory (an app instance plus a manually started one) leaves it
+        raising `Failed to apply logs to the hnsw segment writer` forever. Left
+        alone that silently disables RAG for good, since every later load hits
+        the same corrupt files.
+        """
+        import chromadb
+
+        try:
+            self._client = chromadb.PersistentClient(path=str(self.index_dir))
+            self._collection = self._client.get_or_create_collection(
+                name="nova_docs",
+                metadata={"hnsw:space": "cosine"},
+            )
+            log.info(f"RAG collection: {self._collection.count()} chunks indexed")
+            return
+        except Exception as exc:
+            if not _retry:
+                raise
+            log.warning(f"RAG index unreadable ({exc}); rebuilding from scratch.")
+
+        # Move the damaged index aside rather than deleting outright, so a bad
+        # diagnosis is recoverable, then start clean. The stale copy from a
+        # previous rebuild is what we discard.
+        try:
+            self._client = None
+            self._collection = None
+            # Chroma caches one system per path, so simply constructing a new
+            # PersistentClient for the same directory hands back the SAME broken
+            # system — the retry then fails even against an empty directory.
+            # Measured exactly that. Drop the cache before reopening.
+            try:
+                from chromadb.api.shared_system_client import SharedSystemClient
+                SharedSystemClient.clear_system_cache()
+            except Exception as exc:
+                log.debug(f"could not clear chroma system cache: {exc}")
+            broken = self.index_dir.with_name(self.index_dir.name + ".broken")
+            if broken.exists():
+                shutil.rmtree(broken, ignore_errors=True)
+            self.index_dir.rename(broken)
+            self.index_dir.mkdir(parents=True, exist_ok=True)
+            log.warning(f"Damaged RAG index moved to {broken.name}; "
+                        "it will re-ingest in the background.")
+        except Exception as exc:
+            log.error(f"Could not reset the RAG index: {exc}")
+            raise
+
+        self._open_collection(_retry=False)
 
     # ── Query ─────────────────────────────────────────────────────────────────────
     def query(self, text: str, n_results: int = 3) -> str:
