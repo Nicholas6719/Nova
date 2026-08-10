@@ -46,6 +46,19 @@ _PRIO_BACKGROUND = 1    # reconciliation and friends
 # tail; too high and a noisy room keeps the mic open indefinitely.
 _MAX_EMPTY_TURNS = 3
 
+# An imperative that survived every handler. The verbs are ones Nova either
+# performs deterministically or cannot perform at all — so if one reaches the
+# LLM stage, the honest answer is "I can't", never the model's guess.
+_ACTION_REQUEST_RE = re.compile(
+    r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+    r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+    r"(?:go\s+ahead\s+and\s+)?"
+    r"(?:open|close|shut|quit|launch|play|pause|resume|skip|type|send|write|"
+    r"click|press|move|copy|rename|delete|erase|scroll|drag|install|"
+    r"uninstall|download|upload|print|email|text|message|call|order|buy)\b",
+    re.I,
+)
+
 # ── Paths ─────────────────────────────────────────────────────────────────────────
 ROOT     = Path(__file__).parent
 DATA_DIR = Path(
@@ -148,6 +161,7 @@ class VoiceAssistant:
         # Transcript of the CURRENT conversation (user+assistant), used by the
         # wake-mode memory reconciliation pass. Reset when a conversation ends.
         self._session_turns: list[dict] = []
+        self._turn_was_command = False
 
         # Shared microphone gate. Set = capture allowed; cleared = mic paused.
         # A voice assistant must not record while it speaks — both to avoid
@@ -464,6 +478,7 @@ class VoiceAssistant:
             log.info(f"[user] {text}")
             self.memory.add_turn("user", text)
             self._session_turns.append({"role": "user", "content": text})
+            self._turn_was_command = False
             self.ws.send_message("user", text)
             # Run on the MLX worker thread and wait: capture must not resume
             # until the response (and its TTS) is done, or it self-captures.
@@ -478,6 +493,17 @@ class VoiceAssistant:
                 # Otherwise stay in conversation mode — the user and Nova are
                 # talking; only silence (Phase 2 timeout) returns us to wake mode.
                 in_conversation = True
+
+    def _mark_turn_was_command(self) -> None:
+        """Drop the just-recorded user turn from the learning transcript.
+
+        Called from _respond, i.e. whenever a deterministic stage answered.
+        "Open Brave" and "close downloads" say nothing durable about Nicholas,
+        and letting the reconciler chew on them produced pure garbage facts.
+        """
+        self._turn_was_command = True
+        if self._session_turns and self._session_turns[-1].get("role") == "user":
+            self._session_turns.pop()
 
     def _end_conversation(self) -> None:
         """Called when the conversation ends and Nova returns to wake mode.
@@ -667,6 +693,23 @@ class VoiceAssistant:
             self._respond(resp)
             return
 
+        # ── 8b. Unsupported ACTION request ───────────────────────────────────
+        # Reaching this point means no handler claimed the utterance. If it is
+        # phrased as an ACTION ("open the coding projects folder", "type this
+        # and send it", "close downloads"), then by definition Nova cannot do
+        # it — and the LLM must never be the one to answer, because it says it
+        # already did. Measured: told to open a folder it cannot open, the 3B
+        # replied "I've opened the coding projects folder for you." A system
+        # prompt rule cut that from 4 cases to 1; only refusing deterministically
+        # makes it zero.
+        if _ACTION_REQUEST_RE.match(text):
+            log.info(f"[unsupported-action] {text}")
+            self._respond(
+                "I can't do that one yet. I'll tell you when I can, rather "
+                "than pretend I did it."
+            )
+            return
+
         # ── 9. RAG context enrichment ────────────────────────────────────────
         rag_ctx = ""
         if self._rag_ready and self._rag:
@@ -712,7 +755,11 @@ class VoiceAssistant:
             return
         self._last_response = text
         self.memory.add_turn("assistant", text)
-        self._session_turns.append({"role": "assistant", "content": text})
+        # Deliberately NOT added to _session_turns. This is the deterministic
+        # command path; only real conversation is worth learning from. Feeding
+        # commands to the reconciler is how the memory DB ended up holding
+        # ('adjective', 'adjective', 'open,brave,brave,brave,brave').
+        self._mark_turn_was_command()
         self.ws.send_message("assistant", text)
         log.info(f"[nova] {text}")
         self.set_state("speaking")
@@ -744,12 +791,23 @@ class VoiceAssistant:
         if words and words.issubset(allowed):
             return f"{_time_of_day_greeting()}, {name}."
 
-        # Date
-        if low in self._DATE_PHRASES or ("what" in low and "date" in low):
+        # Date and/or time. WORD-BOUNDARY matching, and compound requests are
+        # answered in full. Substring tests used to route "what's 10 TIMES 10
+        # minus 4" to the clock, and "what's the date and what time is it?"
+        # answered only the date.
+        wants_date = bool(re.search(r"\bdate\b|\bwhat day is it\b|\btoday'?s date\b", low))
+        wants_time = bool(re.search(r"\btime\b", low)) and not re.search(
+            r"\btimes\b|\btimer\b|\btime\s+left\b|\bhow\s+many\s+times\b", low)
+        # Only a genuine ASK, not any sentence mentioning the words.
+        asking = bool(re.match(r"\s*(?:hey\s+|nova[, ]\s*)?(?:what|when|tell me)\b", low)) \
+            or low in self._DATE_PHRASES or low in self._TIME_PHRASES
+        if asking and wants_date and wants_time:
+            now = datetime.now()
+            return (f"Today is {_spoken_date(now)}, and it's {_spoken_time(now)}.")
+        if asking and wants_date:
             return f"Today is {_spoken_date(datetime.now())}."
 
-        # Time
-        if low in self._TIME_PHRASES or ("what" in low and "time" in low and "date" not in low):
+        if asking and wants_time:
             return f"It's {_spoken_time(datetime.now())}."
 
         # Day of week
@@ -807,7 +865,11 @@ class VoiceAssistant:
     # Memory intents
     # ═════════════════════════════════════════════════════════════════════════════
     _SAVE_RE    = re.compile(r"remember (?:that )?my ([\w][\w ]*?) is (.+)", re.I)
-    _RECALL_RE  = re.compile(r"what(?:'?s| is) my ([\w][\w ]*?)[\s.?]*$", re.I)
+    # "who's my favorite superhero" missed entirely and fell to the LLM, which
+    # invented an answer ("Deadpool") for a fact Nova was supposed to know.
+    # People ask about people with WHO, and about things with WHAT.
+    _RECALL_RE  = re.compile(
+        r"(?:what|who)(?:'?s| is|'?re| are)\s+my\s+([\w][\w ]*?)[\s.?!]*$", re.I)
     _UPDATE_RE  = re.compile(r"actually (?:my ([\w][\w ]*?) is |it'?s )(.+)", re.I)
     _FORGET_RE  = re.compile(r"forget (?:that )?my ([\w][\w ]*?)$", re.I)
 

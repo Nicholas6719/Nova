@@ -168,6 +168,51 @@ _GROUNDING_STOPWORDS = frozenset({
 })
 
 
+# Grammatical categories are not facts. The 3B, handed a stream of commands,
+# produced ('adjective', 'adjective', 'open,brave,brave,brave,brave') — it had
+# nothing personal to extract, so it started labelling parts of speech. A fact
+# must be ABOUT Nicholas, not about the words he used.
+_JUNK_CATEGORIES = {
+    "adjective", "adjectives", "noun", "nouns", "verb", "verbs", "adverb",
+    "pronoun", "word", "words", "phrase", "sentence", "command", "commands",
+    "query", "request", "action", "instruction", "text", "misc", "other",
+    "unknown", "none", "n/a",
+}
+
+# Words that only ever appear because he was giving an ORDER, never because he
+# was telling Nova something about himself.
+_COMMAND_WORDS = {
+    "open", "close", "quit", "launch", "start", "run", "search", "google",
+    "play", "pause", "skip", "stop", "set", "show", "type", "send", "move",
+    "copy", "rename", "delete", "scroll", "click", "mute", "unmute",
+}
+
+
+def _is_junk(category: str, key: str, value: str) -> bool:
+    """Reject facts that describe the utterance rather than the user."""
+    cat = (category or "").strip().lower()
+    k = (key or "").strip().lower()
+    v = (value or "").strip().lower()
+    if not v:
+        return True
+    if cat in _JUNK_CATEGORIES or k in _JUNK_CATEGORIES:
+        return True
+    # NOTE: value == key is NOT junk. "allergy/peanuts/peanuts" is a legitimate
+    # shape and appears in this module's own few-shot examples; memory.py owns
+    # the degenerate-value policy. Only a value echoing the CATEGORY is empty.
+    if v == cat:
+        return True
+    # A bare comma/space list built out of command words is a parse artifact,
+    # not something he told Nova about himself.
+    tokens = [t for t in re.split(r"[,\s]+", v) if t]
+    if tokens and all(t in _COMMAND_WORDS for t in tokens):
+        return True
+    # Repetition of a single token ("brave,brave,brave") is never a fact.
+    if len(tokens) >= 3 and len(set(tokens)) == 1:
+        return True
+    return False
+
+
 def _is_grounded(value: str, convo_text: str) -> bool:
     """True if every substantive word in an extracted value actually traces back
     to what the user said.
@@ -223,6 +268,9 @@ def apply_decisions(memory: "NovaMemory", decisions: list[dict],
     for (cat, key), value in upserts.items():
         # Never store detail the user didn't actually say.
         if convo_text and not _is_grounded(value, convo_text):
+            continue
+        if _is_junk(cat, key, value):
+            log.info(f"reconciler: rejected junk fact {cat}/{key}={value!r}")
             continue
         try:
             memory.upsert_fact(cat, key, value, source="llm")

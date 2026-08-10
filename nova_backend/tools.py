@@ -263,10 +263,19 @@ class NovaTools:
         m = re.search(r"\b(?:open|show|go\s+to|take\s+me\s+to|bring\s+up|pull\s+up)\s+"
                       r"(?:me\s+)?(?:my\s+|the\s+)?(.+)", low)
         if m:
-            target = re.sub(r"\s+(?:folder|directory)$", "",
-                            m.group(1).strip().rstrip(".")).strip()
+            target = m.group(1).strip().rstrip(".")
+            # Strip the trailing politeness FIRST, or "coding projects folder
+            # for me" never loses the word "folder" and matches nothing.
+            target = re.sub(r"\s+(?:for|please)\s+me$|\s+please$", "", target).strip()
+            target = re.sub(r"\s+(?:folder|directory)$", "", target).strip()
             if target in _FOLDERS:
                 return self._open_folder(target)
+            # A REAL subfolder ("open the coding projects folder"). Without this
+            # the request reached the LLM, which cheerfully said it had opened
+            # a folder it never touched.
+            found = self._find_folder(target)
+            if found is not None:
+                return self._open_found_folder(found)
 
         # ── 14. Quit / close an app ─────────────────────────────────────────
         m = re.search(r"\b(?:quit|close|exit|shut)\s+(?:down\s+)?(?:the\s+|my\s+)?(.+)", low)
@@ -1383,6 +1392,40 @@ class NovaTools:
         subprocess.run(["open", str(path)], check=False)
         label = "Trash" if key == "trash" else key.replace(" folder", "").title()
         return f"Opening {label}."
+
+    # Where a spoken folder name might actually live. Shallow on purpose: this
+    # answers "open my X folder", not "search my whole disk".
+    _FOLDER_SEARCH_ROOTS = ("~/Documents", "~/Desktop", "~/Downloads",
+                            "~/Pictures", "~/Movies", "~/Music", "~")
+
+    @classmethod
+    def _find_folder(cls, spoken: str):
+        """Find a real directory matching a spoken name, or None.
+
+        Spoken names lose punctuation, so "coding projects" has to match
+        "Coding_Projects" and "HTML Files".
+        """
+        want = re.sub(r"[^a-z0-9]", "", (spoken or "").lower())
+        if not want or len(want) < 3:
+            return None
+        for root in cls._FOLDER_SEARCH_ROOTS:
+            base = Path(root).expanduser()
+            if not base.is_dir():
+                continue
+            try:
+                for entry in base.iterdir():
+                    if not entry.is_dir() or entry.name.startswith("."):
+                        continue
+                    if re.sub(r"[^a-z0-9]", "", entry.name.lower()) == want:
+                        return entry
+            except (PermissionError, OSError):
+                continue
+        return None
+
+    def _open_found_folder(self, path) -> str:
+        subprocess.run(["open", str(path)], check=False)
+        time.sleep(0.6)
+        return f"Opening {path.name.replace('_', ' ')}."
 
     def _web_search(self, query: str) -> str:
         url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
