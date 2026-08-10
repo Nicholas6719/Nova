@@ -74,6 +74,10 @@ class STTEngine:
         # Shared gate with the TTS engine: cleared while Nova is speaking so we
         # ignore mic audio during playback (avoids self-capture and the CoreAudio
         # input/output device conflict). If unset, defaults to always-open.
+        # Why the last record_command() returned nothing: "ok", "silence" (the
+        # user stayed quiet — a real timeout) or "too_quiet" (audio WAS captured
+        # but was unusable). The caller must not confuse the last two.
+        self.last_capture_reason = "ok"
         self._mic_gate = mic_gate if mic_gate is not None else threading.Event()
         if mic_gate is None:
             self._mic_gate.set()
@@ -282,6 +286,7 @@ class STTEngine:
             # Give up if the user never started speaking within start_timeout_s.
             if (not speaking and not priming and start_deadline is not None
                     and time.time() > start_deadline):
+                self.last_capture_reason = "silence"
                 return None
             if priming:
                 frame = priming.pop(0)
@@ -337,8 +342,17 @@ class STTEngine:
                 break
 
         audio = np.frombuffer(buf, dtype=np.int16)
-        if len(audio) == 0 or _rms(audio) < NOISE_FLOOR_RMS:
+        if len(audio) == 0:
+            # Nothing was ever captured — the user really was silent.
+            self.last_capture_reason = "silence"
             return None
+        if _rms(audio) < NOISE_FLOOR_RMS:
+            # Something WAS captured, it was just too faint to use: Nova's own
+            # audio tail, a cough, a fan. That is NOT the user leaving, and
+            # conversation mode must not treat it as a timeout.
+            self.last_capture_reason = "too_quiet"
+            return None
+        self.last_capture_reason = "ok"
         return audio
 
     # ── Transcription ─────────────────────────────────────────────────────────────

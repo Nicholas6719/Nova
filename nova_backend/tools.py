@@ -276,12 +276,24 @@ class NovaTools:
                 return resp
 
         # ── 15. App launch ──────────────────────────────────────────────────
-        m = re.search(r"(?:open|launch|start|run)\s+(.+)", low)
+        # ANCHORED to the start of the utterance. An unanchored search matched a
+        # launch verb anywhere in a sentence, so "I wanted to start getting into
+        # them" (about comics) became "I couldn't find an app called getting
+        # into them". Measured: 5 of 9 ordinary sentences were hijacked.
+        m = re.match(r"\s*(?:hey\s+|please\s+)?"
+                     r"(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?"
+                     r"(?:open|launch|start|run|fire\s+up|pull\s+up)\s+(.+)", low)
         if m:
-            return self._open_app(m.group(1).strip().rstrip("."))
+            resp = self._open_app(m.group(1).strip().rstrip("."))
+            if resp is not None:   # None => not a real app; keep routing
+                return resp
 
         # ── 16. Web search ──────────────────────────────────────────────────
-        m = re.search(r"(?:search|look up|google|look for|find)\s+(?:for\s+)?(.+)", low)
+        # Anchored for the same reason as app launch: an unanchored "find" or
+        # "look for" turned ordinary sentences into web searches.
+        m = re.match(r"\s*(?:hey\s+|please\s+)?"
+                     r"(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?"
+                     r"(?:search|look\s+up|google)\s+(?:for\s+)?(.+)", low)
         if m:
             return self._web_search(m.group(1).strip().rstrip("."))
 
@@ -741,7 +753,7 @@ class NovaTools:
                 n += 1
         return n
 
-    def _open_app(self, name: str) -> str:
+    def _open_app(self, name: str) -> Optional[str]:
         """Launch an app and VERIFY the user can actually see it.
 
         `open -a` returning 0 only means the app bundle was found — not that it
@@ -754,9 +766,14 @@ class NovaTools:
         target = resolved or name.title()
         was_running = self._app_running(target)
 
+        # Unknown name => None, so the utterance keeps routing and ends up in
+        # normal conversation instead of "I couldn't find an app called ...".
+        # Only an explicitly resolved alias is worth an error message.
         result = subprocess.run(["open", "-a", target], capture_output=True, text=True)
         if result.returncode != 0:
-            return f"I couldn't find an app called {name}."
+            if resolved:
+                return f"I couldn't open {target}."
+            return None
 
         # It was found — now wait for the process to actually exist.
         started = False

@@ -413,9 +413,20 @@ class VoiceAssistant:
 
             if command_audio is None:
                 if in_conversation:
-                    # Silence during conversation → return to wake mode quietly,
-                    # and let Nova review the conversation for anything to learn.
-                    log.info("Conversation timed out — returning to wake mode.")
+                    # record_command returns None for TWO different things, and
+                    # conflating them ended the conversation the instant Nova
+                    # stopped speaking: its own audio tail was captured, fell
+                    # below the noise floor, and looked identical to silence.
+                    if self.stt.last_capture_reason == "too_quiet":
+                        empty_turns += 1
+                        if empty_turns < _MAX_EMPTY_TURNS:
+                            log.info(f"Caught only faint noise ({empty_turns}/"
+                                     f"{_MAX_EMPTY_TURNS}) — still listening.")
+                            continue
+                        log.info(f"{empty_turns} unusable turns — "
+                                 "returning to wake mode.")
+                    else:
+                        log.info("Conversation timed out — returning to wake mode.")
                     self._end_conversation()
                     in_conversation = False
                     empty_turns = 0
