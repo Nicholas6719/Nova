@@ -716,13 +716,83 @@ class NovaTools:
                 return None                  # ambiguous: don't guess
         return None
 
+    @staticmethod
+    def _on_screen_windows(app: str) -> Optional[int]:
+        """Count real on-screen windows for an app, or None if we can't tell.
+
+        Asks the window server rather than the app: it needs no scripting
+        support and cannot launch anything as a side effect.
+        """
+        try:
+            from Quartz import (CGWindowListCopyWindowInfo,
+                                kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
+            raw = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly,
+                                             kCGNullWindowID) or []
+        except Exception:
+            return None
+        n = 0
+        for w in raw:
+            if str(w.get("kCGWindowOwnerName") or "") != app:
+                continue
+            if w.get("kCGWindowLayer", 99) != 0:
+                continue
+            b = w.get("kCGWindowBounds") or {}
+            if int(b.get("Width", 0)) >= 120 and int(b.get("Height", 0)) >= 90:
+                n += 1
+        return n
+
     def _open_app(self, name: str) -> str:
+        """Launch an app and VERIFY the user can actually see it.
+
+        `open -a` returning 0 only means the app bundle was found — not that it
+        started, and not that anything appeared on screen. The gap is real:
+        an app that is already running with zero windows (Chromium browsers do
+        this after you close the last window without quitting) just gets
+        activated, so Nova said "Opening Brave" while nothing happened.
+        """
         resolved = self._resolve_app(name)
         target = resolved or name.title()
+        was_running = self._app_running(target)
+
         result = subprocess.run(["open", "-a", target], capture_output=True, text=True)
-        if result.returncode == 0:
-            return f"Opening {target}."
-        return f"I couldn't find an app called {name}."
+        if result.returncode != 0:
+            return f"I couldn't find an app called {name}."
+
+        # It was found — now wait for the process to actually exist.
+        started = False
+        for _ in range(12):
+            if self._app_running(target):
+                started = True
+                break
+            time.sleep(0.5)
+        if not started:
+            return f"I tried to open {target} but it didn't start."
+
+        # Running is not the same as visible. Give it a moment to draw, then
+        # make sure a window is actually on screen.
+        windows = None
+        for _ in range(6):
+            windows = self._on_screen_windows(target)
+            if windows is None or windows > 0:
+                break
+            time.sleep(0.5)
+
+        if windows == 0:
+            # Bring it forward and ask for a window. `make new window` works for
+            # browsers and Finder; apps without scripting support just error,
+            # which is fine — we still report honestly below.
+            self._osa(f'tell application "{target}" to activate')
+            self._osa(f'tell application "{target}" to make new window')
+            time.sleep(1.0)
+            windows = self._on_screen_windows(target)
+            if windows == 0:
+                return (f"{target} is running but didn't put a window on screen. "
+                        "It may be hidden or on another desktop.")
+
+        if was_running:
+            self._osa(f'tell application "{target}" to activate')
+            return f"{target} was already open. Brought it to the front."
+        return f"Opening {target}."
 
     def _quit_app(self, name: str) -> Optional[str]:
         """Quit an app by spoken name. Returns None when the name doesn't
