@@ -911,6 +911,25 @@ class NovaTools:
                 return bc.scroll("bottom")
             return bc.scroll("up" if re.search(r"\bup\b", low) else "down")
 
+        # ── search WITHIN a site ────────────────────────────────────────
+        # "search amazon for spider-man" means Amazon's own search, not a
+        # Google search for the words "amazon for spider-man".
+        site = query = None
+        m = re.search(r"\b(?:search|look)\s+(?:on\s+|in\s+)?([\w .]+?)\s+for\s+(.+)", low)
+        if m:
+            site, query = m.group(1), m.group(2)
+        else:
+            m = re.search(r"\bsearch\s+for\s+(.+?)\s+on\s+([\w .]+)$", low)
+            if m:
+                query, site = m.group(1), m.group(2)
+        if site and query:
+            query = re.sub(r"[?.!,]+$", "", query.strip())
+            hit = bc.site_search(site.strip(), query)
+            if hit:
+                url, label = hit
+                bc.open_url(url, label)
+                return f"Searching {label} for {query}."
+
         # ── search the web ──────────────────────────────────────────────
         m = re.search(r"\b(?:search|google|look\s+up)\s+(?:the\s+web\s+)?(?:for\s+)?(.+)", low)
         if m:
@@ -1028,10 +1047,18 @@ class NovaTools:
                 self.pending_offer = lambda p=place, s=sp, md=mode: (
                     f"Opening directions to {s}." if maps_engine.open_directions(p, md)
                     else f"I couldn't open directions to {s}.")
-                return ("I don't have access to your location yet, so I can't "
-                        "measure the distance. You can enable it for Nova under "
-                        "Privacy and Security, Location Services. Want me to open "
-                        "directions instead?")
+                # Only send him to System Settings when NovaOS is actually
+                # listed there — i.e. after the app has asked and he declined.
+                # It used to say this unconditionally, so he went looking for a
+                # NovaOS entry that did not exist, because nothing had ever
+                # requested location. See LocationProvider.swift.
+                if maps_engine.location_was_denied():
+                    return ("Location is turned off for me. You can switch it "
+                            "on under Privacy and Security, then Location "
+                            "Services, and pick NovaOS. Want me to open "
+                            "directions instead?")
+                return ("I don't have a location fix yet, so I can't measure "
+                        "the distance. Want me to open directions instead?")
             if res.get("error") == "no results":
                 return f"I couldn't find a {self._spoken_place(place)} nearby."
             return f"I couldn't work out how far {place} is."

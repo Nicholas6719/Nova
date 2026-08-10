@@ -130,6 +130,45 @@ def _title_prop(app: str) -> str:
     return "name" if app == SAFARI else "title"
 
 
+# Sites whose own search we can drive directly. "Search Amazon for Spider-Man"
+# used to become a GOOGLE search for the literal string "amazon for spider-man",
+# which is not what anyone means by it.
+_SITE_SEARCH: dict[str, str] = {
+    "amazon":     "https://www.amazon.com/s?k={q}",
+    "youtube":    "https://www.youtube.com/results?search_query={q}",
+    "ebay":       "https://www.ebay.com/sch/i.html?_nkw={q}",
+    "wikipedia":  "https://en.wikipedia.org/w/index.php?search={q}",
+    "reddit":     "https://www.reddit.com/search/?q={q}",
+    "github":     "https://github.com/search?q={q}",
+    "stack overflow": "https://stackoverflow.com/search?q={q}",
+    "stackoverflow":  "https://stackoverflow.com/search?q={q}",
+    "netflix":    "https://www.netflix.com/search?q={q}",
+    "spotify":    "https://open.spotify.com/search/{q}",
+    "twitter":    "https://twitter.com/search?q={q}",
+    "x":          "https://twitter.com/search?q={q}",
+    "maps":       "https://maps.apple.com/?q={q}",
+    "google maps": "https://www.google.com/maps/search/{q}",
+    "imdb":       "https://www.imdb.com/find/?q={q}",
+    "target":     "https://www.target.com/s?searchTerm={q}",
+    "walmart":    "https://www.walmart.com/search?q={q}",
+    "best buy":   "https://www.bestbuy.com/site/searchpage.jsp?st={q}",
+    "home depot": "https://www.homedepot.com/s/{q}",
+    "etsy":       "https://www.etsy.com/search?q={q}",
+}
+
+
+def site_search(site: str, query: str) -> Optional[tuple]:
+    """(url, label) to search WITHIN a known site, or None if we don't know it."""
+    key = re.sub(r"^(?:the|on|in)\s+", "", (site or "").strip().lower())
+    key = re.sub(r"\.(com|org|net)$", "", key).strip()
+    tmpl = _SITE_SEARCH.get(key)
+    if not tmpl or not (query or "").strip():
+        return None
+    url = tmpl.format(q=urllib.parse.quote_plus(query.strip()))
+    label = key.title() if key not in ("x",) else "X"
+    return url, label
+
+
 def resolve_target(raw: str) -> tuple[str, str]:
     """Spoken target → (url, spoken_label).
 

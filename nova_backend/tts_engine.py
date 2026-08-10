@@ -17,6 +17,7 @@ Playback model (ported from Jarvis's SeamlessPlayer):
 from __future__ import annotations
 
 import logging
+import re
 import queue
 import subprocess
 import threading
@@ -32,6 +33,12 @@ KOKORO_RATE      = 24000   # Kokoro output sample rate
 PLAYER_BLOCKSIZE = 1024    # ~42ms at 24kHz — small enough to avoid head-of-speech gap
 
 
+# Audio queued before playback begins. ~0.35s at 24 kHz: enough to ride out the
+# pause while the LLM produces the next sentence, short enough that Nova still
+# starts speaking promptly.
+_PREROLL_SAMPLES = 8192
+
+
 class SeamlessPlayer:
     """Plays a continuous stream of float32 mono audio fed from sentences.
 
@@ -45,11 +52,13 @@ class SeamlessPlayer:
         self._lock    = threading.Lock()
         self._done    = threading.Event()
         self._feeding = True
+        self._primed  = False
         self._stream: Optional[sd.OutputStream] = None
 
     def start(self) -> None:
         self._done.clear()
         self._feeding = True
+        self._primed = False
         self._buf = np.empty(0, dtype=np.float32)
         self._stream = sd.OutputStream(
             samplerate=self._sr,
@@ -87,21 +96,89 @@ class SeamlessPlayer:
             self._stream = None
 
     def _callback(self, outdata: np.ndarray, frames: int, _time, _status) -> None:
+        """Fill one audio block.
+
+        THE STUTTER LIVED HERE. The old version, whenever the buffer held less
+        than a full block, played the fragment and padded the rest of the block
+        with SILENCE, then discarded the fragment. While the LLM is still
+        generating the next sentence that happens constantly, so speech was
+        chopped mid-word with little silences — audible as stuttering.
+
+        A partial buffer while more audio is COMING is an underrun, not the end
+        of speech. The fix is to leave the audio in the buffer and emit a whole
+        block of silence, so a word is never cut in half; combined with the
+        pre-roll in feed(), underruns became rare instead of routine.
+        """
         with self._lock:
             have = len(self._buf)
+
+            # Pre-roll: hold silent until enough audio is queued to ride out the
+            # gaps between sentences. Without it, playback starts on the first
+            # fragment and underruns immediately, which is what made speech
+            # break up while the model was still generating.
+            if not self._primed:
+                if have >= _PREROLL_SAMPLES or not self._feeding:
+                    self._primed = True
+                else:
+                    outdata[:, 0] = 0.0
+                    return
+
             if have >= frames:
                 outdata[:, 0] = self._buf[:frames]
                 self._buf = self._buf[frames:]
-            elif have > 0:
+                return
+
+            if self._feeding:
+                # More is coming. Wait for a whole block rather than slicing a
+                # word in half, and re-arm the pre-roll so we don't restart on
+                # a nearly-empty buffer and immediately underrun again.
+                self._primed = False
+                outdata[:, 0] = 0.0
+                return
+
+            # Feeding is finished: drain whatever is left, then stop.
+            if have > 0:
                 outdata[:have, 0] = self._buf
                 outdata[have:, 0] = 0.0
                 self._buf = np.empty(0, dtype=np.float32)
-                if not self._feeding:
-                    threading.Timer(0.05, self._done.set).start()
+                threading.Timer(0.05, self._done.set).start()
             else:
                 outdata[:, 0] = 0.0
-                if not self._feeding:
-                    self._done.set()
+                self._done.set()
+
+
+# Kokoro hands text to espeak for phonemization, and espeak is fussy: newlines
+# make it treat one utterance as several lines, and a spaced hyphen, symbol, or
+# stray markdown character can drop or duplicate phonemes — heard as a stutter.
+# Everything spoken is normalized through here first.
+_SPEECH_SUBS = (
+    ("\u2014", ", "), ("\u2013", ", "),        # em / en dash
+    ("&", " and "), ("%", " percent "), ("+", " plus "),
+    ("\u221a", " square root of "), ("\u00d7", " times "), ("\u00f7", " divided by "),
+    ("\u2192", " to "), ("/", " slash "), ("@", " at "),
+    ("\u201c", ""), ("\u201d", ""), ("\u2018", "'"), ("\u2019", "'"),
+)
+
+
+def _normalize_for_speech(text: str) -> str:
+    """Make text safe for the phonemizer. Never changes meaning."""
+    if not text:
+        return ""
+    t = str(text)
+    # Collapse ALL whitespace, newlines included — this is the 2/1 mismatch.
+    t = re.sub(r"\s+", " ", t)
+    for a, b in _SPEECH_SUBS:
+        t = t.replace(a, b)
+    # A hyphen BETWEEN words is a pause; inside a word it belongs to the word.
+    t = re.sub(r"\s+-\s+", ", ", t)
+    # Markdown and control characters are never spoken.
+    t = re.sub(r"[*_`#>|\\]+", "", t)
+    t = "".join(ch for ch in t if ch.isprintable())
+    # Collapse punctuation runs that make espeak stumble ("?!?!", "....").
+    t = re.sub(r"([,.!?;:])\1+", r"\1", t)
+    t = re.sub(r"\s+([,.!?;:])", r"\1", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
 
 
 class TTSEngine:
@@ -172,8 +249,15 @@ class TTSEngine:
 
     # ── Public API ────────────────────────────────────────────────────────────────
     def speak(self, text: str) -> None:
-        """Queue a sentence for playback. Returns instantly."""
-        text = text.strip()
+        """Queue a sentence for playback. Returns instantly.
+
+        Normalizes here, at the ONE choke point every response passes through.
+        Only the LLM path was being cleaned, so deterministic replies reached
+        Kokoro raw — including newlines, which made espeak report
+        "words count mismatch on 200.0% of the lines (2/1)" and produced the
+        stutter Nicholas heard on the screen-awareness and square-root replies.
+        """
+        text = _normalize_for_speech(text)
         if not text:
             return
         self._queue.put(text)

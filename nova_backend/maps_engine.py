@@ -46,7 +46,7 @@ log = logging.getLogger("nova.maps")
 
 _HELPER_TIMEOUT = 25.0          # hard cap; Apple lookups are normally 1-3s
 _LOCATION_TTL   = 300.0         # re-use a fix for 5 minutes
-_location_cache: dict = {"at": 0.0, "coord": None}
+_location_cache: dict = {"at": 0.0, "coord": None, "denied": False}
 
 TRANSPORT = {"driving": "automobile", "walking": "walking", "transit": "transit"}
 
@@ -76,17 +76,44 @@ def _call(payload: dict, timeout: float = _HELPER_TIMEOUT) -> dict:
     return {"ok": False, "error": (r.stderr or "no output").strip()[:200]}
 
 
+def set_location_from_app(payload: dict) -> None:
+    """Accept a fix pushed by the Swift app (POST /api/location).
+
+    This is the ONLY way Nova can obtain a location. Asking CoreLocation from
+    here is futile: the helper runs as a bare python binary with no Info.plist,
+    so `requestWhenInUseAuthorization()` is silently ignored, no prompt is ever
+    shown, NovaOS never appears under Location Services, and the status stays
+    notDetermined forever. Only the signed app bundle carries
+    NSLocationWhenInUseUsageDescription — see LocationProvider.swift.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("location payload must be an object")
+    if not payload.get("available"):
+        _location_cache.update(at=0.0, coord=None,
+                               denied=(payload.get("reason") == "denied"))
+        log.info(f"location unavailable from app: {payload.get('reason')}")
+        return
+    lat, lon = float(payload["lat"]), float(payload["lon"])
+    _location_cache.update(at=time.time(), coord=(lat, lon), denied=False)
+    # Never log the coordinate itself.
+    log.info("location updated from app")
+
+
+def location_was_denied() -> bool:
+    """True when the app told us the user declined, so we can say so exactly."""
+    return bool(_location_cache.get("denied"))
+
+
 def current_location(force: bool = False) -> Optional[tuple]:
-    """(lat, lon) or None. Cached for _LOCATION_TTL so repeat questions are fast."""
+    """(lat, lon) or None. Supplied by the Swift app; cached for _LOCATION_TTL."""
     now = time.time()
-    if not force and _location_cache["coord"] and now - _location_cache["at"] < _LOCATION_TTL:
-        return _location_cache["coord"]
-    res = _call({"op": "location"}, timeout=20.0)
-    if res.get("ok"):
-        coord = (res["lat"], res["lon"])
-        _location_cache.update(at=now, coord=coord)
+    coord = _location_cache.get("coord")
+    if coord and now - _location_cache["at"] < _LOCATION_TTL:
         return coord
-    log.info(f"location unavailable: {res.get('error')}")
+    if coord:
+        log.info("location fix is stale; waiting for a fresh one from the app")
+    else:
+        log.info("no location available (the app has not supplied a fix)")
     return None
 
 

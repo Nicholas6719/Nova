@@ -186,6 +186,20 @@ class NovaWSServer:
                     ).start()
                     self._json({"ok": True})
 
+                elif self.path == "/api/location":
+                    # Pushed by the Swift LocationProvider. The app bundle is
+                    # the only process that can legally get a fix (see
+                    # LocationProvider.swift), so this is the ONLY source of
+                    # location Nova has. Held in memory only.
+                    try:
+                        import maps_engine
+                        maps_engine.set_location_from_app(data)
+                        ok = True
+                    except Exception as exc:
+                        log.warning(f"location update rejected: {exc}")
+                        ok = False
+                    self._json({"ok": ok})
+
                 elif self.path == "/api/mute":
                     # State managed by VoiceAssistant; this endpoint is for the Swift UI
                     self._json({"ok": True})

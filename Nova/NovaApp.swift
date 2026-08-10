@@ -15,6 +15,11 @@ struct NovaApp: App {
     /// there is a single process owner.
     @StateObject private var backendManager = BackendManager()
 
+    /// Owns CoreLocation. It lives in Swift because only the APP bundle carries
+    /// NSLocationWhenInUseUsageDescription — a python subprocess asking for
+    /// location is silently ignored and never prompts. See LocationProvider.
+    @StateObject private var locationProvider = LocationProvider()
+
     /// The AppDelegate exists solely to terminate the backend on app quit —
     /// SwiftUI's App has no reliable "will terminate" hook, but AppKit does.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -25,6 +30,10 @@ struct NovaApp: App {
                 .onAppear {
                     appDelegate.backendManager = backendManager
                     backendManager.start()
+                    // Ask once at launch so the permission dialog appears while
+                    // Nicholas is actually at the keyboard, and so NovaOS shows
+                    // up under Privacy & Security > Location Services.
+                    locationProvider.requestLocation()
                 }
         }
     }
