@@ -53,6 +53,43 @@ _CALENDAR_WORD_RE = re.compile(
 # Measured: asked to summarize a real reminder, the 3B appended "This is a
 # critical deadline, so be sure to submit your reflection exactly as written"
 # — advice that appears nowhere in the data. Reads must report, never counsel.
+#
+# Advisory sentences the 3B keeps appending to calendar reads even when told
+# not to: "Make sure to submit it exactly as the system says", "This is a
+# critical deadline, so be sure to...". None of it is in the data — it is the
+# model coaching Nicholas about his own life. Prompting reduced it but did not
+# stop it, so reads are filtered deterministically: any SENTENCE that opens
+# with advice is dropped, and if that empties the summary the caller falls back
+# to its deterministic template.
+_EDITORIAL_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:please\s+)?(?:make|be)\s+sure\b"
+    r"|don'?t\s+forget\b"
+    r"|remember\s+to\b"
+    r"|you\s+(?:should|ought|need\s+to|may\s+want|might\s+want|will\s+want)\b"
+    r"|it'?s\s+(?:important|critical|essential|worth)\b"
+    r"|this\s+is\s+(?:a\s+)?(?:critical|important|urgent)\b"
+    r"|(?:i'?d|i\s+would)\s+(?:recommend|suggest)\b"
+    r"|try\s+to\b|consider\b|prioriti[sz]e\b"
+    r"|good\s+luck\b|hope\s+(?:that|this|it)\b"
+    r")",
+    re.I,
+)
+
+
+def _strip_editorial(text: str) -> str:
+    """Drop advisory sentences from a calendar read. Facts only."""
+    if not text:
+        return ""
+    # Split on sentence ends but keep the terminator.
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    kept = [p for p in parts if p.strip() and not _EDITORIAL_RE.match(p)]
+    dropped = len(parts) - len(kept)
+    if dropped:
+        log.info(f"calendar read: dropped {dropped} advisory sentence(s)")
+    return " ".join(kept).strip()
+
+
 _NO_EDITORIAL = ("Report ONLY what is listed. Do not add advice, "
                  "encouragement, urgency, warnings, or commentary of your own. ")
 
@@ -276,9 +313,14 @@ class NovaCalendar:
     # ═══════════════════════════════════════════════════════════════════════
     def _llm_silent(self, user_prompt: str, max_tokens: int = 220,
                     temperature: float = 0.6) -> str:
-        """One-shot generation with no history side effects."""
+        """One-shot generation with no history side effects.
+
+        Read summaries are passed through `_strip_editorial` — the prompt asks
+        the model not to give advice, but a 3B complies only most of the time,
+        so the guarantee has to be deterministic rather than a request.
+        """
         try:
-            return self.llm.generate(
+            raw = self.llm.generate(
                 system_prompt=self._cal_system,
                 history=[],
                 user_message=user_prompt,
@@ -288,6 +330,7 @@ class NovaCalendar:
         except Exception as e:
             log.error(f"_llm_silent error: {e}")
             return ""
+        return _strip_editorial(raw)
 
     # ── Structured extraction ────────────────────────────────────────────
     def _extract_event_json(self, utterance: str) -> Optional[dict]:

@@ -609,6 +609,87 @@ _DEST_SEARCH_ROOTS: tuple[Path, ...] = (
 )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Folder listing
+# ═══════════════════════════════════════════════════════════════════════════
+# "What's in my Documents folder?" had NO handler, so it fell all the way to
+# the LLM, which cheerfully invented a plausible answer ("a few files") for a
+# folder it had never looked at. Reading a directory is trivially knowable —
+# there is no excuse for guessing it.
+_FOLDER_ALIASES: dict[str, Path] = {
+    "desktop": _HOME / "Desktop",
+    "documents": _HOME / "Documents",
+    "document": _HOME / "Documents",
+    "downloads": _HOME / "Downloads",
+    "download": _HOME / "Downloads",
+    "pictures": _HOME / "Pictures",
+    "photos": _HOME / "Pictures",
+    "music": _HOME / "Music",
+    "movies": _HOME / "Movies",
+    "videos": _HOME / "Movies",
+    "home": _HOME,
+    "home folder": _HOME,
+    "applications": Path("/Applications"),
+    "apps": Path("/Applications"),
+}
+
+
+def resolve_folder(spoken: Optional[str]) -> Optional[Path]:
+    """Map a spoken folder name to a real directory, or None."""
+    if not spoken:
+        return None
+    key = re.sub(r"\s+", " ", str(spoken).lower().strip().strip(".?!,;:"))
+    for prefix in ("the ", "my ", "in ", "inside "):
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+    key = re.sub(r"\s+(folder|directory)$", "", key).strip()
+    return _FOLDER_ALIASES.get(key)
+
+
+def list_folder(path: Path, max_names: int = 6) -> dict:
+    """Real contents of a directory. Never guesses, never raises.
+
+    Hidden files and Nova's own protected paths are excluded, matching what
+    the user would see in Finder. Returns counts plus a few representative
+    names so the caller can speak something concrete.
+    """
+    out: dict = {"path": str(path), "label": folder_label(str(path) + "/x"),
+                 "folders": [], "files": [], "n_folders": 0, "n_files": 0,
+                 "error": None}
+    try:
+        entries = sorted(path.iterdir(), key=lambda p: p.name.lower())
+    except PermissionError:
+        out["error"] = "permission"
+        return out
+    except FileNotFoundError:
+        out["error"] = "missing"
+        return out
+    except OSError:
+        out["error"] = "unreadable"
+        return out
+
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        if is_protected_path(str(entry)):
+            continue
+        try:
+            if entry.is_dir():
+                out["folders"].append(entry.name)
+            elif entry.is_file():
+                if entry.suffix.lower() in _EXCLUDED_EXTENSIONS:
+                    continue
+                out["files"].append(entry.name)
+        except OSError:
+            continue
+
+    out["n_folders"] = len(out["folders"])
+    out["n_files"] = len(out["files"])
+    out["folders"] = out["folders"][:max_names]
+    out["files"] = out["files"][:max_names]
+    return out
+
+
 def resolve_destination(spoken_location: Optional[str]) -> Optional[str]:
     """Map a spoken folder name to a real directory, or None if there is no
     such place.

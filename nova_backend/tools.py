@@ -741,9 +741,33 @@ class NovaTools:
             running = check.stdout.strip() == "true"
         if not running:
             return f"{resolved} isn't running."
-        subprocess.run(["osascript", "-e", f'tell application "{resolved}" to quit'],
-                       capture_output=True)
-        return f"Closing {resolved}."
+
+        # `quit app "X"` rather than `tell application "X" to quit`: measured,
+        # the tell-form returns -128 "User canceled" against a browser with real
+        # windows open (Brave's warn-before-quitting), while this form goes
+        # through. Try it first, then fall back.
+        for script in (f'quit app "{resolved}"',
+                       f'tell application "{resolved}" to quit'):
+            subprocess.run(["osascript", "-e", script], capture_output=True)
+            for _ in range(8):
+                time.sleep(0.5)
+                if not self._app_running(resolved):
+                    return f"Closing {resolved}."
+
+        # NEVER claim success we haven't verified. An app can legitimately
+        # refuse: unsaved changes, a modal dialog, warn-before-quitting.
+        return (f"I asked {resolved} to quit but it's still open. It may be "
+                "waiting on unsaved changes or a confirmation.")
+
+    @staticmethod
+    def _app_running(name: str) -> bool:
+        if subprocess.run(["pgrep", "-x", name], capture_output=True).returncode == 0:
+            return True
+        check = subprocess.run(
+            ["osascript", "-e",
+             f'tell application "System Events" to (name of processes) contains "{name}"'],
+            capture_output=True, text=True)
+        return check.stdout.strip() == "true"
 
     # ═══════════════════════════════════════════════════════════════════════
     # Browser control

@@ -50,6 +50,20 @@ _FILE_EXT_RE = re.compile(
     r"\.(?:pdf|docx?|txt|md|rtf|pages|numbers|key|png|jpe?g|gif|heic|tiff|"
     r"bmp|webp|csv|xlsx?|pptx?|json|zip)\b"
 )
+# "What's in my Documents folder?" used to reach no handler at all and fall
+# through to the LLM, which invented contents for a folder it never read. This
+# fires BEFORE the searchable-token guard, because a folder question names a
+# location, not a file, so it legitimately tokenizes to nothing.
+_LIST_FOLDER_RE = re.compile(
+    r"\b(?:"
+    r"what(?:'?s| is)\s+(?:in|inside|on)\s+(?:my|the)\s+(?P<a>[\w ]+?)(?:\s+folder)?"
+    r"|what\s+(?:files|else)\s+(?:are|is)\s+(?:in|on)\s+(?:my|the)\s+(?P<b>[\w ]+?)(?:\s+folder)?"
+    r"|(?:list|show\s+me|what(?:'?s| is)\s+in)\s+(?:my|the)\s+(?P<c>[\w ]+?)\s+(?:folder|directory)"
+    r"|what\s+do\s+i\s+have\s+(?:in|on)\s+(?:my|the)\s+(?P<d>[\w ]+?)(?:\s+folder)?"
+    r")\s*[.?!]*$",
+    re.I,
+)
+
 _PRONOUN_RE = re.compile(r"\b(it|that|this|that\s+one|the\s+same\s+one)\b")
 
 # A calendar COMMAND, not merely a calendar word. "remind me to read the report"
@@ -197,6 +211,12 @@ class NovaFiles:
 
         has_noun = bool(_FILE_NOUN_RE.search(t))
         has_ext = bool(_FILE_EXT_RE.search(t))
+        m = _LIST_FOLDER_RE.search(t)
+        if m:
+            spoken = next((g for g in m.groupdict().values() if g), "")
+            if fm.resolve_folder(spoken) is not None:
+                return "list_folder"
+
         followup = self._recent_file() is not None and bool(_PRONOUN_RE.search(t))
         if not (has_noun or has_ext or followup):
             return None
@@ -244,8 +264,50 @@ class NovaFiles:
             self._pending = None
             return "Something went wrong with that file request. Want to try again?"
 
+    def _do_list_folder(self, text: str) -> str:
+        """Speak the REAL contents of a folder. Fully deterministic — the LLM
+        is never consulted, because a directory listing is a fact."""
+        m = _LIST_FOLDER_RE.search(text.strip())
+        spoken = next((g for g in m.groupdict().values() if g), "") if m else ""
+        folder = fm.resolve_folder(spoken)
+        if folder is None:
+            return "I'm not sure which folder you mean."
+
+        info = fm.list_folder(folder)
+        label = folder.name or "home"
+        if info["error"] == "permission":
+            return (f"I don't have permission to read your {label} folder. You "
+                    "can grant Nova access under Privacy and Security, Files and Folders.")
+        if info["error"] == "missing":
+            return f"I couldn't find a {label} folder."
+        if info["error"]:
+            return f"I wasn't able to read your {label} folder."
+
+        nf, nd = info["n_files"], info["n_folders"]
+        if nf == 0 and nd == 0:
+            return f"Your {label} folder is empty."
+
+        parts = []
+        if nd:
+            parts.append(f"{nd} folder" + ("s" if nd != 1 else ""))
+        if nf:
+            parts.append(f"{nf} file" + ("s" if nf != 1 else ""))
+        lead = f"You've got {_spoken_join(parts)} in {label}."
+
+        names = [fm.spoken_name(str(folder / n)) for n in
+                 (info["folders"] + info["files"])[:4]]
+        if names:
+            shown = _spoken_join(names)
+            more = (nd + nf) - len(names)
+            tail = f", and {more} more" if more > 0 else ""
+            return f"{lead} There's {shown}{tail}."
+        return lead
+
     def _handle(self, intent: str, text: str) -> str:
         t = (text or "").lower().strip()
+
+        if intent == "list_folder":
+            return self._do_list_folder(text)
 
         if intent == "file_delete":
             return ("I don't delete files. That's the one thing I won't do by "
@@ -604,6 +666,17 @@ class NovaFiles:
             self._last_file = None
             return None
         return lf["path"]
+
+
+def _spoken_join(items: list) -> str:
+    items = [str(i) for i in items if i]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
 
 
 def _clean_spoken(text: str) -> str:
