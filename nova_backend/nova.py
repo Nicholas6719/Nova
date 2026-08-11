@@ -202,7 +202,20 @@ class VoiceAssistant:
 
     # ── Init ──────────────────────────────────────────────────────────────────────
     def __init__(self) -> None:
-        self.config           = load_config()
+        self.config = load_config()
+        self._init_state()
+        self._init_engines()
+
+    def _init_state(self) -> None:
+        """All plain per-run state, in ONE place.
+
+        Extracted so test harnesses can call it instead of hand-assigning the
+        fields. They used to reproduce this list by hand, which is how a test
+        object drifted from the real one — the `screen` engine was missing from
+        __init__ for a whole session because the harness set it up itself, and
+        adding `_sleep_after_turn` here broke the loop suite the same way.
+        A harness that calls this cannot drift again.
+        """
         self.is_muted         = False
         self.is_awake         = True
         self._last_response   = ""
@@ -235,6 +248,9 @@ class VoiceAssistant:
         self.mic_gate = threading.Event()
         self.mic_gate.set()
 
+    def _init_engines(self) -> None:
+        """Load every engine, in order. Separate from _init_state so a test
+        harness can take the state without booting the mic and the servers."""
         log.info("Nova initializing…")
         self._init_stt()
         self._init_llm()
