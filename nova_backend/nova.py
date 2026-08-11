@@ -95,6 +95,11 @@ def _content_before_sleep(text: str, idx: int) -> str:
     while changed:
         changed = False
         stripped = lead.strip().rstrip(",;.! ").strip()
+        # Politeness sits BETWEEN the content and the sign-off ("That's all.
+        # Please go to sleep"), and left in place it blocked the sign-off strip
+        # — Nova was handed "...my favorite movie. That's all. Please".
+        stripped = re.sub(r"[,.]?\s*(?:please|now|thanks|thank you)$", "",
+                          stripped, flags=re.I).strip().rstrip(",;.! ").strip()
         for phrase in _SLEEP_PHRASES:
             if stripped.lower().endswith(phrase):
                 lead = stripped[: -len(phrase)]

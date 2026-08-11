@@ -44,6 +44,10 @@ FRAME_BYTES   = FRAME_SAMPLES * 2                    # int16 = 2 bytes/sample
 # Wake detection: keep a rolling ~2s buffer and transcribe it periodically.
 PRE_WAKE_SECONDS  = 2.0
 PRE_WAKE_FRAMES   = int(PRE_WAKE_SECONDS * 1000 / FRAME_MS)   # ~66 frames — command priming
+# Hard ceiling on buffered live audio: ~4s. Generous enough that normal capture
+# never drops a frame, small enough that a stalled consumer cannot build the
+# multi-second detection lag described on _audio_q.
+_AUDIO_Q_MAXLEN   = int(4000 / FRAME_MS)
 # Wake DETECTION scans a shorter window than the 2s command-priming buffer: a
 # spoken "Nova" should dominate its window rather than being diluted by ~2s of
 # surrounding background hum (which makes Whisper transcribe the whole window as
@@ -91,7 +95,13 @@ class STTEngine:
         self.vad = webrtcvad.Vad(config.get("vad_aggressiveness", 2))
 
         # Persistent input stream + shared frame queue (started lazily).
-        self._audio_q: "queue.Queue[bytes]" = queue.Queue()
+        # BOUNDED. An unbounded queue turns a slow consumer into permanent lag:
+        # when the wake loop competed with a memory-reconciliation pass on the
+        # GPU it fell behind realtime, the backlog grew, and the detector was
+        # scoring audio from seconds ago — Nicholas said "Nova" and it fired
+        # twelve seconds later. Live audio is only useful while it is live, so
+        # on overflow we drop the OLDEST frame and stay near realtime.
+        self._audio_q: "queue.Queue[bytes]" = queue.Queue(maxsize=_AUDIO_Q_MAXLEN)
         self._stream: Optional[sd.RawInputStream] = None
         # Rolling pre-wake buffer; on a wake hit its contents prime the command
         # recording so a single-breath "Nova, <command>" is fully captured.
@@ -101,6 +111,20 @@ class STTEngine:
         log.info("STT ready.")
 
     # ── Persistent audio stream ────────────────────────────────────────────────────
+    def _drain_audio_q(self) -> int:
+        """Throw away buffered audio. Returns how many frames were dropped."""
+        dropped = 0
+        while True:
+            try:
+                self._audio_q.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        if dropped > 30:                      # ~1s or more is worth knowing
+            log.info(f"dropped {dropped} stale audio frames "
+                     f"({dropped * FRAME_MS / 1000:.1f}s) before listening")
+        return dropped
+
     def _ensure_stream(self) -> None:
         """Start the always-on mic stream once. Idempotent."""
         if self._stream is not None:
@@ -110,7 +134,17 @@ class STTEngine:
             # Runs on PortAudio's thread. Drop frames while Nova is speaking so
             # its own TTS never enters the queue.
             if self._mic_gate.is_set():
-                self._audio_q.put(bytes(indata))
+                data = bytes(indata)
+                try:
+                    self._audio_q.put_nowait(data)
+                except queue.Full:
+                    # Consumer is behind. Discard the stalest frame and keep the
+                    # newest, so detection never drifts into the past.
+                    try:
+                        self._audio_q.get_nowait()
+                        self._audio_q.put_nowait(data)
+                    except (queue.Empty, queue.Full):
+                        pass
 
         self._stream = sd.RawInputStream(
             samplerate=SAMPLE_RATE,
@@ -167,6 +201,10 @@ class STTEngine:
         still captured, and return True on trigger."""
         self._ensure_stream()
         detector.reset()
+        # Whatever is already queued predates this wake wait — it is Nova's own
+        # tail, the end of the last command, or room noise. Feeding it to the
+        # detector first only delays the word he is about to say.
+        self._drain_audio_q()
         start = time.time()
         while time.time() - start < timeout_s:
             try:
