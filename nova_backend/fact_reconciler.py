@@ -79,6 +79,75 @@ Conversation to review:
 Output:"""
 
 
+# Sentences that state a fact so plainly that no model judgment is required.
+# Measured: handed "My favorite superhero is Spider-Man." the 3B returned []
+# — it decided that was not worth remembering. Nova's whole promise is that it
+# learns what Nicholas tells it about himself, so the unambiguous cases are
+# extracted deterministically and the model only handles the rest.
+_DIRECT_PATTERNS = [
+    # "my favorite X is Y"
+    (re.compile(r"\bmy\s+favou?rite\s+([\w ]{2,30}?)\s+(?:is|are|was)\s+(.+?)[.!?]*$", re.I),
+     lambda m: ("favorite",
+                "favorite_" + re.sub(r"\s+", "_", m.group(1).strip().lower()),
+                m.group(2).strip())),
+    # "I'm allergic to X"
+    (re.compile(r"\bi(?:'?m| am)\s+allergic\s+to\s+(.+?)[.!?]*$", re.I),
+     lambda m: ("allergy", m.group(1).strip().lower(), m.group(1).strip())),
+    # "I live in X"
+    (re.compile(r"\bi\s+live\s+in\s+(.+?)[.!?]*$", re.I),
+     lambda m: ("location", "home", m.group(1).strip())),
+    # "I work at/for X"
+    (re.compile(r"\bi\s+work\s+(?:at|for)\s+(.+?)[.!?]*$", re.I),
+     lambda m: ("location", "employer", m.group(1).strip())),
+    # "my name is X"
+    (re.compile(r"\bmy\s+name\s+is\s+(.+?)[.!?]*$", re.I),
+     lambda m: ("identity", "name", m.group(1).strip())),
+    # "my birthday is X"
+    (re.compile(r"\bmy\s+(birthday|anniversary)\s+is\s+(.+?)[.!?]*$", re.I),
+     lambda m: ("identity", m.group(1).lower(), m.group(2).strip())),
+    # "I have a dog named X" / "my dog's name is X"
+    (re.compile(r"\bi\s+have\s+an?\s+([\w ]{2,20}?)\s+named\s+(.+?)[.!?]*$", re.I),
+     lambda m: ("relationship",
+                re.sub(r"\s+", "_", m.group(1).strip().lower()),
+                m.group(2).strip())),
+]
+
+
+def extract_direct_facts(convo_text: str) -> list[dict]:
+    """High-precision facts pulled straight from what the user said.
+
+    Only fires on sentences whose meaning is not in doubt, so it can run
+    without the model and cannot invent anything: every value is a literal
+    span of the user's own words.
+    """
+    out: list[dict] = []
+    seen: set = set()
+    for line in (convo_text or "").splitlines():
+        line = re.sub(r"^\s*user:\s*", "", line).strip()
+        if not line:
+            continue
+        # A trailing command clause is not part of the fact.
+        line = re.sub(r"[,.]?\s*(?:that'?s all|go to sleep|thanks|thank you)\s*[.!]?$",
+                      "", line, flags=re.I).strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", line):
+            for pattern, build in _DIRECT_PATTERNS:
+                m = pattern.search(sentence)
+                if not m:
+                    continue
+                cat, key, value = build(m)
+                value = value.strip().rstrip(".!?,")
+                if not value or len(value) > 120:
+                    continue
+                ident = (cat, key)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+                out.append({"action": "insert", "category": cat,
+                            "key": key, "value": value})
+                break
+    return out
+
+
 def build_prompt(convo_text: str, known_facts: str) -> str:
     return _INSTRUCTION.format(convo=convo_text, known=known_facts or "(none yet)")
 
@@ -305,6 +374,19 @@ def reconcile(memory: "NovaMemory", llm, convo_text: str) -> int:
         log.exception("Reconciliation LLM call failed")
         return 0
     decisions = parse_decisions(raw)
+
+    # Deterministic facts come FIRST so they win the per-key collapse below.
+    # The model is allowed to add to them, never to veto them: it returned []
+    # for "My favorite superhero is Spider-Man", which is exactly the kind of
+    # plain statement Nova exists to remember.
+    direct = extract_direct_facts(convo_text)
+    if direct:
+        known_keys = {(d["category"], d["key"]) for d in decisions}
+        added = [d for d in direct if (d["category"], d["key"]) not in known_keys]
+        if added:
+            log.info(f"reconciler: {len(added)} fact(s) taken directly from what "
+                     "he said")
+        decisions = added + decisions
     n = apply_decisions(memory, decisions, convo_text=convo_text)
     if n:
         log.info(f"Memory reconciliation applied {n} change(s).")

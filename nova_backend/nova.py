@@ -46,6 +46,67 @@ _PRIO_BACKGROUND = 1    # reconciliation and friends
 # tail; too high and a noisy room keeps the mic open indefinitely.
 _MAX_EMPTY_TURNS = 3
 
+_SLEEP_PHRASES = (
+    "go to sleep", "back to sleep", "sleep mode", "stop listening",
+    "take a break", "return to wake mode", "wake mode", "that's all",
+    "that is all", "never mind", "nevermind", "we're done", "we are done",
+    "that'll be all", "that will be all", "goodbye", "good night",
+)
+
+
+# Filler that may trail a sign-off without changing it ("that's all for now").
+_SLEEP_TRAILER_RE = re.compile(r"^[\s,.!]*(?:now|please|then|ok|okay|thanks?|"
+                               r"thank you|for now|nova)?[\s,.!]*$", re.I)
+
+
+def find_signoff(text: str):
+    """Locate a trailing sign-off. Returns (index, phrase) or (None, None).
+
+    A sleep phrase only ends the conversation when it is the LAST thing said.
+    "I was so tired I had to go to sleep early" is a story, not an instruction,
+    and used to put Nova to sleep mid-anecdote.
+    """
+    low = (text or "").lower()
+    best = None
+    for phrase in _SLEEP_PHRASES:
+        start = 0
+        while True:
+            idx = low.find(phrase, start)
+            if idx < 0:
+                break
+            after = text[idx + len(phrase):]
+            if _SLEEP_TRAILER_RE.match(after):        # nothing meaningful after
+                if best is None or idx < best[0]:
+                    best = (idx, phrase)
+            start = idx + 1
+    return best if best else (None, None)
+
+
+def _content_before_sleep(text: str, idx: int) -> str:
+    """What the user said BEFORE the sign-off, with any other trailing
+    sign-off clauses removed too.
+
+    Stripping only the matched phrase left "...my favorite movie. That's all",
+    so the model answered the sign-off ("Goodnight, Nicholas.") instead of the
+    sentence he cared about.
+    """
+    lead = text[:idx].strip()
+    changed = True
+    while changed:
+        changed = False
+        stripped = lead.strip().rstrip(",;.! ").strip()
+        for phrase in _SLEEP_PHRASES:
+            if stripped.lower().endswith(phrase):
+                lead = stripped[: -len(phrase)]
+                changed = True
+                break
+        else:
+            lead = stripped
+    lead = re.sub(r"[,.]?\s*(?:and|then|so|ok|okay|alright)$", "", lead,
+                  flags=re.I).strip()
+    # Needs to be a real sentence, not a stray word.
+    return lead if len(lead.split()) >= 3 else ""
+
 # An imperative that survived every handler. The verbs are ones Nova either
 # performs deterministically or cannot perform at all — so if one reaches the
 # LLM stage, the honest answer is "I can't", never the model's guess.
@@ -162,6 +223,9 @@ class VoiceAssistant:
         # wake-mode memory reconciliation pass. Reset when a conversation ends.
         self._session_turns: list[dict] = []
         self._turn_was_command = False
+        # Set when a sleep phrase rode along with real content: answer the
+        # content first, then return to wake mode.
+        self._sleep_after_turn = False
 
         # Shared microphone gate. Set = capture allowed; cleared = mic paused.
         # A voice assistant must not record while it speaks — both to avoid
@@ -483,6 +547,11 @@ class VoiceAssistant:
             # Run on the MLX worker thread and wait: capture must not resume
             # until the response (and its TTS) is done, or it self-captures.
             self._submit_turn(text, wait=True)
+            if self._sleep_after_turn:
+                # The utterance carried both content and a sign-off; the content
+                # has now been answered, so honor the sign-off.
+                self._sleep_after_turn = False
+                self._return_to_wake = True
             # A "return to wake mode" command during the turn drops us out of
             # conversation immediately, without waiting for the silence timeout.
             if self._return_to_wake:
@@ -836,12 +905,18 @@ class VoiceAssistant:
         # sleep", "that's all", 15s of silence — all just drop back to waiting for
         # "Nova". Nova never goes fully dormant, so saying "Nova" always wakes it
         # (no way to get stuck asleep).
-        if any(p in low for p in (
-            "go to sleep", "back to sleep", "sleep mode", "stop listening",
-            "take a break", "return to wake mode", "wake mode", "that's all",
-            "that is all", "never mind", "nevermind", "we're done", "we are done",
-            "that'll be all", "that will be all", "goodbye", "good night",
-        )):
+        sleep_idx, sleep_hit = find_signoff(text)
+        if sleep_hit:
+            # A sleep phrase TACKED ONTO real content must not throw the content
+            # away. "Spider-Man No Way Home is my favorite movie. That's all, go
+            # to sleep." answered only the sleep part — the sentence he actually
+            # cared about was never replied to and never learned from.
+            lead = _content_before_sleep(text, sleep_idx)
+            if lead:
+                # Answer the content on this turn, and sleep once it is spoken.
+                self._sleep_after_turn = True
+                log.info(f"[system] sleep deferred; answering {lead!r} first")
+                return None
             self._return_to_wake = True
             self.set_state("idle")
             return f"Alright, {name}. Just say Nova when you need me."
