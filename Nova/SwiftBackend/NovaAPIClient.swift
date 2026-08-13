@@ -214,6 +214,15 @@ final class NovaAPIClient: ObservableObject {
                 appendToken(token)
             }
 
+        case "need_location":
+            // The backend answers a location question and has no usable fix.
+            // Only the app bundle can obtain one, so it has to originate here.
+            // Broadcast rather than call LocationProvider directly: this client
+            // is owned by ChatViewModel, and reaching across for a reference
+            // would mean threading a dependency through a 994-line view model
+            // that is already scheduled for its own refactor.
+            NotificationCenter.default.post(name: .novaNeedsLocation, object: nil)
+
         default:
             break
         }

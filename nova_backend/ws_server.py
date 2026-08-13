@@ -69,6 +69,15 @@ class NovaWSServer:
     def stream_token(self, token: str) -> None:
         self._ws_broadcast({"type": "token", "token": token})
 
+    def request_location(self) -> None:
+        """Ask the Swift app for a fresh location fix.
+
+        Only the signed app bundle can obtain a coordinate (CoreLocation reads
+        the usage string from the calling executable's Info.plist, and the
+        backend is a bare python binary), so this is the only way to get one
+        after launch. The app answers by POSTing to /api/location."""
+        self._ws_broadcast({"type": "need_location"})
+
     def _ws_broadcast(self, payload: dict) -> None:
         # Called from non-async threads (LLM worker, main). websockets' send() is
         # a coroutine, so hand each send to the WS event loop rather than calling

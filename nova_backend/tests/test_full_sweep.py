@@ -91,18 +91,35 @@ spoken: list[str] = []
 tokens: list[str] = []
 
 
+# The mic, the speakers and the sockets are the only things a sweep fakes.
+# Everything else is the real engine.
+_FAKED = {"stt", "tts", "ws"}
+
+
 def boot():
     va = VoiceAssistant.__new__(VoiceAssistant)
     va.config = nova_mod.load_config()
     # Use the REAL state initializer — see test_conversation_loop.py.
     va._init_state()
-    va._init_llm()
-    va._init_memory()
-    va._init_rag()
-    va._init_tools()
-    va._init_calendar()
-    va._init_files()
-    va._init_screen()
+    # Derived from _REQUIRED_ENGINES rather than hand-listed, so adding a
+    # routing stage cannot leave this harness behind. It just did: `weather`
+    # was added to the router and to _REQUIRED_ENGINES, and this list still
+    # said screen — every turn in the sweep died on `no attribute 'weather'`.
+    # That is the same shape as the `screen` bug that once hid behind 130
+    # green checks, only pointed the other way.
+    for name in VoiceAssistant._REQUIRED_ENGINES:
+        if name in _FAKED:
+            continue
+        getattr(va, f"_init_{name}")()
+    va._init_rag()          # optional, so not in _REQUIRED_ENGINES
+
+    class _STT:
+        """There is no microphone in a sweep. Present so the router's engine
+        check passes; every phrase is fed in as text, never recorded."""
+        def record_command(self, *a, **k): return None
+        def transcribe(self, *a, **k): return ""
+        def record_wake(self, *a, **k): return False
+    va.stt = _STT()
 
     class _TTS:
         def speak(self, t): spoken.append(t)
@@ -119,6 +136,10 @@ def boot():
         def stop(self, *a, **k): pass
     va.ws = _WS()
     va.set_state = lambda s: None
+    # The product's own startup guard, run against the harness's object: if an
+    # engine the router dereferences is missing, fail HERE with a clear message
+    # instead of as an AttributeError on every single phrase.
+    va._verify_engines()
     return va
 
 

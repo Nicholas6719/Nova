@@ -88,6 +88,10 @@
     "natural_confirmations": false,
     "_note": "Reads are always summarized by the LLM (natural voice, with a deterministic template fallback). natural_confirmations=true also runs create/reminder confirmations through the LLM (~4-6s slower); false uses fast deterministic templates."
   },
+  "weather": {
+    "enabled": true,
+    "_note": "The ONE deliberate widening of invariant 3 beyond MapKit, chosen by Nicholas 2026-08-13: Open-Meteo, which needs no API key and no account. What leaves the machine is an approximate coordinate (rounded to ~100m) or a place name he said out loud, only when he asks about weather. Never the LLM, memory, or the transcript. Set false and Nova declines weather questions instead of answering them."
+  },
   "screen": {
     "enabled": true,
     "min_confidence": 0.35,

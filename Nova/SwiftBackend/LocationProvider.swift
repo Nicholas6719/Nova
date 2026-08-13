@@ -33,6 +33,11 @@ import Combine          // @Published / ObservableObject (MemberImportVisibility
 import CoreLocation
 import Foundation
 
+extension Notification.Name {
+    /// Posted by NovaAPIClient when the backend asks for a location fix.
+    static let novaNeedsLocation = Notification.Name("NovaNeedsLocation")
+}
+
 @MainActor
 final class LocationProvider: NSObject, ObservableObject, CLLocationManagerDelegate {
 
@@ -53,6 +58,15 @@ final class LocationProvider: NSObject, ObservableObject, CLLocationManagerDeleg
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
         authorization = manager.authorizationStatus
+
+        // The backend asks for a fix when Nicholas actually asks a location
+        // question. Before this, the app volunteered one only at launch, so a
+        // question minutes later had nothing to work from.
+        NotificationCenter.default.addObserver(
+            forName: .novaNeedsLocation, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.requestLocation() }
+        }
     }
 
     /// Ask for permission if we've never asked, and start a single update.
@@ -135,6 +149,30 @@ final class LocationProvider: NSObject, ObservableObject, CLLocationManagerDeleg
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = data
-        Task { _ = try? await URLSession.shared.data(for: request) }
+
+        // RETRY until the backend is listening. The fix is requested from
+        // .onAppear, at the same moment the backend is launched — and the
+        // backend needs about five seconds to load Whisper, MLX and Kokoro.
+        // The very first POST therefore hit connection-refused, was dropped on
+        // the floor, and Nova had no coordinate at all for the rest of the
+        // session. Measured in Nicholas's log: the POST failed at 11:02:03,
+        // the backend came up at 11:02:08, and "how far is the nearest coffee
+        // shop" at 11:04 was answered with "I can't get your location".
+        Task {
+            for attempt in 0..<12 {
+                do {
+                    let (_, response) = try await URLSession.shared.data(for: request)
+                    if let http = response as? HTTPURLResponse,
+                       (200..<300).contains(http.statusCode) {
+                        return
+                    }
+                } catch {
+                    // Backend not up yet (or restarting) — wait and try again.
+                }
+                // ~1s between tries: covers a cold start without hammering.
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                _ = attempt
+            }
+        }
     }
 }

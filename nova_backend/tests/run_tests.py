@@ -7,7 +7,7 @@ Nova test runner — one command, for Nicholas or for Claude.
     python nova_backend/tests/run_tests.py --routing    # phrases that broke it before
     python nova_backend/tests/run_tests.py --loop       # conversation state machine
     python nova_backend/tests/run_tests.py --full       # everything, incl. real system
-    python nova_backend/tests/run_tests.py --quick      # env + routing + loop + wake + cache + rag + tts (no audio)
+    python nova_backend/tests/run_tests.py --quick      # env + routing + loop + wake + cache + rag + tts + weather (no audio)
 
 Each suite prints its own detail; this prints the summary and, importantly, a
 list of what could NOT be verified — the microphone-dependent behaviour that no
@@ -112,6 +112,8 @@ SUITES = {
                 "Nova starts speaking sooner and says the same words", False, False),
     "wake":    ("test_wake_capture.py",
                 "the wake word gives him time, and loops never reach the LLM", False, False),
+    "weather": ("test_weather.py",
+                "weather answers are real numbers, and steal nothing else", False, False),
     "smoke":   ("smoke_launch.py",
                 "the REAL process starts and answers a turn", True, True),
     "full":    ("test_full_sweep.py",
@@ -148,14 +150,14 @@ def main() -> int:
     for key in SUITES:
         ap.add_argument(f"--{key}", action="store_true", help=SUITES[key][1])
     ap.add_argument("--quick", action="store_true",
-                    help="env + routing + loop + wake + cache + rag + tts (fast, no audio)")
+                    help="env + routing + loop + wake + cache + rag + tts + weather (fast, no audio)")
     ap.add_argument("--all", action="store_true", help="every suite")
     args = ap.parse_args()
 
     if args.all:
         chosen = list(SUITES)
     elif args.quick:
-        chosen = ["env", "routing", "loop", "wake", "cache", "rag", "tts"]
+        chosen = ["env", "routing", "loop", "wake", "cache", "rag", "tts", "weather"]
     else:
         chosen = [k for k in SUITES if getattr(args, k)]
     if not chosen:

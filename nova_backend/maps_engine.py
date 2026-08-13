@@ -48,6 +48,13 @@ _HELPER_TIMEOUT = 25.0          # hard cap; Apple lookups are normally 1-3s
 _LOCATION_TTL   = 300.0         # re-use a fix for 5 minutes
 _location_cache: dict = {"at": 0.0, "coord": None, "denied": False}
 
+# Set by nova.py to a callable that asks the Swift app for a fresh fix.
+# Only the app bundle can legally obtain one (see set_location_from_app), so
+# without this the backend can only ever use whatever the app volunteered at
+# launch — and that POST used to race the backend's own startup and be lost.
+_request_fix = None
+_FIX_WAIT_S = 6.0
+
 TRANSPORT = {"driving": "automobile", "walking": "walking", "transit": "transit"}
 
 
@@ -104,16 +111,56 @@ def location_was_denied() -> bool:
     return bool(_location_cache.get("denied"))
 
 
+def set_location_requester(fn) -> None:
+    """Register the way to ask the app for a fresh fix (nova.py wires this)."""
+    global _request_fix
+    _request_fix = fn
+
+
 def current_location(force: bool = False) -> Optional[tuple]:
-    """(lat, lon) or None. Supplied by the Swift app; cached for _LOCATION_TTL."""
+    """(lat, lon) or None. Supplied by the Swift app; cached for _LOCATION_TTL.
+
+    When there is no usable fix, ASK the app for one and wait briefly. Only the
+    signed app bundle can obtain a coordinate, and it used to volunteer one
+    exactly once at launch — a POST that raced the backend's own startup and
+    was silently dropped. Nova then had no location for the whole session and
+    told Nicholas it could not find him. Asking on demand also keeps the
+    privacy promise: a fix is fetched when he asks a location question, not on
+    a timer.
+    """
     now = time.time()
     coord = _location_cache.get("coord")
     if coord and now - _location_cache["at"] < _LOCATION_TTL:
         return coord
+
+    if _location_cache.get("denied"):
+        log.info("location previously denied by the user; not asking again")
+        return None
+
     if coord:
-        log.info("location fix is stale; waiting for a fresh one from the app")
+        log.info("location fix is stale; asking the app for a fresh one")
     else:
-        log.info("no location available (the app has not supplied a fix)")
+        log.info("no location yet; asking the app for a fix")
+
+    if _request_fix is None:
+        return None
+    try:
+        _request_fix()
+    except Exception as exc:
+        log.warning(f"could not ask the app for a location: {exc}")
+        return None
+
+    # Wait for the app to POST one back. This runs on the worker thread during
+    # a location question, so a short block is the honest cost of answering it.
+    deadline = time.time() + _FIX_WAIT_S
+    while time.time() < deadline:
+        time.sleep(0.15)
+        c = _location_cache.get("coord")
+        if c and time.time() - _location_cache["at"] < _LOCATION_TTL:
+            return c
+        if _location_cache.get("denied"):
+            return None
+    log.info("the app did not supply a location in time")
     return None
 
 

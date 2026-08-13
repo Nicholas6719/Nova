@@ -203,6 +203,7 @@ class VoiceAssistant:
       2b. Pending file question ("which one?" / "move it to Documents?")
       3. Calendar intents (read/create/complete/delete/update events + reminders)
       4. Screen awareness (what's on my screen / what app am I in)
+      4b. Weather (current / tomorrow / next few days, here or a named place)
       5. File intents     (find / read / open / move / copy / rename)
       6. Memory intents   (remember / recall / update / forget)
       7. Fast-path intents (greeting / date / time / repeat)
@@ -272,6 +273,7 @@ class VoiceAssistant:
         self._init_calendar()
         self._init_files()
         self._init_screen()
+        self._init_weather()
         self._init_ws()
         self._verify_engines()
         self._warm_prompt_cache()
@@ -304,7 +306,7 @@ class VoiceAssistant:
     # __init__, and the behaviour suite missed it because the test harness
     # initialized engines by hand. Fail loudly at startup instead.
     _REQUIRED_ENGINES = ("stt", "llm", "tts", "memory", "tools",
-                         "calendar", "files", "screen", "ws")
+                         "calendar", "files", "screen", "weather", "ws")
 
     def _verify_engines(self) -> None:
         missing = [name for name in self._REQUIRED_ENGINES
@@ -454,6 +456,12 @@ class VoiceAssistant:
         from screen_awareness import NovaScreen
         self.screen = NovaScreen(self.config, self.llm)
 
+    def _init_weather(self) -> None:
+        # Deterministic end to end: no model is involved in phrasing a
+        # temperature. See weather_engine.py for the invariant-3 decision.
+        from weather_intents import NovaWeather
+        self.weather = NovaWeather(self.config)
+
     def _init_ws(self) -> None:
         from ws_server import NovaWSServer
         self.ws = NovaWSServer(
@@ -462,6 +470,14 @@ class VoiceAssistant:
             on_text_message=self._handle_text_input,
         )
         self.ws.start()
+        # Let the maps engine ask the app for a location when it needs one.
+        # Only the app bundle can obtain a fix, and it used to volunteer one
+        # exactly once at launch — a POST that raced this very startup.
+        try:
+            import maps_engine
+            maps_engine.set_location_requester(self.ws.request_location)
+        except Exception as exc:
+            log.warning(f"could not wire the location requester: {exc}")
 
     # ── State broadcasting ────────────────────────────────────────────────────────
     def set_state(self, state: str) -> None:
@@ -782,6 +798,16 @@ class VoiceAssistant:
         screen_intent = self.screen.detect_intent(text)
         if screen_intent is not None:
             self._respond(self.screen.handle(screen_intent, text))
+            return
+
+        # ── 4b. Weather ───────────────────────────────────────────────────────
+        # BEFORE files and tools: "what's the weather" contains no file words,
+        # but "is it going to rain tomorrow" would otherwise fall through to
+        # the LLM, which would happily invent a forecast. Detection is strict:
+        # a weather word must appear, and an action verb rules it out.
+        weather_intent = self.weather.detect_intent(text)
+        if weather_intent is not None:
+            self._respond(self.weather.handle(text, weather_intent))
             return
 
         # ── 5. File management intents ───────────────────────────────────────
