@@ -93,6 +93,8 @@ class STTEngine:
             compute_type="int8",
         )
         self.vad = webrtcvad.Vad(config.get("vad_aggressiveness", 2))
+        self._post_wake_grace_ms = int(
+            float(config.get("post_wake_grace_s", 2.0)) * 1000)
 
         # Persistent input stream + shared frame queue (started lazily).
         # BOUNDED. An unbounded queue turns a slow consumer into permanent lag:
@@ -305,6 +307,10 @@ class STTEngine:
         speech_ms   = 0
         total_ms    = 0
         speaking    = False
+        # Speech heard on LIVE audio, as opposed to the wake word replayed from
+        # the pre-wake buffer. Until this is non-zero, Nicholas has said the
+        # wake word and not yet started his command.
+        live_speech_ms = 0
         pre_roll: "collections.deque[bytes]" = collections.deque(maxlen=5)
         hard_cap_ms = int(max_duration_s * 1000) if max_duration_s else MAX_RECORDING_MS
 
@@ -358,6 +364,8 @@ class STTEngine:
                 speaking   = True
                 speech_ms += FRAME_MS
                 total_ms  += FRAME_MS
+                if not processing_priming:
+                    live_speech_ms += FRAME_MS
             elif speaking:
                 buf        += frame
                 silence_ms += FRAME_MS
@@ -366,11 +374,19 @@ class STTEngine:
                 # inside the priming buffer is just the gap between "Nova" and the
                 # command, not the end of the utterance.
                 if not processing_priming:
-                    cutoff = (
-                        SILENCE_CUTOFF_LONG_MS
-                        if speech_ms >= LONG_SPEECH_THRESHOLD_MS
-                        else SILENCE_CUTOFF_SHORT_MS
-                    )
+                    if live_speech_ms == 0:
+                        # The wake word is already in the buffer, so `speaking`
+                        # is True before Nicholas has said anything else — and
+                        # the short cutoff then ended the capture 700ms later.
+                        # Saying "Nova", pausing to think, and starting half a
+                        # second too late looked exactly like the wake word not
+                        # working: the capture held only "Nova", which strips to
+                        # nothing, and Nova went straight back to waiting.
+                        cutoff = self._post_wake_grace_ms
+                    elif speech_ms >= LONG_SPEECH_THRESHOLD_MS:
+                        cutoff = SILENCE_CUTOFF_LONG_MS
+                    else:
+                        cutoff = SILENCE_CUTOFF_SHORT_MS
                     if silence_ms > cutoff:
                         break
             else:
@@ -396,7 +412,17 @@ class STTEngine:
     # ── Transcription ─────────────────────────────────────────────────────────────
     def transcribe(self, audio: np.ndarray) -> str:
         """Transcribe a numpy int16 audio array to text (full command path)."""
-        return self._transcribe_raw(audio, vad_filter=True)
+        text = self._transcribe_raw(audio, vad_filter=True)
+        seconds = len(audio) / SAMPLE_RATE if audio is not None else 0.0
+        if _is_transcription_loop(text, seconds):
+            log.warning(
+                f"Discarding a looped transcription ({len(text.split())} words "
+                f"from {seconds:.1f}s of audio): {text[:60]!r}…"
+            )
+            # Same contract as a too-faint capture: nothing usable was heard, so
+            # the caller keeps listening instead of answering garbage.
+            return ""
+        return text
 
     def _transcribe_raw(self, audio: np.ndarray, vad_filter: bool = True) -> str:
         if audio is None or len(audio) == 0:
@@ -443,6 +469,42 @@ def _rms(audio: np.ndarray) -> float:
     if audio is None or len(audio) == 0:
         return 0.0
     return float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)))
+
+
+# Nobody speaks faster than this. Normal fast speech is about 3 words/second;
+# the live failure was 110 words from 1.8s of audio, i.e. 60/s.
+_MAX_WORDS_PER_SECOND = 6.0
+
+
+def _is_transcription_loop(text: str, seconds: float) -> bool:
+    """True if a transcript is Whisper looping rather than something said.
+
+    A capture that was only the wake word came back as "Nova." a hundred times
+    and was sent to the LLM as if Nicholas had said it. `_is_noise_hallucination`
+    could not catch it: that guard deliberately whitelists anything containing
+    the wake word so a real "Nova" always wins the WAKE decision. That
+    protection is wrong here — on the command path, a wake word repeated a
+    hundred times is garbage no matter which word it is.
+
+    Two independent signals, both conservative:
+      - more words than a human could physically have said in that long
+      - one token dominating a long transcript
+    """
+    words = text.split()
+    if len(words) < 6:          # short transcripts are never worth second-guessing
+        return False
+
+    if seconds > 0 and len(words) / seconds > _MAX_WORDS_PER_SECOND:
+        return True
+
+    from collections import Counter
+    norm = [w.lower().strip(".,!?;:'\"") for w in words]
+    norm = [w for w in norm if w]
+    if not norm:
+        return False
+    if Counter(norm).most_common(1)[0][1] / len(norm) >= 0.6:
+        return True
+    return False
 
 
 def _is_noise_hallucination(text: str) -> bool:

@@ -668,13 +668,25 @@ class VoiceAssistant:
             (kw.lower() for kw in self.config["wake_word"]["keywords"]),
             key=len, reverse=True,
         )
-        low = stripped.lower()
-        for kw in keywords:
-            if low.startswith(kw):
-                remainder = stripped[len(kw):]
-                # Drop the punctuation/space that follows the wake word.
-                return remainder.lstrip(" ,.!?—-").strip()
-        return stripped
+        # REPEATEDLY, not once. Whisper can return the wake word over and over
+        # from a capture that was only the wake word ("Nova. Nova. Nova." a
+        # hundred times, seen live). Stripping a single one left the other
+        # hundred to be sent to the LLM as though Nicholas had said them.
+        while True:
+            low = stripped.lower()
+            for kw in keywords:
+                # startswith alone is not enough: it turned "Novak won the
+                # match" into "k won the match". The wake word only counts when
+                # a word actually ends there.
+                if low.startswith(kw) and not stripped[len(kw):len(kw) + 1].isalnum():
+                    remainder = stripped[len(kw):]
+                    # Drop the punctuation/space that follows the wake word.
+                    stripped = remainder.lstrip(" ,.!?—-").strip()
+                    break
+            else:
+                return stripped
+            if not stripped:
+                return ""
 
     # ── Text input from SwiftUI (typed / programmatic) ────────────────────────────
     def _handle_text_input(self, text: str) -> None:

@@ -161,24 +161,6 @@ class LLMEngine:
         sampler = make_sampler(temp=self.config.get("temperature", 0.7))
         max_tokens = self.config.get("max_tokens", 512)
 
-        if not self._cache_enabled:
-            full = ""
-            for response in stream_generate(
-                self.model,
-                self.tokenizer,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                sampler=sampler,
-            ):
-                # mlx-lm yields GenerationResponse objects; the text is on `.text`.
-                token = response.text
-                full += token
-                on_token(token)
-            return full.strip()
-
-        ids = self._encode(prompt)
-        cache, start = self._reuse_cache(ids)
-
         # Spoken length budget. Nova reaches the first word in about a second
         # now, and then talks for 20-46s, which is the remaining complaint.
         # Measured, a SENTENCE cap does not fix it: "why is the sky blue" is two
@@ -187,17 +169,32 @@ class LLMEngine:
         # boundary, so Nova is never cut off mid-sentence. 0 disables.
         soft_words = self.config.get("soft_max_words", 0)
 
+        # ONE generation loop, whether or not the cache is on. There used to be
+        # a second copy for the uncached path, and the length budget was added
+        # to only one of them — so turning the prompt cache off silently turned
+        # the budget off too. Two unrelated switches must not be entangled.
+        ids: list[int] = []
+        cache = None
+        start = 0
+        if self._cache_enabled:
+            ids = self._encode(prompt)
+            cache, start = self._reuse_cache(ids)
+            gen_prompt = ids[start:]
+        else:
+            gen_prompt = prompt
+
         full = ""
         generated: list[int] = []
         try:
             for response in stream_generate(
                 self.model,
                 self.tokenizer,
-                prompt=ids[start:],
+                prompt=gen_prompt,
                 max_tokens=max_tokens,
                 sampler=sampler,
                 prompt_cache=cache,
             ):
+                # mlx-lm yields GenerationResponse objects; the text is on `.text`.
                 token = response.text
                 full += token
                 generated.append(response.token)
@@ -214,11 +211,12 @@ class LLMEngine:
             self._drop_cache()
             raise
 
-        # The cache now holds the prompt plus what was just generated, which is
-        # exactly the prefix of next turn's prompt — so a follow-up reprocesses
-        # almost nothing.
-        self._cache_ids = ids + generated
-        self._bound_cache()
+        if self._cache_enabled:
+            # The cache now holds the prompt plus what was just generated, which
+            # is exactly the prefix of next turn's prompt — so a follow-up
+            # reprocesses almost nothing.
+            self._cache_ids = ids + generated
+            self._bound_cache()
         return full.strip()
 
     def _bound_cache(self) -> None:

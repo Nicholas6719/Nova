@@ -49,7 +49,7 @@ def section(t):
 
 from system_prompt import build_system_prompt
 from memory import NovaMemory
-from llm_engine import LLMEngine
+from llm_engine import LLMEngine, _ENDS_SENTENCE
 
 config = json.loads((_Path(BACKEND) / "config.json").read_text())
 DATA_DIR = _Path(os.environ.get(
@@ -185,6 +185,41 @@ check(engine.warm(SYS) == 0, "warm() is a no-op when prompt_cache is false")
 _text, _t = stream(TURNS[2])
 check(engine._cache is None, "no cache is built when prompt_cache is false")
 check(_text == baseline[TURNS[2]], "disabled path still answers correctly")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("THE LENGTH BUDGET IS INDEPENDENT OF THE CACHE")
+# ══════════════════════════════════════════════════════════════════════════
+# These are unrelated switches, and they were entangled: the uncached path had
+# its own copy of the generation loop, so the word budget was only applied when
+# the cache happened to be ON. Turning the cache off silently made Nova
+# long-winded again.
+budget_cfg = dict(llm_cfg)
+budget_cfg["soft_max_words"] = 25
+budget_cfg["max_tokens"] = 200
+probe = LLMEngine(budget_cfg)
+LONG_Q = "explain in detail why the sky is blue"
+
+probe._cache_enabled = False
+probe._drop_cache()
+off_text = probe.stream(system_prompt=SYS, history=history,
+                        user_message=LONG_Q, on_token=lambda _t: None)
+probe._cache_enabled = True
+probe._drop_cache()
+probe.warm(SYS)
+on_text = probe.stream(system_prompt=SYS, history=history,
+                       user_message=LONG_Q, on_token=lambda _t: None)
+
+check(off_text == on_text,
+      "the same words come out with the cache off and on",
+      f"off={len(off_text.split())}w on={len(on_text.split())}w")
+for label, txt in (("cache off", off_text), ("cache on", on_text)):
+    n = len(txt.split())
+    check(n < 200, f"the budget is enforced with {label} ({n} words)",
+          "" if n < 200 else f"ran to the token limit: {txt[:110]!r}")
+    check(_ENDS_SENTENCE.search(txt.strip()) is not None,
+          f"…and it stops on a complete sentence with {label}",
+          f"ends: {txt.strip()[-60:]!r}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
