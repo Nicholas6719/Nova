@@ -918,7 +918,7 @@ class VoiceAssistant:
         self.memory.add_turn("assistant", text)
         self.ws.send_message("assistant", text)
         self.set_state("speaking")
-        self.tts.speak(text)
+        self.tts.speak(_clean_for_tts(text))     # same boundary as _respond
         self.tts.wait_until_done(timeout=60)
         self.set_state("idle")
 
@@ -938,7 +938,13 @@ class VoiceAssistant:
         self.ws.send_message("assistant", text)
         log.info(f"[nova] {text}")
         self.set_state("speaking")
-        self.tts.speak(text)
+        # Clean at the SPEAKING boundary, not just on the LLM path. Everything
+        # deterministic came through here uncleaned — and the offending text is
+        # not always Nova's own words: real window titles contain em dashes, so
+        # screen awareness said "You're in Xcode, on Nova — NovaApp.swift" and
+        # spoke the dash. Invariant 10 is about what reaches the speaker,
+        # whatever produced it. The UI and the log keep the original.
+        self.tts.speak(_clean_for_tts(text))
         self.tts.wait_until_done(timeout=60)
         self.set_state("idle")
 

@@ -213,6 +213,29 @@ for bad, label in ((("**bold**"), "markdown emphasis"),
 
 
 # ══════════════════════════════════════════════════════════════════════════
+section("EVERY PATH IS CLEANED, NOT JUST THE LLM'S")
+# ══════════════════════════════════════════════════════════════════════════
+# _clean_for_tts used to run only on the streaming LLM path, so every
+# deterministic answer — screen, calendar, files, weather, music — reached the
+# speaker raw. And the offending text is not always Nova's own words: real
+# window titles contain em dashes, so screen awareness said "You're in Xcode,
+# on Nova — NovaApp.swift" out loud. Invariant 10 is about what reaches the
+# speaker, whoever wrote it.
+va, spoken = build("unused", split_first=True)
+va._mark_turn_was_command = lambda *a, **k: None
+va._respond("You're in Xcode, on Nova — NovaApp.swift. You've also got Claude open.")
+said = " ".join(spoken)
+check("—" not in said and "–" not in said,
+      "an em dash from a real window title never reaches the speaker", f"{said!r}")
+check("NovaApp.swift" in said, "…but the actual content survives", f"{said!r}")
+
+spoken.clear()
+va._respond("Playing **Weightless** by Marconi Union")
+said = " ".join(spoken)
+check("*" not in said, "markdown on the deterministic path is stripped too", f"{said!r}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 section("THE SPOKEN LENGTH BUDGET STOPS ON A SENTENCE, NEVER MID-WORD")
 # ══════════════════════════════════════════════════════════════════════════
 from llm_engine import _ENDS_SENTENCE, _TRAILING_LIST_MARKER
