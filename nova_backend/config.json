@@ -70,7 +70,9 @@
     "max_recent_turns": 20,
     "summarize_after_turns": 50,
     "rag_enabled": true,
-    "rag_docs_dir": "~/Documents"
+    "rag_docs_dir": "~/Documents",
+    "rag_max_distance": 0.45,
+    "_rag_note": "rag_max_distance: how close a document chunk must be before Nova puts it in front of the model (cosine distance, lower = stricter). Raise toward 0.6 to retrieve more eagerly at the cost of injecting irrelevant text into ordinary conversation; see the sweep in rag.py. Dependency and build directories (node_modules, site-packages, .venv, DerivedData…) are never indexed — they were 98% of the corpus."
   },
   "calendar": {
     "natural_confirmations": false,

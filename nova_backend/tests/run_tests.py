@@ -7,7 +7,7 @@ Nova test runner — one command, for Nicholas or for Claude.
     python nova_backend/tests/run_tests.py --routing    # phrases that broke it before
     python nova_backend/tests/run_tests.py --loop       # conversation state machine
     python nova_backend/tests/run_tests.py --full       # everything, incl. real system
-    python nova_backend/tests/run_tests.py --quick      # env + routing + loop + cache (no audio)
+    python nova_backend/tests/run_tests.py --quick      # env + routing + loop + cache + rag (no audio)
 
 Each suite prints its own detail; this prints the summary and, importantly, a
 list of what could NOT be verified — the microphone-dependent behaviour that no
@@ -106,6 +106,8 @@ SUITES = {
                 "conversation state machine (real loop, scripted mic)", False, False),
     "cache":   ("test_prompt_cache.py",
                 "the prompt cache changed speed and nothing else", False, False),
+    "rag":     ("test_rag_relevance.py",
+                "Nova only quotes a document when it has one", False, False),
     "smoke":   ("smoke_launch.py",
                 "the REAL process starts and answers a turn", True, True),
     "full":    ("test_full_sweep.py",
@@ -142,14 +144,14 @@ def main() -> int:
     for key in SUITES:
         ap.add_argument(f"--{key}", action="store_true", help=SUITES[key][1])
     ap.add_argument("--quick", action="store_true",
-                    help="env + routing + loop + cache (fast, no audio)")
+                    help="env + routing + loop + cache + rag (fast, no audio)")
     ap.add_argument("--all", action="store_true", help="every suite")
     args = ap.parse_args()
 
     if args.all:
         chosen = list(SUITES)
     elif args.quick:
-        chosen = ["env", "routing", "loop", "cache"]
+        chosen = ["env", "routing", "loop", "cache", "rag"]
     else:
         chosen = [k for k in SUITES if getattr(args, k)]
     if not chosen:

@@ -407,9 +407,14 @@ class VoiceAssistant:
 
     def _load_rag_background(self) -> None:
         try:
-            from rag import NovaRAG
+            from rag import NovaRAG, DEFAULT_MAX_DISTANCE
             docs_dir = Path(self.config["memory"]["rag_docs_dir"]).expanduser()
-            self._rag = NovaRAG(DATA_DIR / "rag_index", docs_dir=docs_dir)
+            self._rag = NovaRAG(
+                DATA_DIR / "rag_index",
+                docs_dir=docs_dir,
+                max_distance=self.config["memory"].get(
+                    "rag_max_distance", DEFAULT_MAX_DISTANCE),
+            )
             self._rag_ready = True
             log.info("RAG index ready.")
         except Exception as exc:
