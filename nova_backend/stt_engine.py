@@ -405,10 +405,24 @@ class STTEngine:
         # faster-whisper expects float32 in [-1.0, 1.0]
         audio_f32 = audio.astype(np.float32) / 32768.0
 
+        # beam_size=1 (greedy). This is FASTER *and* MORE ACCURATE here, which is
+        # not the usual trade — measured on the same clips with noise mixed in:
+        #
+        #   clean    beam=5  8/8 correct (0.337s)   beam=1  8/8 (0.297s)
+        #   fan-ish  beam=5  6/8 correct (0.555s)   beam=1  8/8 (0.296s)
+        #
+        # Under fan-level noise beam search latches onto the initial_prompt and
+        # loops: "what time is it" came back as "What time is it, what is the
+        # date, what is the date…" repeated forty-odd times, which is also why
+        # it took 0.555s — it generated every one of those tokens. Greedy
+        # decoding did not do it once. That failure mode is the same family as
+        # the fan-noise hallucinations that drove the move to a neural wake
+        # word, and `_is_noise_hallucination` does not catch it (too many
+        # distinct words). Raise stt.beam_size back to 5 to compare.
         segments, _ = self.model.transcribe(
             audio_f32,
             language=self.config.get("language", "en"),
-            beam_size=5,
+            beam_size=self.config.get("beam_size", 1),
             temperature=0,                     # deterministic — no random sampling
             condition_on_previous_text=False,  # don't hallucinate from prior context
             vad_filter=vad_filter,

@@ -13,6 +13,8 @@
     "model": "base.en",
     "language": "en",
     "vad_aggressiveness": 2,
+    "beam_size": 1,
+    "_beam_note": "1 = greedy decoding. Measured faster AND more accurate than beam search under fan-level noise, where beam=5 looped on the initial_prompt (\"what is the date\" forty times) and took 0.555s to do it. Set to 5 to compare.",
     "sample_rate": 16000,
     "silence_duration_s": 1.2,
     "min_speech_duration_s": 0.5,
@@ -41,6 +43,8 @@
     "rate_multiplier": 0.98,
     "post_utterance_delay_s": 0.1,
     "stream_while_generating": true,
+    "split_first_clause": true,
+    "_split_note": "Speak the opening CLAUSE of a long first sentence instead of waiting for the whole thing, so audio starts sooner (measured worst case 2.83s -> 1.89s). Splits only at a comma/semicolon/colon, where the voice already pauses. Set false if any seam is audible.",
     "_note": "stream_while_generating: speak each sentence as the LLM produces it (Nova starts talking on sentence 1). If playback ever starves/crackles, set false to fall back to generate-fully-then-speak. post_utterance_delay_s: settle time before the mic re-opens so Nova doesn't hear its own tail."
   },
   "wake_word": {

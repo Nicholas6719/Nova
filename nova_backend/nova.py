@@ -1090,6 +1090,18 @@ class VoiceAssistant:
     # Sentence-boundary detector for INCREMENTAL emission during token streaming:
     # terminal .?! (optionally followed by a closing quote/bracket) at a word end.
     _TTS_SENT_END = re.compile(r"[.!?][\"')\]]?(?=\s|$)")
+    # Clause boundary, used for the FIRST chunk only. Nothing can be heard until
+    # the first chunk is both generated AND synthesised, so a long opening
+    # sentence is a long silence: measured, "The shortest war in history was
+    # between Britain and Zanzibar, and lasted…" took 2.83s to reach audio,
+    # against 1.89s when the opening clause was spoken on its own. Only real
+    # punctuation counts as a split point — a comma is a place the voice
+    # naturally pauses, so the seam is inaudible, whereas cutting at an
+    # arbitrary word count would audibly chop the sentence. Later chunks stay
+    # whole sentences: once audio is playing, synthesis runs 3-4x faster than
+    # speech and never catches up with the player.
+    _TTS_CLAUSE_END = re.compile(r"[,;:](?=\s)")
+    _TTS_FIRST_CHUNK_MIN_WORDS = 4
 
     def _stream_response(self, user_text: str, rag_context: str = "") -> None:
         """
@@ -1106,6 +1118,7 @@ class VoiceAssistant:
         system_prompt = self._build_system_prompt(memory_ctx, rag_context)
         history       = self.memory.get_recent_turns(n=10)
         stream_tts    = self.config["tts"].get("stream_while_generating", True)
+        split_first   = self.config["tts"].get("split_first_clause", True)
 
         full_response = ""
         pending       = ""            # tokens not yet emitted as a full sentence
@@ -1131,6 +1144,18 @@ class VoiceAssistant:
                 pending = pending[cut:]
                 if sentence:
                     _emit(sentence)
+
+            # Nothing has been heard yet: take the opening clause rather than
+            # waiting for the whole sentence. Only ever done for the first
+            # chunk — see _TTS_CLAUSE_END.
+            if not force and not state["spoke"] and split_first:
+                m = self._TTS_CLAUSE_END.search(pending)
+                if m and len(pending[:m.end()].split()) >= self._TTS_FIRST_CHUNK_MIN_WORDS:
+                    clause = pending[:m.end()].strip()
+                    pending = pending[m.end():]
+                    if clause:
+                        _emit(clause)
+
             if force and pending.strip():
                 _emit(pending.strip())
                 pending = ""
