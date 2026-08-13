@@ -28,3 +28,6 @@ nova_backend/voices-v1.0.bin
 # Exception: the trained wake model is small (~790KB) and worth version-controlling
 # as a backup of a ~2hr Colab training run.
 !nova_backend/nova.onnx
+
+# Test bytecode
+nova_backend/tests/__pycache__/

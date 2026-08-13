@@ -42,7 +42,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+# The backend lives one level up now that this file sits in tests/.
+ROOT = Path(__file__).resolve().parent.parent
 HTTP = "http://127.0.0.1:5001"
 WS_PORT = 8766
 HTTP_PORT = 5001

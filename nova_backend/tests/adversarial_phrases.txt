@@ -1,0 +1,107 @@
+# Phrases that have ACTUALLY broken Nova, kept so they can never break it again.
+#
+# Every line is something Nicholas really said (or a near variant) that produced
+# a wrong answer. Any change to routing, the fast path, or the system commands
+# must be run against this file — see test_routing_corpus.py.
+#
+# Format:   <phrase>  ==>  <expected>
+#
+# Expected values:
+#   llm         normal conversation; no handler may claim it
+#   tools       system/app/browser/music/maps handler
+#   files       file or folder handler
+#   calendar    calendar or reminders handler
+#   screen      screen awareness
+#   memory      memory recall/store/forget
+#   fastpath    greeting / date / time / repeat
+#   unsupported an action Nova cannot perform; must be refused, never faked
+#   signoff     ends the conversation
+#   no-signoff  mentions sleep words but is NOT a sign-off
+
+# ── Conversation wrongly routed as a command (app-launch/web-search regexes
+#    matched a verb ANYWHERE in the sentence) ────────────────────────────────
+I've mainly watched the movies, I haven't really seen any of the comics, but I wanted to start getting into them  ==>  llm
+I want to start working out more  ==>  llm
+I usually run errands on saturday  ==>  llm
+let's start over  ==>  llm
+I need to run to the store  ==>  llm
+I need to find a new job  ==>  llm
+can you look for the silver lining here  ==>  llm
+I should start reading more  ==>  llm
+Spider-Man is my favorite superhero  ==>  llm
+it has to be the ordinary superhero life aspect  ==>  llm
+what do you know about Spider-Man  ==>  llm
+tell me a joke  ==>  llm
+how are you doing  ==>  llm
+what do you think about jazz  ==>  llm
+explain how photosynthesis works  ==>  llm
+
+# ── Substring collisions in the fast path ───────────────────────────────────
+# "10 TIMES 10" contains "time", so this was answered with the clock.
+what's 10 times 10 minus 4  ==>  llm
+what's the square root of 10  ==>  llm
+how many times did I ask  ==>  llm
+
+# ── Compound requests (only the first half was answered) ────────────────────
+what's the date and what time is it  ==>  fastpath
+
+# ── Sign-offs vs sentences that merely mention sleep ────────────────────────
+go to sleep  ==>  signoff
+that's all  ==>  signoff
+that's all for now  ==>  signoff
+Nova, go to sleep please  ==>  signoff
+Spider-Man No Way Home is my favorite movie. That's all. Please go to sleep.  ==>  signoff
+My favorite color is blue. Goodbye.  ==>  signoff
+I was so tired I had to go to sleep early last night  ==>  no-signoff
+we should talk about sleep mode settings sometime  ==>  no-signoff
+
+# ── Actions Nova cannot perform; it claimed it had done them ────────────────
+Type in my message window, yes I do, then send it  ==>  unsupported
+close downloads  ==>  unsupported
+close the directions  ==>  unsupported
+send a text to mom  ==>  unsupported
+play something on netflix  ==>  unsupported
+
+# ── Real commands that must keep working ────────────────────────────────────
+open spotify  ==>  tools
+launch xcode  ==>  tools
+can you open brave  ==>  tools
+close brave browser  ==>  tools
+what's my battery at  ==>  tools
+what's my volume  ==>  tools
+what apps are open  ==>  tools
+search for italian restaurants  ==>  tools
+look up python decorators  ==>  tools
+search amazon for spiderman  ==>  tools
+how far is the nearest CVS  ==>  tools
+open my downloads folder  ==>  tools
+open the coding projects folder for me  ==>  tools
+
+# ── Memory (recall used to only accept "what's my X", never "who's my X") ───
+who's my favorite superhero  ==>  memory
+who is my favorite superhero  ==>  memory
+what's my favorite color  ==>  memory
+remember that I like tea  ==>  memory
+
+# ── Files and folders (folder questions reached the LLM, which invented
+#    contents for a directory it never read) ─────────────────────────────────
+what's in my documents folder  ==>  files
+what's in my downloads folder  ==>  files
+what's on my desktop  ==>  files
+find my resume  ==>  files
+what's in my budget file  ==>  files
+
+# ── Screen ──────────────────────────────────────────────────────────────────
+what's on my screen  ==>  screen
+what app am I in  ==>  screen
+read my screen  ==>  screen
+
+# ── Calendar ────────────────────────────────────────────────────────────────
+what's on my calendar today  ==>  calendar
+what reminders do I have  ==>  calendar
+what are all my reminders  ==>  calendar
+
+# ── Fast path ───────────────────────────────────────────────────────────────
+what time is it  ==>  fastpath
+what's the date  ==>  fastpath
+what did you just say  ==>  fastpath
