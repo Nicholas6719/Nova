@@ -45,6 +45,7 @@ Nova has two parts:
     rag.py                   local document retrieval
     ws_server.py             HTTP :5001 + WS :8766 bridge
     training/                wake-model training kit (Colab)
+    tests/                   the test harness — see "Testing" below
     requirements.txt
     ARCHITECTURE.md
   CLAUDE.md              ← this file
@@ -158,6 +159,56 @@ Already deleted (2026-08-06 cleanup, build verified): `Nova/Core/`
 NovaEngine, NovaEngineCore, LLMClient, IntentDetector, MathRouter,
 NovaPersonality, APIKeyProvider; all of `Nova/Memory/` and `Nova/Tools/`;
 `Nova/Voice/AudioSessionQueue.swift`.
+
+---
+
+## Testing
+
+```bash
+python nova_backend/tests/run_tests.py --quick   # env + routing + loop (fast, silent)
+python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 min)
+```
+
+| Suite | Proves | Fidelity |
+|---|---|---|
+| `verify_environment.py` | every engine imports, MLX generates | real engines |
+| `test_routing_corpus.py` | every phrase that has broken Nova still routes right | real code, side effects stubbed |
+| `test_conversation_loop.py` | when Nova keeps listening vs returns to wake | real `_main_loop`, scripted mic |
+| `smoke_launch.py` | the REAL process starts and answers over HTTP | real process |
+| `test_full_sweep.py` | every subsystem vs real system state | real code + real system |
+
+**Rules these encode — every one came from a bug that reached Nicholas:**
+
+1. **The harness may not construct what the product constructs.** Tests call
+   `VoiceAssistant._init_state()`, never a hand-copied field list. A harness
+   that builds its own object tests its own construction — that is how
+   `_init_screen()` went missing from `__init__` while 130 checks stayed green
+   and every single utterance crashed.
+2. **Stub side effects, never verdicts.** `tools.match()` performs as it
+   matches. Stubbing whole handlers made the corpus report false regressions,
+   because the real `_resolve_app("downloads")` returns None. Replace only
+   `subprocess.run` / `time.sleep`.
+3. **Listener rules apply to every response, not per feature** (`listener.py`):
+   no spoken filesystem paths, no markdown, no third person, no invented advice
+   or numbers, sane length.
+4. **Never trust a single run of anything model-dependent.** A 3B is a sampling
+   process; the calendar editorializing passed one run and came back in real
+   use. Sample repeatedly, or make the guarantee deterministic in code. The
+   deterministic version has won every time.
+5. **A green run is not "Nova works."** `run_tests.py` prints what it could NOT
+   verify after every run — mic, speakers, and anything TCC-gated inside
+   NovaOS.app.
+6. **Regression-first.** A phrase that breaks Nova goes into
+   `tests/adversarial_phrases.txt` BEFORE the fix; confirm it fails, then fix.
+
+**Reporting to Nicholas** — every test report is four sections: what I tested /
+how I tested it (always naming the fidelity above) / what succeeded and what
+did not / what he needs to do. Plus an explicit "could not verify" line. Never
+lead with a pass count.
+
+**When to run what:** targeted suites for a targeted fix; `--quick` before any
+merge; `--all` before a merge touching shared plumbing. Do NOT full-sweep every
+small change — Nicholas asked for this explicitly and it is faster and sharper.
 
 ---
 
