@@ -140,15 +140,20 @@ section("TIME TO START SPEAKING AFTER THE WAKE WORD  (real record_command)")
 import queue as _queue
 import threading
 
-stt = se.STTEngine.__new__(se.STTEngine)
-stt.config = config["stt"]
-stt._mic_gate = threading.Event(); stt._mic_gate.set()
+# The REAL constructor, not a hand-assembled stand-in. Building it by hand is
+# how this harness would drift from __init__ — and it just did: a new field
+# (_pre_roll_frames) was added and the hand-built object crashed on it, which
+# is the same class of bug as the `screen` engine that was missing from
+# __init__ for a whole session while 130 checks stayed green. Only the mic
+# stream is stubbed, because there is no microphone here.
+print("  building the real STTEngine (loads Whisper)…", flush=True)
+_gate = threading.Event(); _gate.set()
+stt = se.STTEngine(config["stt"], mic_gate=_gate,
+                   wake_config=config.get("wake_word", {}))
 stt._stream = object()                      # so _ensure_stream is a no-op
+stt._ensure_stream = lambda: None
 stt._audio_q = _queue.Queue()
 stt._pending_pre_wake = b""
-stt.last_capture_reason = "ok"
-stt._post_wake_grace_ms = int(float(config["stt"].get("post_wake_grace_s", 2.0)) * 1000)
-stt._ensure_stream = lambda: None
 
 FRAME = se.FRAME_BYTES
 LOUD = (np.full(se.FRAME_SAMPLES, 6000, dtype=np.int16)).tobytes()
@@ -203,6 +208,34 @@ audio = run_capture(F(500), [False] * F(4000))
 captured_s = (len(audio) / se.SAMPLE_RATE) if audio is not None else 0.0
 check(captured_s < 3.0, "pure silence after the wake word still gives up",
       f"captured {captured_s:.2f}s")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("KEEPING THE START OF WHAT HE SAID")
+# ══════════════════════════════════════════════════════════════════════════
+# webrtcvad fires late on soft onsets, and losing the first syllable is the
+# most damaging thing that can happen to a transcript. Measured on 42 noisy
+# clips: 200ms of onset lost drops exact matches from 81% to 21%, while
+# carrying 500ms of extra lead-in costs nothing. The buffer is generous for
+# that reason, and it matters more since the post-wake grace window — once he
+# pauses after the wake word, this is the only thing protecting his first word.
+check(stt._pre_roll_frames * se.FRAME_MS >= 300,
+      "at least 300ms of audio is kept from before speech is detected",
+      f"{stt._pre_roll_frames} frames = {stt._pre_roll_frames * se.FRAME_MS}ms")
+
+# Speech starting immediately on live audio must still carry its lead-in.
+lead = F(600)
+audio = run_capture(0, [False] * lead + [True] * F(1000) + [False] * F(1200))
+captured_s = (len(audio) / se.SAMPLE_RATE) if audio is not None else 0.0
+expected_min = 1.0 + (stt._pre_roll_frames * se.FRAME_MS) / 1000 * 0.8
+check(audio is not None and captured_s >= expected_min,
+      "the capture includes audio from before speech was detected",
+      f"captured {captured_s:.2f}s of a 1.0s utterance "
+      f"(pre-roll {stt._pre_roll_frames * se.FRAME_MS}ms)")
+
+check(config["stt"]["beam_size"] == 5,
+      "beam search is on (greedy measured worse on 126 clips)",
+      f"beam_size={config['stt']['beam_size']}")
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -64,6 +64,23 @@ LONG_SPEECH_THRESHOLD_MS = 2500   # switch to the long cutoff after 2.5s of spee
 MAX_RECORDING_MS         = 15000  # hard safety cap on one utterance
 NOISE_FLOOR_RMS          = 150    # below this RMS, treat the buffer as silence
 
+# How much audio to keep from BEFORE speech was detected. webrtcvad triggers a
+# little late, especially on soft onsets ("what", "set", "how"), and losing the
+# first syllable is the single most damaging thing that can happen to a
+# transcript. Measured on 42 noisy clips:
+#
+#     onset lost      0ms -> 81% exact      prepended  0ms -> 81% exact
+#                   120ms -> 57%                     300ms -> 81%
+#                   200ms -> 21%                     500ms -> 76%
+#                   300ms -> 10%                     800ms -> 69%
+#
+# Losing the start is catastrophic; carrying extra lead-in costs nothing until
+# about 800ms. That asymmetry is why this is generous rather than tight. It was
+# 150ms, which is roughly one late VAD frame away from clipping every command —
+# and the post-wake grace window made it matter more, because once he pauses
+# after the wake word this buffer is the only thing protecting his first word.
+PRE_ROLL_MS_DEFAULT      = 480
+
 
 class STTEngine:
     def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None,
@@ -95,6 +112,8 @@ class STTEngine:
         self.vad = webrtcvad.Vad(config.get("vad_aggressiveness", 2))
         self._post_wake_grace_ms = int(
             float(config.get("post_wake_grace_s", 2.0)) * 1000)
+        self._pre_roll_frames = max(
+            1, int(config.get("pre_roll_ms", PRE_ROLL_MS_DEFAULT)) // FRAME_MS)
 
         # Persistent input stream + shared frame queue (started lazily).
         # BOUNDED. An unbounded queue turns a slow consumer into permanent lag:
@@ -311,7 +330,8 @@ class STTEngine:
         # the pre-wake buffer. Until this is non-zero, Nicholas has said the
         # wake word and not yet started his command.
         live_speech_ms = 0
-        pre_roll: "collections.deque[bytes]" = collections.deque(maxlen=5)
+        pre_roll: "collections.deque[bytes]" = collections.deque(
+            maxlen=self._pre_roll_frames)
         hard_cap_ms = int(max_duration_s * 1000) if max_duration_s else MAX_RECORDING_MS
 
         # Prime with the pre-wake frames captured during wake detection.
@@ -431,20 +451,22 @@ class STTEngine:
         # faster-whisper expects float32 in [-1.0, 1.0]
         audio_f32 = audio.astype(np.float32) / 32768.0
 
-        # beam_size=1 (greedy). This is FASTER *and* MORE ACCURATE here, which is
-        # not the usual trade — measured on the same clips with noise mixed in:
+        # beam_size=5. An earlier 8-clip test at ONE noise level made greedy
+        # look better and it shipped; Nicholas was then misheard in real use
+        # ("went to 25% of 10%"). A proper sweep — 126 clips, 3 voices, 3 noise
+        # levels — says the opposite, on both an easy and a hard corpus:
         #
-        #   clean    beam=5  8/8 correct (0.337s)   beam=1  8/8 (0.297s)
-        #   fan-ish  beam=5  6/8 correct (0.555s)   beam=1  8/8 (0.296s)
+        #   easy corpus   beam=5  0.5% WER, 71/72 exact   beam=1  2.9%, 65/72
+        #   hard corpus   beam=5 20.4% WER, 61.1% exact   beam=1 23.6%, 53.2%
         #
-        # Under fan-level noise beam search latches onto the initial_prompt and
-        # loops: "what time is it" came back as "What time is it, what is the
-        # date, what is the date…" repeated forty-odd times, which is also why
-        # it took 0.555s — it generated every one of those tokens. Greedy
-        # decoding did not do it once. That failure mode is the same family as
-        # the fan-noise hallucinations that drove the move to a neural wake
-        # word, and `_is_noise_hallucination` does not catch it (too many
-        # distinct words). Raise stt.beam_size back to 5 to compare.
+        # for 44ms. Also measured and rejected: small.en (WER 2.6-3.8% on the
+        # easy corpus against base.en's 0.5%, and 3x slower), distil-small.en
+        # (5.4%), and float32/int8_float32 compute types (no gain over int8).
+        #
+        # Beam search CAN loop on the initial_prompt — `patience=2` turned
+        # "what time is it" into "what is the date" forty times over. That is
+        # what `_is_transcription_loop` below exists to catch, and it catches it
+        # regardless of decode settings.
         segments, _ = self.model.transcribe(
             audio_f32,
             language=self.config.get("language", "en"),
