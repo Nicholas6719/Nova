@@ -1225,8 +1225,15 @@ class NovaTools:
             np = self._now_playing(app)
             return (f"Back to {np[0]}" + (f" by {np[1]}." if np[1] else ".")) if np and np[0] \
                 else "Went back a track."
-        if re.search(r"\b(restart|start\s+over|from\s+the\s+(?:beginning|top)|replay)\b", low) \
-           and (re.search(MUSIC, low) or re.search(r"\bthis\b", low)):
+        # "play it again" belongs here, not in the named search below — it means
+        # replay what is on, and searching Spotify for a song called "it again"
+        # is exactly the kind of literal-minded wrong answer to avoid.
+        _restart_verb = re.search(
+            r"\b(restart|start\s+over|from\s+the\s+(?:beginning|top)|replay)\b", low)
+        _again = (re.search(r"\bplay\s+(?:it|that|this|the\s+song)\s+again\b", low)
+                  or re.fullmatch(r"\s*(?:play\s+)?again\s*\.?\s*", low))
+        if _again or (_restart_verb and (re.search(MUSIC, low)
+                                         or re.search(r"\bthis\b", low))):
             app = self._running_player()
             if not app:
                 return self._no_player()
@@ -1346,7 +1353,128 @@ class NovaTools:
                 return f"Playing {np[0]}" + (f" by {np[1]}." if np[1] else ".")
             return f"Playing in {self._say(app)}."
 
+        # ── play SOMETHING BY NAME ──────────────────────────────────────
+        # LAST, so every transport phrase above still wins. "play the next
+        # song" must skip, not search for a song called "the next song".
+        named = self._named_request(low)
+        if named is not None:
+            return self._play_named(*named)
+
         return None
+
+    # ── Play something by name ────────────────────────────────────────────────
+    # Spotify's desktop app exposes six AppleScript commands and none of them is
+    # `search`; `play track` needs a URI. So a name has to be resolved before the
+    # app can play it. See spotify_search.py for what that costs and what it
+    # cannot reach (his own library and personal playlists need a user login).
+    _NAMED_PLAY_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+        r"(?:play|put\s+on|throw\s+on|start\s+playing)\s+"
+        # The article needs a boundary. Without one it chewed into the next
+        # word: "play something" parsed as a request for "thing", and
+        # "play anything" as "nything".
+        r"(?:me\s+)?(?:(?:some|a|an|the)\s+)?(.+?)\s*[.?!]*\s*$",
+        re.IGNORECASE,
+    )
+    # Phrases that are transport or state, never a thing to search for. If the
+    # whole request reduces to one of these, it is not a named request.
+    _NOT_A_NAME = re.compile(
+        r"^(?:music|song|songs|track|tracks|something|anything|playback|tune|"
+        r"tunes|it|that|this|more|again|next|previous|last|spotify|apple\s+music)$",
+        re.IGNORECASE,
+    )
+    # "Play" is not always about music. Asking to play something on Netflix is a
+    # request Nova genuinely cannot do, and it must keep reaching the honest
+    # refusal instead of quietly searching Spotify for a film. This phrase is in
+    # the adversarial corpus, and adding named playback broke it — which is what
+    # that corpus is for.
+    _NOT_MUSIC_TARGET = re.compile(
+        r"\b(netflix|hulu|disney|prime\s+video|max|peacock|youtube|tv|"
+        r"television|movie|film|show|episode|series|trailer|game)\b",
+        re.IGNORECASE,
+    )
+
+    def _named_request(self, low: str):
+        """(query, prefer) for "play X", or None. `prefer` is a Spotify search
+        type when he said which kind of thing he wanted."""
+        if self._NOT_MUSIC_TARGET.search(low):
+            return None
+        m = self._NAMED_PLAY_RE.match(low)
+        if not m:
+            return None
+        q = m.group(1).strip()
+        if not q or self._NOT_A_NAME.match(q):
+            return None
+
+        prefer = None
+        # "play the album X" / "play some music by X" / "play the X playlist"
+        for pat, kind in ((r"\balbum\b", "album"),
+                          (r"\bplaylist\b", "playlist"),
+                          (r"\bartist\b", "artist"),
+                          (r"\bsong\b|\btrack\b", "track")):
+            if re.search(pat, q, re.I):
+                prefer = kind
+                q = re.sub(pat, " ", q, flags=re.I)
+                break
+        # Strip the framing words that are about HOW to play, not WHAT.
+        q = re.sub(r"\b(?:on|in)\s+(?:spotify|apple\s+music|itunes)\b", " ", q, re.I)
+        q = re.sub(r"\bby\s+the\s+artist\b", "by", q, re.I)
+        q = re.sub(r"^\s*(?:of|by)\s+", "", q).strip()
+        q = re.sub(r"\s{2,}", " ", q).strip(" .,")
+        if not q or self._NOT_A_NAME.match(q):
+            return None
+        return q, prefer
+
+    def _play_named(self, query: str, prefer=None) -> str:
+        import spotify_search
+
+        if not spotify_search.is_configured():
+            # Say what is missing and where it goes. "I can't do that" would be
+            # true but useless, and pretending would be worse.
+            return ("I can't look up music by name yet. Add a Spotify client ID "
+                    "and secret to spotify credentials in Nova's data folder, "
+                    "and I'll be able to play things you ask for.")
+
+        res = spotify_search.search(query, prefer=prefer)
+        if not res.get("ok"):
+            reason = res.get("reason")
+            if reason == "not_found":
+                return (f"I couldn't find anything called {query} on Spotify. "
+                        "Your own playlists and saved songs aren't searchable "
+                        "this way, only Spotify's catalogue.")
+            if reason == "auth_failed":
+                return "Spotify rejected my credentials, so I couldn't search."
+            return "I couldn't reach Spotify to search just now."
+
+        app = self._running_player(launch_if_none=True)
+        if app != "Spotify":
+            # Apple Music cannot play a spotify: URI. Say so rather than
+            # silently doing nothing.
+            if app:
+                return (f"I found {res['label']} on Spotify, but {self._say(app)} "
+                        "is the player that's running.")
+            return "I couldn't start Spotify."
+
+        self._player_do(app, f'play track "{res["uri"]}"')
+        # VERIFY, do not claim. Spotify's play track is a no-op when there is no
+        # active device, and reporting a song that never started is exactly the
+        # kind of fake success this project has been bitten by.
+        time.sleep(0.9)
+        state = (self._player_get(app, "player state") or "").lower()
+        if state != "playing":
+            self._player_do(app, "play")
+            time.sleep(0.7)
+            state = (self._player_get(app, "player state") or "").lower()
+        if state != "playing":
+            return (f"I found {res['label']}, but Spotify wouldn't start playing. "
+                    "It may need an active device.")
+
+        # Report what is ACTUALLY playing, read back from the player.
+        np = self._now_playing(app)
+        if np and np[0]:
+            return f"Playing {np[0]}" + (f" by {np[1]}." if np[1] else ".")
+        return f"Playing {res['label']}."
 
     @staticmethod
     def _say(app: str) -> str:

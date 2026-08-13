@@ -105,3 +105,11 @@ what are all my reminders  ==>  calendar
 what time is it  ==>  fastpath
 what's the date  ==>  fastpath
 what did you just say  ==>  fastpath
+
+# Named music playback (added 2026-08-13 with "play X"). "Play" is not always
+# about music: adding named playback made "play something on netflix" search
+# Spotify for a film instead of admitting Nova can't do it.
+play a movie  ==>  unsupported
+play the office on netflix  ==>  unsupported
+play a show on hulu  ==>  unsupported
+play a youtube video  ==>  unsupported

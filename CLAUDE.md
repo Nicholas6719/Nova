@@ -89,6 +89,8 @@ Nova has two parts:
 
 **`file_intents.py`** — Natural-language dispatch over `file_manager.py`. `detect_intent` is strict regex AND requires a distinctive search token to survive tokenizing, which is what keeps "open my photos" pointed at the Photos app instead of a file search. Extraction is fully deterministic (the 3B mangles "from Downloads to Documents"); the LLM is used only to summarize contents, at temperature 0 with an explicit no-arithmetic instruction after it invented a leftover-budget figure. Nothing on disk changes without an explicit spoken yes, and ambiguity is resolved by asking "which one?" BEFORE the confirmation rather than walking candidates one at a time. Runs on the `nova-llm` worker thread, so its `self.llm.generate` call is thread-safe.
 
+**`spotify_search.py`** — turns a NAME into a Spotify URI, and nothing else. Spotify's desktop app exposes exactly six AppleScript commands (`next track`, `previous track`, `playpause`, `pause`, `play`, `play track`) and **none of them is `search`** — `play track` needs a URI. So the app can play anything, it just can't say what a name refers to. One HTTPS lookup fills that gap; **playback stays local through the desktop app**. Client-credentials only: no user login, no OAuth, no Premium — and therefore **no access to his own library or personal/algorithmic playlists** (Discover Weekly and friends need a user token), which Nova says plainly rather than reporting "not found". Credentials live at `NOVA_DATA_DIR/spotify_credentials.json`, **never in config.json, which is committed**. Nothing raises. See invariant 3.
+
 **`tools.py`** — macOS system tools. App launch, volume control, battery status, web search, screenshot, system info. All deterministic — never touches the LLM. Easy to extend.
 
 **`calendar_reminders.py`** — Apple Calendar & Reminders engine. Pure functions over EventKit (PyObjC), with an AppleScript fallback. Reads (today / this week / open reminders), writes (create event, create reminder), and edits (complete / delete / update by fuzzy title match). Zero side effects at import. Every function may raise RuntimeError — callers must catch. Ported from Jarvis, where it ran in production.
@@ -183,6 +185,7 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | `test_rag_relevance.py` | Nova only quotes a document when it has one | real rag.py + real on-disk index |
 | `test_wake_capture.py` | the wake word gives him time; loops never reach the LLM | real `record_command`, scripted VAD |
 | `test_weather.py` | weather answers are real numbers, and steal nothing else | real intents + canned payloads, live calls optional |
+| `test_music.py` | play-by-name works and shadows no transport command | real router, AppleScript + network stubbed |
 | `test_tts_chunking.py` | Nova starts speaking sooner and says the SAME words | real `_stream_response`, scripted LLM |
 | `smoke_launch.py` | the REAL process starts and answers over HTTP | real process |
 | `test_full_sweep.py` | every subsystem vs real system state | real code + real system |
@@ -228,6 +231,7 @@ small change — Nicholas asked for this explicitly and it is faster and sharper
 2. **LLM n_ctx stays at 4096.** Do not raise the context window without explicit instruction.
 3. **No cloud dependencies — TWO narrow, documented exceptions.** Nova is local and private: no API keys, and the LLM/STT/TTS/memory NEVER leave the machine. The exceptions:
    - `maps_engine.py` — "how far is the nearest X" and travel times are Apple MapKit network lookups; getting a location fix sends an approximate position to Apple.
+   - `spotify_search.py` — **added 2026-08-13, his explicit choice** after being shown the alternatives (hand off to Spotify's own search with no key; automate Spotify's UI). Name→URI lookup only; the words he asked for are what leaves the machine. Playback is local.
    - `weather_engine.py` — **added 2026-08-13, Nicholas's explicit choice** after being shown WeatherKit (needs a paid developer account), weather.gov (grid lookup) and browser scraping. Open-Meteo needs **no API key and no account**, so nothing ties a request to him beyond the IP any HTTP call carries. What leaves the machine is an approximate coordinate (rounded to ~100m) or a place name he said aloud.
 
    Both are used ONLY when he asks that kind of question, touch neither the LLM nor memory, are never stored, and degrade honestly ("I can't get your location", "I couldn't reach the weather service") rather than guessing. `weather.enabled: false` disables the second entirely. **Do not widen further without asking him — this is his privacy line, and he decides where it sits.**
