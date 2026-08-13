@@ -82,6 +82,22 @@ TURNS = [
 ]
 
 
+def diff_report(want: str, got: str) -> str:
+    """Full text plus where they diverge.
+
+    Truncating this to 90 characters once hid a real mismatch behind two
+    strings that looked identical, and diagnosing it needed a separate script.
+    A mismatch here is rare and serious, so print everything.
+    """
+    i = next((k for k, (a, b) in enumerate(zip(want, got)) if a != b),
+             min(len(want), len(got)))
+    return (f"diverges at char {i}\n"
+            f"        want: {want!r}\n"
+            f"        got : {got!r}\n"
+            f"        want@{i}: {want[max(0, i - 40):i + 60]!r}\n"
+            f"        got @{i}: {got[max(0, i - 40):i + 60]!r}")
+
+
 def stream(msg, system=SYS):
     """One turn through the real engine; returns (text, time_to_first_token)."""
     t0 = time.perf_counter()
@@ -119,8 +135,7 @@ for m in TURNS:
     text, ttft = stream(m)
     cached_ttft.append(ttft)
     check(text == baseline[m], f"identical answer: {m[:40]}",
-          "" if text == baseline[m]
-          else f"uncached={baseline[m][:90]!r}\n        cached  ={text[:90]!r}")
+          "" if text == baseline[m] else diff_report(baseline[m], text))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -141,7 +156,7 @@ engine._drop_cache()
 engine.warm(SYS)                       # warmed on the OLD system prompt
 got, _ = stream(q, system=alt_sys)
 check(want == got, "a changed system prompt is answered correctly anyway",
-      "" if want == got else f"want={want[:90]!r}\n        got ={got[:90]!r}")
+      "" if want == got else diff_report(want, got))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -167,8 +182,7 @@ except Exception as exc:
 
 after, _ = stream(TURNS[1])
 check(after == baseline[TURNS[1]], "the turn after a mid-stream failure is correct",
-      "" if after == baseline[TURNS[1]]
-      else f"want={baseline[TURNS[1]][:90]!r}\n        got ={after[:90]!r}")
+      "" if after == baseline[TURNS[1]] else diff_report(baseline[TURNS[1]], after))
 
 check(engine._cache_ids == [] or engine._cache is not None,
       "cache and its token list never disagree")
