@@ -17,10 +17,21 @@ the genuinely new tokens are processed. See `_reuse_cache`.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Callable, Optional
 
 log = logging.getLogger("nova.llm")
+
+# Terminal punctuation at the very end of what has been generated so far.
+# Deliberately anchored: a full stop mid-string (an abbreviation, a decimal)
+# is not the end of the reply.
+_ENDS_SENTENCE = re.compile(r"[.!?][\"')\]]?\s*$")
+# ...but the marker of a numbered list is not a sentence, even though it ends
+# in a full stop. Stopping there left Nova saying "...bachelor's degree. 2."
+# out loud. Checked separately rather than folded into the pattern above,
+# because a real sentence may legitimately end in a digit ("in 1896.").
+_TRAILING_LIST_MARKER = re.compile(r"(?:^|\n)\s*\d+[.)]\s*$")
 
 
 class LLMEngine:
@@ -168,6 +179,14 @@ class LLMEngine:
         ids = self._encode(prompt)
         cache, start = self._reuse_cache(ids)
 
+        # Spoken length budget. Nova reaches the first word in about a second
+        # now, and then talks for 20-46s, which is the remaining complaint.
+        # Measured, a SENTENCE cap does not fix it: "why is the sky blue" is two
+        # sentences but 57 words and 19.9s. What matters is words, so generation
+        # stops at the first sentence end past this budget — always on a
+        # boundary, so Nova is never cut off mid-sentence. 0 disables.
+        soft_words = self.config.get("soft_max_words", 0)
+
         full = ""
         generated: list[int] = []
         try:
@@ -183,6 +202,12 @@ class LLMEngine:
                 full += token
                 generated.append(response.token)
                 on_token(token)
+
+                if soft_words and len(full.split()) >= soft_words \
+                        and _ENDS_SENTENCE.search(full) \
+                        and not _TRAILING_LIST_MARKER.search(full):
+                    log.debug(f"soft word budget reached ({len(full.split())} words)")
+                    break
         except Exception:
             # The cache no longer matches _cache_ids; anything else would answer
             # the next turn from a context the model never actually saw.

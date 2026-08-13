@@ -185,6 +185,50 @@ check(got == want, "disabled path still says the whole reply")
 
 
 # ══════════════════════════════════════════════════════════════════════════
+section("NOTHING UNSPEAKABLE REACHES THE SPEAKER")
+# ══════════════════════════════════════════════════════════════════════════
+# Nova speaks its output (CLAUDE.md invariant #10). Measured: asked about a
+# document, the 3B still answers with a numbered list despite the prompt
+# forbidding it, and "1." was read aloud as "one."
+listy = ("Your roadmap outlines the following steps:\n"
+         "1. Start at Quinsigamond Community College.\n"
+         "2. Complete the MassTransfer Block.\n"
+         "3. Transfer to UMass Boston.")
+va, spoken = build(listy, split_first=True)
+va._stream_response("anything")
+said = " ".join(spoken)
+check(not re.search(r"(?:^|\s)\d+[.)]\s", said),
+      "numbered list markers are never spoken", f"said: {said[:110]!r}")
+check("Start at Quinsigamond" in said and "MassTransfer Block" in said,
+      "…but the list CONTENT is still spoken in full")
+
+for bad, label in ((("**bold**"), "markdown emphasis"),
+                   ("# Heading", "heading marks"),
+                   ("a — b", "em dash")):
+    va, spoken = build(f"Here it is. {bad} And done.", split_first=True)
+    va._stream_response("anything")
+    said = " ".join(spoken)
+    check(not any(ch in said for ch in "*#—"), f"{label} never reaches the speaker",
+          f"said: {said[:80]!r}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("THE SPOKEN LENGTH BUDGET STOPS ON A SENTENCE, NEVER MID-WORD")
+# ══════════════════════════════════════════════════════════════════════════
+from llm_engine import _ENDS_SENTENCE, _TRAILING_LIST_MARKER
+
+check(bool(_ENDS_SENTENCE.search("That is the answer.")), "a full stop ends a sentence")
+check(bool(_ENDS_SENTENCE.search("Is that right?")), "a question mark ends a sentence")
+check(not _ENDS_SENTENCE.search("The sky is blue because"), "an unfinished clause does not")
+check(bool(_ENDS_SENTENCE.search("It happened in 1896.")),
+      "a sentence ending in a number still counts")
+check(bool(_TRAILING_LIST_MARKER.search("…bachelor's degree.\n2.")),
+      "a dangling list marker is recognised, so generation does not stop there")
+check(not _TRAILING_LIST_MARKER.search("It happened in 1896."),
+      "…and a real sentence ending in digits is not mistaken for one")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 section("RESULT")
 # ══════════════════════════════════════════════════════════════════════════
 print(f"\n  {PASS}/{PASS + FAIL}")

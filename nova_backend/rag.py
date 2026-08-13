@@ -13,6 +13,7 @@ query() returns relevant text chunks for LLM context enrichment.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import threading
 import time
@@ -44,7 +45,7 @@ EXCLUDED_DIRS = {
 # Bump when SUPPORTED_EXTENSIONS or EXCLUDED_DIRS change: the stored index was
 # built under the OLD rules, and excluding a directory going forward does not
 # remove what is already in there. Changing the rules therefore has to rebuild.
-INGEST_RULES_VERSION = 2
+INGEST_RULES_VERSION = 3
 
 # Cosine distance above which a "match" is not worth putting in front of the
 # model. Chroma always returns the nearest k chunks no matter how far away they
@@ -325,6 +326,26 @@ class NovaRAG:
                 return " ".join(
                     (page.extract_text() or "") for page in reader.pages
                 )
+            except Exception:
+                return ""
+
+        if suffix in (".html", ".htm"):
+            # Strip markup BEFORE indexing. Without this, chunks are stored as
+            # raw source, so a question about Nicholas's education roadmap
+            # retrieved '</p></div><div class="frow"><label>Available Minor 2'
+            # and handed that to the model as his personal document. Tags also
+            # pollute the embedding (matching on markup rather than prose) and
+            # waste a third of the chunk on characters nobody can read aloud.
+            try:
+                import html as _html
+                raw = path.read_text(errors="ignore")
+                # script/style hold code, not content — drop them entirely.
+                raw = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", raw)
+                # Block-level ends become real breaks so sentences don't fuse.
+                raw = re.sub(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr)\s*/?>", "\n", raw)
+                text = _html.unescape(re.sub(r"<[^>]+>", " ", raw))
+                text = re.sub(r"[ \t]+", " ", text)
+                return re.sub(r"\n\s*\n+", "\n", text).strip()
             except Exception:
                 return ""
 

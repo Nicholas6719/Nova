@@ -180,6 +180,12 @@ def _clean_for_tts(text: str) -> str:
         return ""
     t = text.replace("—", ", ").replace("–", ", ")
     t = re.sub(r"[*_`#>]+", "", t)
+    # Numbered list markers, before whitespace is collapsed and the line starts
+    # are lost. The bullet characters are already gone with the markdown strip
+    # above, but "1." survived it and was read aloud as "one." — measured, the
+    # 3B still answers document questions with a numbered list despite the
+    # prompt forbidding it (CLAUDE.md invariant #10).
+    t = re.sub(r"(?m)^[ \t]*\d+[.)][ \t]+", "", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
@@ -1090,6 +1096,20 @@ class VoiceAssistant:
     # Sentence-boundary detector for INCREMENTAL emission during token streaming:
     # terminal .?! (optionally followed by a closing quote/bracket) at a word end.
     _TTS_SENT_END = re.compile(r"[.!?][\"')\]]?(?=\s|$)")
+    # The "1." of a numbered list also matches _TTS_SENT_END, which made the
+    # chunk end there: Nova said "your roadmap outlines the following steps,
+    # one." out loud. A period is not a sentence end when the only thing before
+    # it on the line is a number.
+    _LIST_MARKER_TAIL = re.compile(r"(?:^|\n)[ \t]*\d+$")
+
+    @classmethod
+    def _next_sentence_end(cls, text: str):
+        """First real sentence boundary in `text`, skipping list markers."""
+        for m in cls._TTS_SENT_END.finditer(text):
+            if cls._LIST_MARKER_TAIL.search(text[:m.start()]):
+                continue
+            return m
+        return None
     # Clause boundary, used for the FIRST chunk only. Nothing can be heard until
     # the first chunk is both generated AND synthesised, so a long opening
     # sentence is a long silence: measured, "The shortest war in history was
@@ -1136,7 +1156,7 @@ class VoiceAssistant:
         def _flush(force: bool) -> None:
             nonlocal pending
             while True:
-                m = self._TTS_SENT_END.search(pending)
+                m = self._next_sentence_end(pending)
                 if not m:
                     break
                 cut = m.end()
