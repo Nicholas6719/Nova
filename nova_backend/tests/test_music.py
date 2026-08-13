@@ -305,6 +305,95 @@ _sp.run = _orig_run          # never leave the real one stubbed
 
 
 # ══════════════════════════════════════════════════════════════════════════
+section("DUCKING: TURN THE MUSIC DOWN TO HEAR HIM, AND ALWAYS PUT IT BACK")
+# ══════════════════════════════════════════════════════════════════════════
+# He played music and Nova stopped hearing him. Measured, with music mixed
+# into real command audio: 0.0% word error in silence, 9.7% at full volume,
+# and 709% when loud (Whisper transcribing the music itself). Ducking to 20%
+# recovers most of it. The bug to fear here is not failing to duck — it is
+# failing to RESTORE and leaving his music quiet.
+class DuckRig(NovaTools):
+    def __init__(self, state="playing", volume="80", player="Spotify"):
+        self.config = {"music": {"duck_level": 20}}
+        self._ducked = None
+        self._vol = volume
+        self._state = state
+        self._player = player
+        self.sets = []
+
+    def _osa(self, script):
+        if "set sound volume to" in script:
+            self.sets.append(int(script.rsplit(" ", 1)[-1]))
+            self._vol = script.rsplit(" ", 1)[-1]
+            return True, ""
+        if "sound volume" in script:
+            return True, self._vol
+        if "player state" in script:
+            return True, self._state
+        return True, ""
+
+    def _running_player(self, launch_if_none=False):
+        return self._player
+
+
+r = DuckRig()
+r.duck_music()
+check(r.sets == [20], "music playing loudly is ducked", f"volume sets: {r.sets}")
+check(r._ducked is not None, "the original volume is remembered")
+
+before = len(r.sets)
+r.duck_music()
+check(len(r.sets) == before, "ducking twice does not touch the player again")
+
+r.restore_music()
+check(r.sets == [20, 80], "the ORIGINAL volume is restored, not a guess", f"{r.sets}")
+check(r._ducked is None, "and the ducked state is cleared")
+
+before = len(r.sets)
+r.restore_music()
+check(len(r.sets) == before, "restoring when not ducked does nothing")
+
+# Nothing audible -> leave it alone entirely.
+r = DuckRig(state="paused")
+r.duck_music()
+check(r.sets == [] and r._ducked is None, "paused music is not touched", f"{r.sets}")
+
+r = DuckRig(player=None)
+r.duck_music()
+check(r.sets == [] and r._ducked is None, "no player means nothing to duck")
+
+r = DuckRig(volume="10")
+r.duck_music()
+check(r.sets == [] and r._ducked is None,
+      "music already quieter than the duck level is left alone", f"{r.sets}")
+
+# The failure that would actually hurt him: a raise leaving music quiet.
+class Boom(DuckRig):
+    def _player_do(self, app, cmd):
+        raise RuntimeError("AppleScript died")
+
+b = Boom()
+b._ducked = ("Spotify", 80)
+b.restore_music()
+check(b._ducked is None,
+      "a failure while restoring still clears the state, so Nova re-ducks next "
+      "time rather than believing the music is already down")
+
+# Ducking must never raise into the voice loop.
+class AllBroken(DuckRig):
+    def _running_player(self, launch_if_none=False):
+        raise RuntimeError("player query died")
+
+ab = AllBroken()
+try:
+    ab.duck_music()
+    ab.restore_music()
+    check(True, "a broken player never raises into the voice loop")
+except Exception as exc:
+    check(False, "a broken player never raises into the voice loop", repr(exc))
+
+
+# ══════════════════════════════════════════════════════════════════════════
 section("RESULT")
 # ══════════════════════════════════════════════════════════════════════════
 print(f"\n  {PASS}/{PASS + FAIL}")

@@ -88,6 +88,11 @@
     "natural_confirmations": false,
     "_note": "Reads are always summarized by the LLM (natural voice, with a deterministic template fallback). natural_confirmations=true also runs create/reminder confirmations through the LLM (~4-6s slower); false uses fast deterministic templates."
   },
+  "music": {
+    "duck_while_listening": true,
+    "duck_level": 20,
+    "_note": "Turn the music down while Nova is listening, then put it back when the conversation ends. Music coming out of the speakers goes into the microphone: measured with music mixed into real command audio, Whisper went from 0% word error in silence to 9.7% at full volume and 709% when loud, where it starts transcribing the music itself. Ducking to 20% recovers most of that. The PLAYER's volume is ducked, never the system's — system volume would take Nova's own voice down with it. Set false to leave the music alone."
+  },
   "weather": {
     "enabled": true,
     "_note": "The ONE deliberate widening of invariant 3 beyond MapKit, chosen by Nicholas 2026-08-13: Open-Meteo, which needs no API key and no account. What leaves the machine is an approximate coordinate (rounded to ~100m) or a place name he said out loud, only when he asks about weather. Never the LLM, memory, or the transcript. Set false and Nova declines weather questions instead of answering them."

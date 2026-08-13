@@ -98,6 +98,16 @@ def build(script):
         def add_turn(self, *a, **k): pass
     va.memory = _Mem()
 
+    class _Tools:
+        """The loop ducks the music on wake and restores it on the way back to
+        wake mode. This suite is about the state machine, not the player, so
+        the calls are recorded rather than performed — but they must EXIST,
+        because the loop really makes them."""
+        def __init__(self): self.ducked = 0; self.restored = 0
+        def duck_music(self): self.ducked += 1
+        def restore_music(self): self.restored += 1
+    va.tools = _Tools()
+
     class _WS:
         def send_message(self, *a, **k): pass
         def broadcast_state(self, *a, **k): pass
@@ -244,6 +254,26 @@ worker_done.wait(6)
 check(order.index("user-turn") < order.index("background-2"),
       "a user turn jumps AHEAD of queued background work", f"{order}")
 check(_PRIO_TURN < _PRIO_BACKGROUND, "turn priority outranks background")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("MUSIC IS DUCKED FOR THE CONVERSATION, AND PUT BACK AFTER")
+# ══════════════════════════════════════════════════════════════════════════
+# Music out of the speakers goes into the microphone: measured, Whisper's word
+# error went from 0% in silence to 709% over loud music, where it starts
+# transcribing the music itself. So the player is turned down while Nova
+# listens. The wiring lives in _main_loop, so it is checked here, against the
+# REAL loop — and the thing that would actually hurt him is a conversation
+# that ends without the volume coming back.
+va = build(["hello", None, "still there"])
+run_loop(va, seconds=2.0)
+check(va.tools.ducked >= 1, "the music is ducked when the wake word fires",
+      f"ducked {va.tools.ducked}x")
+check(va.tools.restored >= 1,
+      "and restored once the conversation ends", f"restored {va.tools.restored}x")
+check(va.tools.ducked <= va.tools.restored + 1,
+      "never ducked more times than it was restored (music left quiet)",
+      f"ducked {va.tools.ducked}, restored {va.tools.restored}")
 
 
 # ══════════════════════════════════════════════════════════════════════════

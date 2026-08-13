@@ -456,6 +456,10 @@ class VoiceAssistant:
         from screen_awareness import NovaScreen
         self.screen = NovaScreen(self.config, self.llm)
 
+    @property
+    def _duck_enabled(self) -> bool:
+        return bool(self.config.get("music", {}).get("duck_while_listening", True))
+
     def _init_weather(self) -> None:
         # Deterministic end to end: no model is involved in phrasing a
         # temperature. See weather_engine.py for the invariant-3 decision.
@@ -536,6 +540,12 @@ class VoiceAssistant:
             if not in_conversation:
                 # Wake mode: wait for "Nova" before listening.
                 self.set_state("idle")
+                # Back to waiting means the conversation is over, whatever
+                # ended it — so the music goes back up here. Restoring on this
+                # ONE path covers every exit (timeout, sign-off, empty turns,
+                # a handler raising) and is a no-op when nothing was ducked.
+                if self._duck_enabled:
+                    self.tools.restore_music()
                 log.info("Waiting for wake word…")
                 wake_detected = self.stt.record_wake(
                     wake_keywords=self.config["wake_word"]["keywords"],
@@ -545,6 +555,11 @@ class VoiceAssistant:
                     continue
                 just_woke = True
                 empty_turns = 0
+                # Duck for the WHOLE conversation, not per turn: restoring
+                # between turns would pump the volume up and down every time
+                # Nova answered. It stays down until we are back up top.
+                if self._duck_enabled:
+                    self.tools.duck_music()
             else:
                 just_woke = False
 

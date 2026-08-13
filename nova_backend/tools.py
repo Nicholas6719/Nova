@@ -122,6 +122,9 @@ class NovaTools:
         self._timers: dict[str, dict] = {}      # label -> {timer, kind, fires_at}
         self._timer_seq = 0
         self._lock = threading.Lock()
+        # (player, original_volume) while the music is turned down for
+        # listening, else None. See duck_music().
+        self._ducked: Optional[tuple] = None
 
     # ═══════════════════════════════════════════════════════════════════════
     # Dispatch
@@ -1437,6 +1440,56 @@ class NovaTools:
         if not q or self._NOT_A_NAME.match(q):
             return None
         return q, prefer
+
+    # ── Ducking: turn the music down while Nova is listening ──────────────────
+    # Nicholas played music and Nova stopped hearing him. That is the same
+    # physics as barge-in, which is parked because cancelling Nova's own voice
+    # needs acoustic echo cancellation — but music is different: NOVA OWNS THE
+    # VOLUME KNOB, so it can simply turn the interference down instead of
+    # trying to subtract it. Measured, with music mixed into real command audio:
+    #
+    #     silent        WER   0.0%   understood 6/6
+    #     ducked 15%    WER   5.6%   understood 5/6
+    #     full          WER   9.7%   understood 4/6
+    #     loud          WER 709.5%   understood 3/6   <- Whisper transcribing
+    #                                                    the music itself
+    #
+    # The PLAYER's volume is ducked, never the system's — system volume would
+    # take Nova's own voice down with it, which is the opposite of helpful.
+    def duck_music(self) -> None:
+        """Lower the player while Nova listens. Cheap and safe to call often."""
+        if self._ducked is not None:
+            return                      # already ducked; no AppleScript at all
+        try:
+            app = self._running_player()          # never launches
+            if not app:
+                return
+            if (self._player_get(app, "player state") or "").lower() != "playing":
+                return                  # nothing audible to duck
+            cur = self._player_get(app, "sound volume")
+            level = int(float(cur))
+            target = int(self.config.get("music", {}).get("duck_level", 20))
+            if level <= target:
+                return                  # already quiet enough to leave alone
+            self._player_do(app, f"set sound volume to {target}")
+            self._ducked = (app, level)
+            log.info(f"ducked {app} {level} -> {target} while listening")
+        except Exception as exc:
+            log.debug(f"could not duck music: {exc}")
+
+    def restore_music(self) -> None:
+        """Put the volume back. Must run on EVERY path out of a conversation —
+        leaving his music quiet because a turn raised would be its own bug."""
+        state = self._ducked
+        if not state:
+            return
+        app, level = state
+        self._ducked = None             # cleared FIRST, so a failure cannot
+        try:                            # wedge Nova into never ducking again
+            self._player_do(app, f"set sound volume to {level}")
+            log.info(f"restored {app} volume to {level}")
+        except Exception as exc:
+            log.debug(f"could not restore music volume: {exc}")
 
     def _open_spotify_search(self, query: str) -> str:
         """Open a search inside the desktop app. No credential needed — Spotify
