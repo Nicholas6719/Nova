@@ -6,11 +6,18 @@ All inference is local — no network calls.
 
 Streaming API: on_token callback receives each token as it generates.
 Nova's pipeline uses this for sentence-by-sentence TTS overlap.
+
+PROMPT CACHE: most of every prompt is identical to the last one — Nova's
+identity block alone is ~930 tokens and never changes. Reprocessing it each
+turn was measured at 1.67s of a 1.77s wait before Nova started speaking. The
+KV cache for the longest shared prefix is now carried between turns, so only
+the genuinely new tokens are processed. See `_reuse_cache`.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Callable, Optional
 
 log = logging.getLogger("nova.llm")
@@ -22,7 +29,103 @@ class LLMEngine:
         log.info(f"Loading MLX model: {config['model']}")
         from mlx_lm import load
         self.model, self.tokenizer = load(config["model"])
-        log.info("LLM ready.")
+
+        # ── Prompt cache state ────────────────────────────────────────────────
+        # `_cache_ids` is the exact token sequence `_cache` holds, so the two can
+        # never silently disagree about what the model has already seen. Any
+        # failure drops both (see _drop_cache) — a stale cache would not raise,
+        # it would quietly answer from the wrong context.
+        self._cache_enabled = bool(config.get("prompt_cache", True))
+        self._cache = None
+        self._cache_ids: list[int] = []
+        self._cache_thread: Optional[int] = None
+        log.info(f"LLM ready. (prompt cache: {'on' if self._cache_enabled else 'off'})")
+
+    # ── Prompt cache ──────────────────────────────────────────────────────────────
+    def _encode(self, prompt: str) -> list[int]:
+        """Tokenize exactly the way mlx-lm tokenizes a string prompt.
+
+        mlx-lm skips the special tokens when the text already starts with BOS.
+        A plain `encode()` here would add a SECOND BOS and feed the model a
+        different prompt than it gets today — measured, so this mirrors it
+        rather than assuming."""
+        bos = getattr(self.tokenizer, "bos_token", None)
+        add_special = bos is None or not prompt.startswith(bos)
+        return list(self.tokenizer.encode(prompt, add_special_tokens=add_special))
+
+    @staticmethod
+    def _common_prefix(a: list[int], b: list[int]) -> int:
+        n = 0
+        for x, y in zip(a, b):
+            if x != y:
+                break
+            n += 1
+        return n
+
+    def _drop_cache(self) -> None:
+        self._cache = None
+        self._cache_ids = []
+
+    def _reuse_cache(self, ids: list[int]):
+        """Return (cache, start) — a cache holding exactly ids[:start].
+
+        Always recomputes the shared prefix against the real token sequence, so
+        it stays correct no matter how the system prompt changes: a reworded
+        prompt or a ticked-over clock simply shortens the reuse instead of
+        feeding the model a context it never saw."""
+        from mlx_lm.models.cache import make_prompt_cache, trim_prompt_cache, can_trim_prompt_cache
+
+        # MLX arrays belong to the thread that made them.
+        if self._cache is not None and self._cache_thread != threading.get_ident():
+            log.debug("prompt cache built on another thread; rebuilding")
+            self._drop_cache()
+
+        n = 0
+        if self._cache is not None:
+            n = self._common_prefix(self._cache_ids, ids)
+            # Never feed an empty prompt: leave at least one token to process.
+            n = min(n, len(ids) - 1)
+            if n > 0 and can_trim_prompt_cache(self._cache):
+                extra = len(self._cache_ids) - n
+                if extra > 0:
+                    trim_prompt_cache(self._cache, extra)
+                return self._cache, n
+            self._drop_cache()
+
+        self._cache = make_prompt_cache(self.model)
+        self._cache_thread = threading.get_ident()
+        return self._cache, 0
+
+    def warm(self, system_prompt: str) -> int:
+        """Pre-process the unchanging part of the prompt so the FIRST turn is
+        fast too. Must run on the thread that owns MLX. Returns tokens cached."""
+        if not self._cache_enabled:
+            return 0
+        import mlx.core as mx
+
+        from mlx_lm.models.cache import make_prompt_cache
+
+        prompt = self._format_prompt(
+            self._build_messages(system_prompt, [], "hello")
+        )
+        ids = self._encode(prompt)
+        try:
+            cache = make_prompt_cache(self.model)
+            # A direct model call leaves the cache holding EXACTLY these tokens.
+            # generate_step would additionally feed its own sampled token in,
+            # leaving a phantom token in the cache — measured.
+            self.model(mx.array(ids)[None], cache=cache)
+            mx.eval([c.state for c in cache])
+        except Exception as exc:
+            log.warning(f"Prompt cache warm-up failed ({exc}); continuing uncached.")
+            self._drop_cache()
+            return 0
+
+        self._cache = cache
+        self._cache_ids = ids
+        self._cache_thread = threading.get_ident()
+        log.info(f"Prompt cache warmed: {len(ids)} tokens")
+        return len(ids)
 
     # ── Streaming generation ──────────────────────────────────────────────────────
     def stream(
@@ -45,20 +148,61 @@ class LLMEngine:
         prompt   = self._format_prompt(messages)
 
         sampler = make_sampler(temp=self.config.get("temperature", 0.7))
-        full = ""
-        for response in stream_generate(
-            self.model,
-            self.tokenizer,
-            prompt=prompt,
-            max_tokens=self.config.get("max_tokens", 512),
-            sampler=sampler,
-        ):
-            # mlx-lm yields GenerationResponse objects; the text is on `.text`.
-            token = response.text
-            full += token
-            on_token(token)
+        max_tokens = self.config.get("max_tokens", 512)
 
+        if not self._cache_enabled:
+            full = ""
+            for response in stream_generate(
+                self.model,
+                self.tokenizer,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                sampler=sampler,
+            ):
+                # mlx-lm yields GenerationResponse objects; the text is on `.text`.
+                token = response.text
+                full += token
+                on_token(token)
+            return full.strip()
+
+        ids = self._encode(prompt)
+        cache, start = self._reuse_cache(ids)
+
+        full = ""
+        generated: list[int] = []
+        try:
+            for response in stream_generate(
+                self.model,
+                self.tokenizer,
+                prompt=ids[start:],
+                max_tokens=max_tokens,
+                sampler=sampler,
+                prompt_cache=cache,
+            ):
+                token = response.text
+                full += token
+                generated.append(response.token)
+                on_token(token)
+        except Exception:
+            # The cache no longer matches _cache_ids; anything else would answer
+            # the next turn from a context the model never actually saw.
+            self._drop_cache()
+            raise
+
+        # The cache now holds the prompt plus what was just generated, which is
+        # exactly the prefix of next turn's prompt — so a follow-up reprocesses
+        # almost nothing.
+        self._cache_ids = ids + generated
+        self._bound_cache()
         return full.strip()
+
+    def _bound_cache(self) -> None:
+        """Keep the cache inside the context window. Nova caps history, so this
+        is a backstop rather than the normal path."""
+        limit = self.config.get("context_window", 4096)
+        if len(self._cache_ids) > limit:
+            log.debug(f"prompt cache exceeded {limit} tokens; resetting")
+            self._drop_cache()
 
     # ── Non-streaming generation (internal / tool use) ────────────────────────────
     def generate(

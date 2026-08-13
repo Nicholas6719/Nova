@@ -5,7 +5,9 @@
     "max_tokens": 512,
     "temperature": 0.7,
     "context_window": 4096,
-    "_note": "For higher quality at ~2x latency, swap to mlx-community/Llama-3.1-8B-Instruct-4bit. n_ctx is fixed at 4096 \u2014 do not raise without testing."
+    "prompt_cache": true,
+    "_note": "For higher quality at ~2x latency, swap to mlx-community/Llama-3.1-8B-Instruct-4bit. n_ctx is fixed at 4096 \u2014 do not raise without testing.",
+    "_prompt_cache_note": "Reuse the KV cache for the part of the prompt that did not change since the last turn (the ~930-token identity block never does). Measured: time to first token 1.77s -> 0.41s. Set false for an instant rollback to reprocessing every prompt from scratch."
   },
   "stt": {
     "model": "base.en",

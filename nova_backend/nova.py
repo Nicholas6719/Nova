@@ -268,7 +268,28 @@ class VoiceAssistant:
         self._init_screen()
         self._init_ws()
         self._verify_engines()
+        self._warm_prompt_cache()
         log.info("Nova ready.")
+
+    def _warm_prompt_cache(self) -> None:
+        """Pre-process the unchanging head of the system prompt so the FIRST
+        thing Nicholas says is answered as fast as the second.
+
+        Submitted as a BACKGROUND job because it has to run on the nova-llm
+        thread (MLX is thread-local) — and at background priority a real turn
+        arriving mid-warm jumps ahead of it rather than waiting."""
+        if not self.config["llm"].get("prompt_cache", True):
+            return
+
+        def _warm() -> None:
+            try:
+                self.llm.warm(self._build_system_prompt(
+                    self.memory.get_context_for_llm(), ""))
+            except Exception as exc:
+                # Never fatal: an unwarmed cache is just today's speed.
+                log.warning(f"Prompt cache warm-up skipped: {exc}")
+
+        self._submit_job(_warm)
 
     # Every engine the router dereferences in _handle_turn_impl. A missing one
     # is fatal: it raises on EVERY turn, so Nova starts, connects, and then
