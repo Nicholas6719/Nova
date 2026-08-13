@@ -124,6 +124,36 @@ for phrase in TRANSPORT:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+section("\"JUST PUT MUSIC ON\" NEEDS NO CREDENTIALS  (and never did)")
+# ══════════════════════════════════════════════════════════════════════════
+# This is what Nicholas actually asks for most, and what he had with the
+# assistant he used before: say the words, Spotify opens and plays whatever
+# context it was last in. Six of these used to fall through to "I can't do that
+# one yet", which is the opposite of true. None of them touches the network.
+JUST_PLAY = [
+    "play music", "play", "play the music", "start the music", "start some music",
+    "resume", "keep playing", "play me some music",
+    "put on some music", "put on music", "throw on some music",
+    "get some music going", "turn some music on",
+    "play something", "play anything", "music please",
+]
+_saved_conf = spotify_search.is_configured
+spotify_search.is_configured = lambda: (_ for _ in ()).throw(
+    AssertionError("the plain 'play music' path must never consult Spotify search"))
+for phrase in JUST_PLAY:
+    try:
+        resp, rig = run(phrase)
+    except AssertionError as exc:
+        check(False, f"no search needed: {phrase[:40]!r}", str(exc))
+        continue
+    searched = any("play track" in c for c in commands)
+    check(resp is not None and not searched,
+          f"plays with no credentials: {phrase[:40]!r}",
+          "" if resp is not None and not searched else f"resp={resp!r}")
+spotify_search.is_configured = _saved_conf
+
+
+# ══════════════════════════════════════════════════════════════════════════
 section("'PLAY IT AGAIN' RESTARTS, IT DOES NOT SEARCH")
 # ══════════════════════════════════════════════════════════════════════════
 # Deliberately NOT bare "restart" or "start over": "let's start over" is in
@@ -195,6 +225,25 @@ check(resp and "Rainfall" in resp and "Weightless" not in resp,
 # ══════════════════════════════════════════════════════════════════════════
 section("FAILURE IS ADMITTED, WITH SOMETHING ACTIONABLE")
 # ══════════════════════════════════════════════════════════════════════════
+# `open spotify:search:...` LAUNCHES SPOTIFY. Writing this test without
+# stubbing it did exactly that on a machine where Spotify was closed — the same
+# "tools.match() executes as it matches" trap that once launched Spotify during
+# a routing probe. Every path below can reach it, so the stub wraps all of them.
+import subprocess as _sp
+_orig_run = _sp.run
+opened: list = []
+
+
+class _FakeCompleted:
+    returncode = 0
+
+
+def _no_launch(*a, **k):
+    opened.append(list(a[0]) if a and isinstance(a[0], (list, tuple)) else a)
+    return _FakeCompleted()
+
+
+_sp.run = _no_launch
 spotify_search.search = lambda q, prefer=None, market="US": {
     "ok": False, "reason": "not_found"}
 resp, _ = run("play some rain sounds")
@@ -203,20 +252,33 @@ check(resp and "playlist" in resp.lower(),
       "…and explains that personal playlists aren't searchable this way",
       f"{resp!r}")
 
+# An unreachable API should not end in an apology either: fall back to the
+# thing that works without the network being helpful.
+opened.clear()
 spotify_search.search = lambda q, prefer=None, market="US": {
     "ok": False, "reason": "unreachable"}
 resp, _ = run("play some rain sounds")
-check(resp and "couldn't reach" in resp.lower(), "an unreachable API says so", f"{resp!r}")
+check(resp and "opened a search" in resp.lower(),
+      "an unreachable API falls back to opening the search", f"{resp!r}")
+check(any("spotify:search:" in " ".join(o) for o in opened if o),
+      "…and it really is a search URI", f"{opened!r}")
 
+# With no credentials a NAMED request must not nag him about API keys. It does
+# the useful thing the desktop app can do unaided: opens that search in
+# Spotify, and says plainly that it stopped one step short of playing.
 spotify_search.is_configured = lambda: False
+opened.clear()
 resp, _ = run("play some rain sounds")
-check(resp and "client id" in resp.lower(),
-      "with no credentials it says exactly what is missing", f"{resp!r}")
-check(resp and "spotify credentials" in resp.lower(),
-      "…and where to put them", f"{resp!r}")
+check(resp and "client id" not in resp.lower() and "secret" not in resp.lower(),
+      "no credentials does NOT nag him about API keys", f"{resp!r}")
+check(any("spotify:search:" in " ".join(o) for o in opened if o),
+      "…it opens the search in his Spotify instead", f"{opened!r}")
+check(resp and "opened a search" in resp.lower(),
+      "…and says so, without implying it started playing", f"{resp!r}")
 
 spotify_search.search = _real_search
 spotify_search.is_configured = _real_conf
+check(_sp.run is _no_launch, "the launch stub stayed in place for every path above")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -237,6 +299,9 @@ for phrase in ("play some rain sounds", "what's playing", "pause the music",
           else "leaked a URI, markdown, or a URL")
 spotify_search.search = _real_search
 spotify_search.is_configured = _real_conf
+
+
+_sp.run = _orig_run          # never leave the real one stubbed
 
 
 # ══════════════════════════════════════════════════════════════════════════

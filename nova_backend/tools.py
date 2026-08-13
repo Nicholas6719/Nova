@@ -1328,9 +1328,21 @@ class NovaTools:
                 return self._no_player()
             self._player_do(app, "pause")
             return "Stopped the music."
+        # "Just put music on" — every way he might say it. This path needs NO
+        # credentials and never has: Spotify resumes whatever context it was
+        # last in, which is usually the playlist he was listening to. Six of
+        # these phrasings used to fall through to "I can't do that one yet",
+        # which is the opposite of true.
+        _ANY_MUSIC = r"(?:music|songs?|tunes?|something|anything|playback)"
         if re.search(r"\b(resume|unpause|keep\s+playing)\b", low) \
            or re.search(r"\b(play|start)\b.*" + MUSIC, low) \
-           or re.fullmatch(r"\s*play\s*\.?\s*", low):
+           or re.fullmatch(r"\s*play\s*\.?\s*", low) \
+           or re.search(r"\b(?:put|throw)\s+on\b.*" + _ANY_MUSIC, low) \
+           or re.search(r"\b(?:get|turn)\s+(?:some\s+)?" + _ANY_MUSIC
+                        + r"\s+(?:going|on)\b", low) \
+           or re.fullmatch(r"\s*(?:play|put\s+on)\s+(?:some\s+)?"
+                           r"(?:something|anything)\s*\.?\s*", low) \
+           or re.fullmatch(r"\s*(?:some\s+)?music[,\s]*please\s*\.?\s*", low):
             # This is the one place we'll start a player: asking to play music
             # with nothing running clearly means "start some music".
             app = self._running_player(launch_if_none=True)
@@ -1426,15 +1438,28 @@ class NovaTools:
             return None
         return q, prefer
 
+    def _open_spotify_search(self, query: str) -> str:
+        """Open a search inside the desktop app. No credential needed — Spotify
+        registers the `spotify:` URL scheme, so this works out of the box. It
+        stops one step short of playing, and Nova says exactly that rather than
+        implying it started something."""
+        uri = "spotify:search:" + urllib.parse.quote(query)
+        r = subprocess.run(["open", uri], capture_output=True)
+        if r.returncode != 0:
+            return f"I couldn't open a Spotify search for {query}."
+        return (f"I've opened a search for {query} in Spotify. "
+                "Pick one and I can take it from there.")
+
     def _play_named(self, query: str, prefer=None) -> str:
         import spotify_search
 
         if not spotify_search.is_configured():
-            # Say what is missing and where it goes. "I can't do that" would be
-            # true but useless, and pretending would be worse.
-            return ("I can't look up music by name yet. Add a Spotify client ID "
-                    "and secret to spotify credentials in Nova's data folder, "
-                    "and I'll be able to play things you ask for.")
+            # NO NAGGING. Searching by name is a bonus that needs a credential;
+            # everything else about music works without one. So do the useful
+            # thing the desktop app CAN do unaided — open that search in
+            # Spotify — and say so plainly. Telling him to go set up an API key
+            # in the middle of asking for music is the wrong answer.
+            return self._open_spotify_search(query)
 
         res = spotify_search.search(query, prefer=prefer)
         if not res.get("ok"):
@@ -1445,7 +1470,7 @@ class NovaTools:
                         "this way, only Spotify's catalogue.")
             if reason == "auth_failed":
                 return "Spotify rejected my credentials, so I couldn't search."
-            return "I couldn't reach Spotify to search just now."
+            return self._open_spotify_search(query)
 
         app = self._running_player(launch_if_none=True)
         if app != "Spotify":
