@@ -19,13 +19,82 @@ the app first.
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
-PY = sys.executable
+
+
+# ── Which Python? ─────────────────────────────────────────────────────────────
+# Packages are installed PER INTERPRETER. This Mac has several python3s and only
+# one of them has mlx_lm, whisper and kokoro. Running the suites under whatever
+# python happened to be on PATH would test an environment Nova never uses — and
+# the environment guard exists precisely because a pip install once broke Nova's
+# LLM. A guard pointed at the wrong interpreter is worse than none: it reports
+# green while the real one is broken.
+#
+# So the runner resolves the SAME interpreter the app does. This list, its
+# order, and the NOVA_PYTHON override mirror locatePython() in
+# BackendManager.swift — if that changes, change this with it.
+_CANDIDATES = (
+    "/opt/homebrew/Caskroom/miniforge/base/bin/python3",   # conda/miniforge
+    "/opt/homebrew/bin/python3",                           # Homebrew (Apple silicon)
+    "/usr/local/bin/python3",                              # Homebrew (Intel)
+    "/usr/bin/python3",                                    # macOS system
+)
+
+
+def _can_import_backend_deps(path: str) -> bool:
+    """Same validation the app uses: can this interpreter import mlx_lm?"""
+    try:
+        return subprocess.run([path, "-c", "import mlx_lm"],
+                              capture_output=True, timeout=60).returncode == 0
+    except Exception:
+        return False
+
+
+def resolve_backend_python() -> tuple[str, str]:
+    """(interpreter, how_it_was_chosen). Raises SystemExit if none will do.
+
+    Unlike the app, this REFUSES to fall back to an interpreter without the
+    dependencies. The app falls back so the backend can start and surface its
+    own import error; a test run that silently checks the wrong environment
+    would just be lying.
+    """
+    override = os.environ.get("NOVA_PYTHON", "").strip()
+    if override:
+        if not os.access(override, os.X_OK):
+            sys.exit(f"NOVA_PYTHON is set to {override!r}, which is not executable.")
+        return override, "NOVA_PYTHON override"
+
+    seen = []
+    for path in _CANDIDATES:
+        if not os.access(path, os.X_OK):
+            continue
+        seen.append(path)
+        if _can_import_backend_deps(path):
+            return path, "same interpreter the app uses"
+
+    on_path = shutil.which("python3")
+    if on_path and on_path not in seen:
+        seen.append(on_path)
+        if _can_import_backend_deps(on_path):
+            return on_path, "python3 on PATH"
+
+    sys.exit(
+        "No interpreter with Nova's dependencies was found.\n"
+        "  Tried: " + ", ".join(seen or ["(none executable)"]) + "\n"
+        "  Every one of these is missing mlx_lm, so none of them is the one\n"
+        "  Nova runs under. Install the requirements into the right interpreter,\n"
+        "  or set NOVA_PYTHON=/path/to/python to point at it."
+    )
+
+
+PY, PY_REASON = resolve_backend_python()
 
 # name -> (file, description, needs_audio, needs_ports)
 SUITES = {
@@ -56,9 +125,9 @@ CANNOT_VERIFY = [
 
 def run(name: str) -> tuple[str, int, float]:
     fname, desc, _, _ = SUITES[name]
-    print("\n" + "─" * 72)
-    print(f"▶ {name}  —  {desc}")
-    print("─" * 72)
+    print("\n" + "─" * 72, flush=True)
+    print(f"▶ {name}  —  {desc}", flush=True)
+    print("─" * 72, flush=True)
     t0 = time.monotonic()
     # -u: without it the child's output is block-buffered and lands out of
     # order relative to these headers, which makes a failure hard to attribute.
@@ -85,6 +154,15 @@ def main() -> int:
         ap.print_help()
         print("\nNothing selected. --quick is the usual one.")
         return 2
+
+    print(f"interpreter: {PY}", flush=True)
+    print(f"             ({PY_REASON})", flush=True)
+    # Compare the RESOLVED binaries: miniforge's `python` and `python3` are the
+    # same file, and warning about that would be noise.
+    if os.path.realpath(PY) != os.path.realpath(sys.executable):
+        print(f"  note: you invoked {sys.executable},", flush=True)
+        print( "        which is NOT the interpreter Nova runs under. The suites", flush=True)
+        print( "        were run under the one above, so the results still apply.", flush=True)
 
     results = [run(name) for name in chosen]
 

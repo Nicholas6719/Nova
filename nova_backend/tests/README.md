@@ -15,6 +15,12 @@ python nova_backend/tests/run_tests.py --all      # everything (plays audio)
 | `smoke_launch.py` | The REAL process starts, answers a turn over HTTP, and shuts down cleanly | real process |
 | `test_full_sweep.py` | Every subsystem against real system state (EventKit, SQLite, filesystem) | real code + real system |
 
+The runner pins itself to the interpreter Nova actually uses (miniforge),
+mirroring `locatePython()` in `BackendManager.swift`, so it does not matter
+which `python` you type. Override with `NOVA_PYTHON=/path/to/python` if you ever
+need to. It refuses to run under an interpreter without Nova's dependencies
+rather than reporting green about an environment Nova never touches.
+
 ## Rules these encode
 
 **1. The harness may not construct what the product constructs.**
