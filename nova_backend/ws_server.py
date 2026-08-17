@@ -30,7 +30,7 @@ class NovaWSServer:
         self,
         http_port: int,
         ws_port: int,
-        on_text_message: Callable[[str], None],
+        on_text_message: Callable[[str, bool], None],
     ) -> None:
         self.http_port        = http_port
         self.ws_port          = ws_port
@@ -150,7 +150,8 @@ class NovaWSServer:
                             if data.get("type") == "message":
                                 content = data.get("content", "").strip()
                                 if content:
-                                    server_ref.on_text_message(content)
+                                    server_ref.on_text_message(
+                                        content, bool(data.get("silent", False)))
                         except (json.JSONDecodeError, KeyError):
                             pass
                 except Exception:
@@ -216,9 +217,11 @@ class NovaWSServer:
                             status=400,
                         )
                         return
+                    # silent: answer in text only. The app sets this when
+                    # Nicholas typed rather than spoke.
                     threading.Thread(
                         target=server_ref.on_text_message,
-                        args=(content,),
+                        args=(content, bool(data.get("silent", False))),
                         daemon=True,
                     ).start()
                     self._json({"ok": True})

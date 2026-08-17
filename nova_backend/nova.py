@@ -252,6 +252,9 @@ class VoiceAssistant:
         # Set when a sleep phrase rode along with real content: answer the
         # content first, then return to wake mode.
         self._sleep_after_turn = False
+        # This turn came from the keyboard and must not be spoken aloud. Only
+        # ever set for the duration of one typed turn.
+        self._silent_turn = False
 
         # Shared microphone gate. Set = capture allowed; cleared = mic paused.
         # A voice assistant must not record while it speaks — both to avoid
@@ -639,6 +642,10 @@ class VoiceAssistant:
             self.memory.add_turn("user", text)
             self._session_turns.append({"role": "user", "content": text})
             self._turn_was_command = False
+            # He SPOKE this one. Clear any silent flag left by a typed turn, or
+            # a single use of the keyboard would mute Nova for the rest of the
+            # session.
+            self._silent_turn = False
             self.ws.send_message("user", text)
             # Run on the MLX worker thread and wait: capture must not resume
             # until the response (and its TTS) is done, or it self-captures.
@@ -732,10 +739,11 @@ class VoiceAssistant:
                 return ""
 
     # ── Text input from SwiftUI (typed / programmatic) ────────────────────────────
-    def _handle_text_input(self, text: str) -> None:
+    def _handle_text_input(self, text: str, silent: bool = False) -> None:
         if not text.strip():
             return
-        log.info(f"[text-input] {text}")
+        log.info(f"[text-input] {text}{' (silent)' if silent else ''}")
+        self._silent_turn = silent
         self.memory.add_turn("user", text)
         self.ws.send_message("user", text)
         # Submit to the MLX worker and return immediately; the response streams
@@ -962,6 +970,14 @@ class VoiceAssistant:
         self._mark_turn_was_command()
         self.ws.send_message("assistant", text)
         log.info(f"[nova] {text}")
+
+        # Typed in, typed back. When Nicholas types instead of talking he is
+        # usually somewhere he cannot talk, so speaking the answer aloud is the
+        # last thing he wants. The reply still reaches the UI over the WS.
+        if self._silent_turn:
+            self.set_state("idle")
+            return
+
         self.set_state("speaking")
         # Clean at the SPEAKING boundary, not just on the LLM path. Everything
         # deterministic came through here uncleaned — and the offending text is

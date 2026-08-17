@@ -19,6 +19,15 @@ final class NovaAPIClient: ObservableObject {
     @Published private(set) var messages: [Message] = []
     @Published private(set) var currentState: String = "idle"
     @Published private(set) var isConnected: Bool = false
+    /// Which screen the UI should be showing, and its panel data. The backend
+    /// sends this on connect as well as on every navigation, so a relaunched
+    /// app comes up on the right screen instead of blank.
+    @Published private(set) var currentView: ViewPayload?
+
+    struct ViewPayload {
+        let name: String
+        let data: [String: Any]
+    }
 
     // MARK: - Configuration
 
@@ -99,7 +108,10 @@ final class NovaAPIClient: ObservableObject {
     /// echoes the user's turn back over the WebSocket as a `message` frame, so we
     /// do NOT append it locally here — doing both showed every message twice.
     /// The backend echo is the single source of truth for the message list.
-    func sendMessage(_ text: String) async {
+    /// `silent` asks the backend to answer in text only, without speaking. When
+    /// Nicholas types instead of talking he is usually somewhere he cannot talk,
+    /// so a spoken reply is the last thing he wants.
+    func sendMessage(_ text: String, silent: Bool = false) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -107,7 +119,8 @@ final class NovaAPIClient: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["content": trimmed])
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["content": trimmed, "silent": silent])
         _ = try? await session.data(for: request)
     }
 
@@ -212,6 +225,12 @@ final class NovaAPIClient: ObservableObject {
         case "token":
             if let token = object["token"] as? String {
                 appendToken(token)
+            }
+
+        case "view":
+            if let name = object["view"] as? String {
+                currentView = ViewPayload(name: name,
+                                          data: object["data"] as? [String: Any] ?? [:])
             }
 
         case "need_location":

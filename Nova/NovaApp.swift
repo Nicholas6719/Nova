@@ -11,7 +11,7 @@ import AppKit
 @main
 struct NovaApp: App {
     /// Owns and supervises the Python backend process for the app's lifetime.
-    /// Created here (not in ChatViewModel) so it survives view re-creation and
+    /// Created here (not in the view model) so it survives view re-creation and
     /// there is a single process owner.
     @StateObject private var backendManager = BackendManager()
 
@@ -26,7 +26,7 @@ struct NovaApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(backendManager: backendManager)
+            ShellView(backendManager: backendManager)
                 .onAppear {
                     appDelegate.backendManager = backendManager
                     backendManager.start()
@@ -36,6 +36,17 @@ struct NovaApp: App {
                     locationProvider.requestLocation()
                 }
         }
+        // The SwiftUI-native way, and the one that actually works. Measured:
+        // titlebarAppearsTransparent, fullSizeContentView, a black window
+        // background and hiding NSTitlebarContainerView all applied cleanly and
+        // STILL left a 32pt #1D1F20 strip across the top, because the scene
+        // reserves and paints that area itself. AppKit was the wrong layer to
+        // fight this at.
+        .windowStyle(.hiddenTitleBar)
+        // Part of "Nova always opens full size". macOS restores the previous
+        // frame AFTER onAppear, so setting the size from the view alone loses
+        // the race; this establishes the size before restoration can apply.
+        .defaultSize(width: 1120, height: 760)
     }
 }
 

@@ -38,6 +38,14 @@
 		6FCF57302F45303E00109380 /* NovaUITestsLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaUITestsLaunchTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		AA0000000000000000000001 /* Nova */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Nova;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
 /* Begin PBXFrameworksBuildPhase section */
 		6F1BE0832F43D66C00380C52 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
@@ -102,16 +110,6 @@
 		};
 /* End PBXGroup section */
 
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-		AA0000000000000000000001 /* Nova */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
-			path = Nova;
-			sourceTree = "<group>";
-		};
-/* End PBXFileSystemSynchronizedRootGroup section */
-
 /* Begin PBXNativeTarget section */
 		6F1BE0852F43D66C00380C52 /* Nova */ = {
 			isa = PBXNativeTarget;
@@ -123,10 +121,10 @@
 			);
 			buildRules = (
 			);
+			dependencies = (
+			);
 			fileSystemSynchronizedGroups = (
 				AA0000000000000000000001 /* Nova */,
-			);
-			dependencies = (
 			);
 			name = Nova;
 			packageProductDependencies = (
@@ -429,14 +427,14 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = NovaOS;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Nova uses the microphone for voice input.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Nova uses speech recognition to understand what you say.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Nova reads and manages your calendar events when you ask.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Nova reads and manages your calendar events when you ask.";
-				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Nova reads and manages your reminders when you ask.";
-				INFOPLIST_KEY_NSRemindersUsageDescription = "Nova reads and manages your reminders when you ask.";
 				INFOPLIST_KEY_NSLocationUsageDescription = "Nova uses your location to answer questions like how far away the nearest store is.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Nova uses your location to answer questions like how far away the nearest store is.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Nova uses the microphone for voice input.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Nova reads and manages your reminders when you ask.";
+				INFOPLIST_KEY_NSRemindersUsageDescription = "Nova reads and manages your reminders when you ask.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Nova uses speech recognition to understand what you say.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -493,14 +491,14 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = NovaOS;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Nova uses the microphone for voice input.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Nova uses speech recognition to understand what you say.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Nova reads and manages your calendar events when you ask.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Nova reads and manages your calendar events when you ask.";
-				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Nova reads and manages your reminders when you ask.";
-				INFOPLIST_KEY_NSRemindersUsageDescription = "Nova reads and manages your reminders when you ask.";
 				INFOPLIST_KEY_NSLocationUsageDescription = "Nova uses your location to answer questions like how far away the nearest store is.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Nova uses your location to answer questions like how far away the nearest store is.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Nova uses the microphone for voice input.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Nova reads and manages your reminders when you ask.";
+				INFOPLIST_KEY_NSRemindersUsageDescription = "Nova reads and manages your reminders when you ask.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Nova uses speech recognition to understand what you say.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
