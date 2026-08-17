@@ -58,6 +58,10 @@ class FakeSTT:
         self.wake_calls = 0
         self.commands = 0
         self.last_capture_reason = "ok"
+        # Mirrors the real STTEngine. Without it the fake drifted from the
+        # thing it stands in for and the confidence gate went untested here —
+        # a clean transcript, so every scripted turn is acted on.
+        self.last_confidence = -0.10
 
     def record_wake(self, wake_keywords=None, timeout_s=0):
         self.wake_calls += 1

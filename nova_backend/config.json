@@ -27,7 +27,9 @@
     "command_max_duration_s": 15.0,
     "echo_cancellation": false,
     "echo_stream_delay_ms": 35,
-    "_aec_note": "Subtract Nova's own voice from the microphone so she can be interrupted while speaking. Measured on real Kokoro output: 27-36 dB of her voice removed, his voice attenuated only 1.5-3.9 dB, and 0.2 dB when she is silent. DEFAULT FALSE because turning it on also means keeping mic frames during playback, which is a change to the live listening path that needs his ears on real speakers. echo_stream_delay_ms is the speaker-to-mic delay estimate."
+    "_aec_note": "Subtract Nova's own voice from the microphone so she can be interrupted while speaking. Measured on real Kokoro output: 27-36 dB of her voice removed, his voice attenuated only 1.5-3.9 dB, and 0.2 dB when she is silent. DEFAULT FALSE because turning it on also means keeping mic frames during playback, which is a change to the live listening path that needs his ears on real speakers. echo_stream_delay_ms is the speaker-to-mic delay estimate.",
+    "confidence_gate": true,
+    "_confidence_note": "Gate action on how sure Whisper was. Nova has no transcript on screen any more, so a mishear is otherwise silent. Measured over 270 clips (18 commands x 3 voices x 5 noise levels): a -0.50 floor catches 75% of mishears while asking again unnecessarily only 5% of the time. The bar rises with consequence - chat is cheap to get wrong, sending a message is not, and anything outbound is read back regardless of confidence. Set false to act on every transcript as Nova did before."
   },
   "tts": {
     "primary": "kokoro",

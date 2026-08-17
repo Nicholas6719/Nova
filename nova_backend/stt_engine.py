@@ -103,6 +103,11 @@ class STTEngine:
         # user stayed quiet — a real timeout) or "too_quiet" (audio WAS captured
         # but was unusable). The caller must not confuse the last two.
         self.last_capture_reason = "ok"
+        # Whisper's own confidence for the last transcription (duration-weighted
+        # mean avg_logprob), or None when it could not be computed. Nova has no
+        # transcript on screen any more, so this is what decides whether she
+        # acts — see confidence.py for the measured thresholds.
+        self.last_confidence: Optional[float] = None
         self._mic_gate = mic_gate if mic_gate is not None else threading.Event()
         if mic_gate is None:
             self._mic_gate.set()
@@ -439,6 +444,11 @@ class STTEngine:
             self.last_capture_reason = "too_quiet"
             return None
         self.last_capture_reason = "ok"
+        # Whisper's own confidence for the last transcription (duration-weighted
+        # mean avg_logprob), or None when it could not be computed. Nova has no
+        # transcript on screen any more, so this is what decides whether she
+        # acts — see confidence.py for the measured thresholds.
+        self.last_confidence: Optional[float] = None
         return audio
 
     # ── Transcription ─────────────────────────────────────────────────────────────
@@ -492,6 +502,17 @@ class STTEngine:
                 "what is the date, open, play, search, tell me."
             ),
         )
+
+        # Weighted by segment duration: a half-second of certainty should not
+        # outvote three seconds of guessing.
+        segments = list(segments)
+        if segments:
+            total = sum(max(0.01, s.end - s.start) for s in segments)
+            self.last_confidence = sum(
+                s.avg_logprob * max(0.01, s.end - s.start)
+                for s in segments) / total
+        else:
+            self.last_confidence = None
 
         text = " ".join(seg.text for seg in segments).strip()
         # Strip leading filler words.

@@ -543,6 +543,53 @@ class VoiceAssistant:
         except Exception as exc:
             log.warning(f"could not send mode: {exc}")
 
+    def _confidence_gate(self, text: str):
+        """Decide whether to act on what was heard. Returns the Decision, or
+        None when gating is off.
+
+        Three outcomes reach Nicholas:
+          REJECT  — she says she did not catch it and waits. No guess.
+          CONFIRM — she reads back HIS words and acts only on a clear yes.
+          ACT_UNSURE — she acts, with the orb showing she was not certain, so a
+                       wrong answer is explainable instead of mysterious.
+        """
+        if not self.config["stt"].get("confidence_gate", True):
+            return None
+        import confidence as C
+
+        # getattr, not attribute access: a missing signal is designed to mean
+        # "behave exactly as before", and that must not become a crash in the
+        # voice loop just because an STT implementation predates this.
+        decision = C.decide(text, getattr(self.stt, "last_confidence", None))
+        log.info(f"[confidence] {decision.score:.2f} tier={decision.tier} "
+                 f"-> {decision.action}")
+
+        if decision.action == C.REJECT:
+            self._respond(C.ask_again(decision.tier))
+            return decision
+
+        if decision.action == C.CONFIRM:
+            # Route the ORIGINAL words on a yes — not a re-transcription, and
+            # not a paraphrase. What he confirms is exactly what was heard.
+            self._tool_confirm = lambda t=text: self._run_confirmed(t)
+            self._respond(decision.readback)
+            return decision
+
+        if decision.is_unsure:
+            # Visible, not spoken. Interrupting every borderline turn with
+            # "I think you said..." would be worse than the problem.
+            self.set_state("unsure")
+        return decision
+
+    def _run_confirmed(self, text: str) -> str:
+        """He confirmed a read-back: run the utterance for real.
+
+        Returns "" because the handlers speak for themselves through _respond;
+        returning their text would say it twice.
+        """
+        self._handle_turn_impl(text)
+        return ""
+
     def _emit_panel(self, engine) -> None:
         """Send the panel a handler just built, if it built one.
 
@@ -710,6 +757,15 @@ class VoiceAssistant:
                 continue
 
             empty_turns = 0        # a real utterance resets the tolerance
+
+            # ── Confidence gate ──────────────────────────────────────────
+            # The transcript used to be on screen, so a mishear was visible.
+            # It isn't any more, so how sure Whisper was now decides whether
+            # Nova acts — and the bar rises with what the action costs.
+            gate = self._confidence_gate(text)
+            if gate is not None and not gate.should_act:
+                continue
+
             log.info(f"[user] {text}")
             self.memory.add_turn("user", text)
             self._session_turns.append({"role": "user", "content": text})

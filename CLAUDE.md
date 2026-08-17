@@ -45,6 +45,7 @@ Nova has two parts:
     rag.py                   local document retrieval
     views.py                 voice navigation between UI screens
     panels.py                structured payloads for the screen
+    confidence.py            how sure Nova must be before acting
     echo_canceller.py        subtracts Nova's own voice from the mic
     ws_server.py             HTTP :5001 + WS :8766 bridge
     training/                wake-model training kit (Colab)
@@ -101,6 +102,8 @@ Nova has two parts:
 **`calendar_intents.py`** — Natural-language dispatch on top of `calendar_reminders.py`. `NovaCalendar.detect_intent` is strict regex only (no calendar word → None → normal chat); `handle` runs LLM JSON extraction (temp=0, heavily post-processed) and returns a single spoken string. Runs on the `nova-llm` worker thread, so its `self.llm.generate` calls are thread-safe. Reads are LLM-summarized with deterministic template fallbacks so a bad generation never invents a day/time.
 
 **`views.py`** — Voice navigation between UI destinations ("go home", "show me the menu", "go to finance"). Nova's UI has no sidebar and nothing to click, so **speech is the navigation**. Detection is strict regex anchored at BOTH ends and the destination must be a name in the registry, because navigation words are ordinary English: "go home" navigates, "I go home every friday" is conversation, and "I want to go to italy someday" falls through because Italy is not a view. Routing stage 2c — ahead of calendar, weather, files and tools, every one of which would otherwise claim these ("go to the weather" carries a weather word, "open the memory panel" looks like an app launch). A view whose panel does not exist yet **says so out loud and shows nothing**, rather than displaying an empty screen. The menu is generated from the registry so it cannot drift from what actually exists. Never touches the LLM.
+
+**`confidence.py`** — How sure Nova has to be before she acts. The UI has no transcript any more, so a mishear is a SILENT failure; Whisper's `avg_logprob` gates action instead. It is not a calibrated probability and this does not pretend otherwise — it is a score that separates right from wrong well enough to threshold, **measured over 270 clips** (18 commands x 3 voices x 5 noise levels, -2 to 40 dB SNR): usable transcripts median -0.137, unusable -0.768; a -0.50 floor catches 75% of mishears while asking again unnecessarily only 5.3% of the time. **The bar scales with consequence** — chat acts almost always, file moves and calendar writes sit at the knee, and anything outbound (send, delete, buy, call) is READ BACK in his own words regardless of confidence, because Whisper can be confidently wrong. A verb inside a reminder is content, not a command: "remind me to call mom" is a calendar write, not a call, or Nova would read back every reminder he ever set. A missing signal means "behave exactly as before", never a crash. Rollback: `stt.confidence_gate` false.
 
 **`panels.py`** — The structured half of Nova's answers. Every deterministic handler already computed real structure and then flattened it to one spoken line; this is how that reaches the screen. **The spoken and shown halves are different channels with different rules**: the voice stays under the listener rules (no markdown, no lists, invariant 10), the panel can be as rich as it likes because it is read with eyes. The LLM never touches a panel — every number on screen comes from the payload the engine already templated, which is what keeps invented figures off it. The block vocabulary is deliberately tiny (`stat` / `rows` / `items` / `text` / `note`) so a new panel is a backend change and never needs a new SwiftUI view. Weather's panel gets the whole week while the voice gets three days; a folder listing gets every file while the voice names four — that trade is the point of having both.
 
@@ -212,6 +215,7 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | `test_weather.py` | weather answers are real numbers, and steal nothing else | real intents + canned payloads, live calls optional |
 | `test_music.py` | play-by-name works and shadows no transport command | real router, AppleScript + network stubbed |
 | `test_views.py` | voice navigation reaches the right screen and fakes nothing | real views + real WS server, transport captured |
+| `test_confidence.py` | Nova acts only when sure enough for what it costs | real confidence module + real Whisper |
 | `test_echo_cancellation.py` | Nova's own voice is removed from the mic, his is not | real Kokoro + real speech, simulated speaker path |
 | `test_tts_chunking.py` | Nova starts speaking sooner and says the SAME words | real `_stream_response`, scripted LLM |
 | `smoke_launch.py` | the REAL process starts and answers over HTTP | real process |
