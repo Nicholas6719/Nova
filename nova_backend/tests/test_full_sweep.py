@@ -523,6 +523,7 @@ if not browser_was_running:
 
 # Launch Brave ourselves so every window is OURS. Close BY ID only.
 win_id = None
+ours_is_front = False
 subprocess.run(["open", "-a", "Brave Browser", "--args", "--no-startup-window"],
                check=False)
 time.sleep(4)
@@ -536,6 +537,29 @@ if ok and wid.strip().isdigit():
                  f'window id {win_id} to "https://example.com"', timeout=25)
     time.sleep(3)
 
+    # CRITICAL. browser_control always drives `window 1` — the FRONT window —
+    # while this test verifies against `window id {win_id}`. When Brave was not
+    # already running those were the same window and everything passed. When
+    # HIS Brave is already open and in front, they are not: "close this tab" and
+    # "go back" were operating on HIS window while the assertions read ours.
+    # That is a destructive test acting on a real page, not just a wrong result.
+    #
+    # So: bring ours to the front, and REFUSE to run the live steps unless
+    # window 1 really is ours.
+    osa(f'tell application "Brave Browser" to set index of window id {win_id} to 1',
+        timeout=15)
+    osa('tell application "Brave Browser" to activate', timeout=15)
+    time.sleep(1.5)
+    okf, front_id = osa('tell application "Brave Browser" to return id of window 1',
+                        timeout=15)
+    ours_is_front = okf and front_id.strip() == win_id
+
+if win_id and not ours_is_front:
+    unverified("browser live tests — could not bring OUR window to the front, "
+               "and browser_control drives window 1, so running them would act "
+               "on his page")
+
+if win_id and ours_is_front:
     out = say("where am I")
     check("example" in out.lower(), "'where am I' reads the REAL page", out)
 
@@ -554,7 +578,8 @@ if ok and wid.strip().isdigit():
 
     out = say("go back")
     check(bool(out), "back navigation responds", out)
-else:
+
+if not win_id:
     unverified(f"browser live tests (could not create a window: {wid})")
 
 
@@ -592,6 +617,16 @@ section("11. APPS & FOLDERS")
 check(va.tools._resolve_app("clawed") == "Claude", "STT alias 'clawed' -> Claude")
 check(va.tools._resolve_app("vs code") == "Visual Studio Code", "alias 'vs code'")
 check(va.tools._resolve_app("chrome") == "Google Chrome", "alias 'chrome'")
+
+# Remember which Finder windows were HIS before we open one, so cleanup can
+# close only ours. Nicholas asked for this: the sweep used to leave a Downloads
+# window sitting open every single run.
+_finder_before = set()
+_ok, _ids = osa('tell application "Finder" to return id of every window')
+if _ok:
+    _finder_before = {w.strip() for w in _ids.split(",") if w.strip()}
+_textedit_before = osa('tell application "System Events" to '
+                       '(name of processes) contains "TextEdit"')[1]
 
 out = say("open my downloads folder")
 check("download" in out.lower(), "Finder folder opens", out)
@@ -893,6 +928,30 @@ else:
 # ══════════════════════════════════════════════════════════════════════════
 section("CLEANUP")
 # ══════════════════════════════════════════════════════════════════════════
+# Finder — close ONLY the windows this run opened, by id. Same discipline as
+# the browser: never touch a window that was his.
+_ok, _ids = osa('tell application "Finder" to return id of every window')
+_ours = ([w.strip() for w in _ids.split(",")
+          if w.strip() and w.strip() not in _finder_before] if _ok else [])
+for _wid in _ours:
+    osa(f'tell application "Finder" to close window id {_wid}', timeout=15)
+if _ours:
+    time.sleep(0.5)
+    _ok2, _after = osa('tell application "Finder" to return id of every window')
+    _left = ([w.strip() for w in _after.split(",")
+              if w.strip() and w.strip() not in _finder_before] if _ok2 else [])
+    check(not _left, f"Finder windows we opened are closed ({len(_ours)})",
+          f"still open: {_left}")
+
+# TextEdit — the cold-launch test starts it. Quit it ONLY if it was not his.
+if _textedit_before == "false":
+    osa('quit app "TextEdit"', timeout=20)
+    time.sleep(1)
+    _te = osa('tell application "System Events" to '
+              '(name of processes) contains "TextEdit"')[1]
+    check(_te == "false", "TextEdit quit (it was not running before)",
+          f"running={_te}")
+
 # Browser — close ONLY our window, BY ID.
 if not browser_was_running:
     # WE launched Brave, and it holds only our window, so quitting the app is

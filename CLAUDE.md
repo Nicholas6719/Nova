@@ -244,6 +244,13 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
    NovaOS.app.
 6. **Regression-first.** A phrase that breaks Nova goes into
    `tests/adversarial_phrases.txt` BEFORE the fix; confirm it fails, then fix.
+7. **The sweep leaves his Mac as it found it, and never acts on his windows.**
+   It records what was open first and closes only what it opened — Finder
+   windows, TextEdit, its own browser window by id. And because
+   `browser_control` always drives `window 1`, the live browser tests REFUSE to
+   run unless the front window is provably the one the test created. Without
+   that guard, "close this tab" and "go back" ran against whatever Nicholas had
+   open.
 
 **Reporting to Nicholas** — every test report is four sections: what I tested /
 how I tested it (always naming the fidelity above) / what succeeded and what
