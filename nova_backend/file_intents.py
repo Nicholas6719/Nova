@@ -32,8 +32,26 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import file_manager as fm
+import panels as P
 
 log = logging.getLogger("nova.files")
+
+
+def _folder_panel(folder, label: str, info: dict) -> dict:
+    """A folder listing as a panel: folders first, then files, all of them.
+
+    Paths are deliberately absent. Invariant: a spoken answer never reads a
+    filesystem path aloud, and there is no reason to put one on screen either
+    when the folder is already the panel's subtitle.
+    """
+    rows = [{"title": name, "meta": "folder"} for name in info["folders"]]
+    rows += [{"title": name} for name in info["files"]]
+    n = info["n_files"] + info["n_folders"]
+    return P.panel(
+        title=label.capitalize(),
+        subtitle=f"{n} item{'s' if n != 1 else ''}",
+        blocks=[P.items(rows) if rows else P.note("This folder is empty.")],
+    )
 
 
 # ── Vocabulary ──────────────────────────────────────────────────────────────
@@ -153,6 +171,9 @@ class NovaFiles:
         self.config = config
         self.llm = llm
         self.name = config["user"]["address_as"]
+        # (view_name, payload) for the panel; cleared at the top of every
+        # handle() so a listing never lingers onto an unrelated answer.
+        self.last_panel = None
 
         # A question Nova is waiting on: which file, or is this the one.
         # nova.py checks this BEFORE routing so the answer isn't misread as a
@@ -257,6 +278,7 @@ class NovaFiles:
     # ═══════════════════════════════════════════════════════════════════════
     def handle(self, intent: str, text: str) -> str:
         self.pending_offer = None
+        self.last_panel = None
         try:
             return self._handle(intent, text)
         except Exception as exc:
@@ -284,6 +306,10 @@ class NovaFiles:
             return f"I wasn't able to read your {label} folder."
 
         nf, nd = info["n_files"], info["n_folders"]
+        # Built before the early return: asking about an EMPTY folder must
+        # replace the panel too, not leave the last one on screen while Nova
+        # says it's empty.
+        self.last_panel = ("files", _folder_panel(folder, label, info))
         if nf == 0 and nd == 0:
             return f"Your {label} folder is empty."
 
@@ -294,6 +320,9 @@ class NovaFiles:
             parts.append(f"{nf} file" + ("s" if nf != 1 else ""))
         lead = f"You've got {_spoken_join(parts)} in {label}."
 
+        # The panel got the WHOLE folder above; the voice gets four names.
+        # Reading thirty filenames aloud is unusable, thirty rows on a screen
+        # is just a list — the same trade as the weather week.
         names = [fm.spoken_name(str(folder / n)) for n in
                  (info["folders"] + info["files"])[:4]]
         if names:

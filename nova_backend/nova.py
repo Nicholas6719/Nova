@@ -923,6 +923,7 @@ class VoiceAssistant:
             if self.files.pending_offer is not None:
                 self._calendar_offer = self.files.pending_offer
                 self.files.pending_offer = None
+            self._emit_panel(self.files)
             self._respond(resp)
             return
 

@@ -230,10 +230,63 @@ class NovaViews:
     # ── Payloads ──────────────────────────────────────────────────────────────
     def _payload(self, view: View) -> dict:
         if view.name == "menu":
-            return {"sections": self.menu_sections()}
+            return {"title": "Menu",
+                    "subtitle": "Everything I can do",
+                    "sections": self.menu_sections()}
         if view.name == "home":
             return self._home_payload()
+        if view.name == "memory":
+            return self._memory_payload()
         return {}
+
+    # ── Memory ────────────────────────────────────────────────────────────────
+    def _memory_payload(self) -> dict:
+        """Everything Nova knows about him, grouped by category.
+
+        This is the screen that makes passive learning honest: facts get
+        written from ordinary conversation, and he should be able to see the
+        whole set rather than discover them one surprise at a time. Nothing is
+        summarised — these are the stored rows.
+        """
+        import panels as P
+
+        memory = getattr(self.assistant, "memory", None)
+        if memory is None:
+            return P.panel(title="Memory",
+                           blocks=[P.note("I can't reach my memory right now.")])
+        try:
+            facts = memory.all_facts()
+        except Exception as exc:
+            log.warning(f"memory panel unavailable ({exc})")
+            return P.panel(title="Memory",
+                           blocks=[P.note("I couldn't read my memory just now.")])
+
+        if not facts:
+            return P.panel(
+                title="Memory",
+                subtitle="Nothing stored yet",
+                blocks=[P.note("I haven't learned anything about you yet. "
+                               "Tell me something and I'll keep it.")])
+
+        grouped: dict[str, list[dict]] = {}
+        for f in facts:
+            grouped.setdefault(f.get("category") or "other", []).append(f)
+
+        blocks = []
+        for category in sorted(grouped):
+            blocks.append(P.items(
+                [{"title": (f.get("key") or "").replace("_", " "),
+                  "detail": f.get("value") or "",
+                  # Where it came from matters here more than anywhere else:
+                  # a fact he stated and a fact Nova inferred are different
+                  # things, and he should be able to tell them apart.
+                  "meta": (f.get("source") or "")}
+                 for f in grouped[category]],
+                title=category.replace("_", " ")))
+
+        return P.panel(title="Memory",
+                       subtitle=f"{len(facts)} thing{'s' if len(facts) != 1 else ''} I know",
+                       blocks=blocks)
 
     # ── Home ──────────────────────────────────────────────────────────────────
     def _home_payload(self) -> dict:
@@ -319,7 +372,10 @@ class NovaViews:
             {"name": v.name, "say": f"go to {v.aliases[0]}",
              "available": v.is_live,
              "note": v.planned or ""}
-            for v in VIEWS.values() if v.name != "home"
+            # Neither home nor menu belongs in its own list: he is already
+            # looking at the menu, and home is the one destination he never
+            # needs told about.
+            for v in VIEWS.values() if v.name not in ("home", "menu")
         ]
         return [
             {

@@ -191,11 +191,14 @@ def test_menu_payload(views, ws) -> None:
     check(len(sections) >= 2, "menu has both destinations and things to ask",
           str(len(sections)))
 
+    check(bool(data.get("title")), "menu has a title", str(data)[:60])
+
     dest_names = {i["name"] for s in sections for i in s["items"] if "name" in i}
     for name in VIEWS:
-        if name == "home":
+        if name in ("home", "menu"):
             continue
         check(name in dest_names, f"menu lists the '{name}' destination")
+    check("menu" not in dest_names, "menu does not list ITSELF as a destination")
 
     # An unbuilt destination must be marked, or the menu promises what it can't do.
     flat = [i for s in sections for i in s["items"]]
