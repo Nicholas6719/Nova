@@ -121,5 +121,9 @@
       "MSFT"
     ],
     "_note": "Market data. Nova is a RESEARCHER, never an advisor: every number is templated from a real payload and the LLM never phrases a price. Two sources - Yahoo for quotes and indices (no key, and Finnhub's index endpoint is paid), Finnhub for symbol search, analyst recommendations, news and fundamentals. The Finnhub key lives at NOVA_DATA_DIR/finnhub_credentials.json, NEVER here: this file is committed. Invariant 3's fourth exception - a stock query leaks what he is invested in. Set enabled false to switch it off."
+  },
+  "actuation": {
+    "enabled": true,
+    "_note": "Nova types and clicks. Refused outside WORK MODE - a hard gate in code, not a line in a prompt. A target must be FOUND BY NAME via Accessibility or Vision OCR bounding boxes before it is clicked; Nova never clicks a coordinate she could not verify. Typing is free (what is typed is visible before it goes anywhere); clicking send/delete/buy is confirmed, and Return is confirmed when the front app is one where Return sends. Needs Accessibility permission for the app bundle. Set false to disable entirely."
   }
 }

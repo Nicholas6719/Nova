@@ -915,7 +915,14 @@ class NovaTools:
             return bc.reload_page()
 
         # ── scrolling ───────────────────────────────────────────────────
-        if re.search(r"\bscroll\b", low):
+        # Anchored as a COMMAND. A bare \bscroll\b anywhere claimed ordinary
+        # sentences — "scroll through my photos sometime" was answered with
+        # "No browser is open right now." Same failure family as the launch
+        # verbs matching mid-sentence.
+        if re.match(r"^(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+                    r"(?:can you\s+)?scroll\b(?:\s+(?:up|down|to|back|"
+                    r"the\s+page|a\s+bit|more|further|down\s+more))?"
+                    r"[\s.?!]*$", low):
             if re.search(r"\b(top|beginning)\b", low):
                 return bc.scroll("top")
             if re.search(r"\b(bottom|end)\b", low):

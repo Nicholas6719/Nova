@@ -14,6 +14,7 @@
 #   screen      screen awareness
 #   view        navigation to a UI destination (home / menu / a named panel)
 #   market      stock quotes, indices, analyst ratings, company news
+#   actuation   typing / clicking / keys / scrolling (work mode only)
 #   memory      memory recall/store/forget
 #   fastpath    greeting / date / time / repeat
 #   unsupported an action Nova cannot perform; must be refused, never faked
@@ -183,3 +184,19 @@ I had apple pie for dessert  ==>  llm
 can you share that with me  ==>  llm
 the price of gas is insane  ==>  llm
 my apple watch died  ==>  llm
+
+# ── Actuation (Phase 7). Nova types and clicks. The guards matter most:
+#    every one of these verbs appears constantly in ordinary speech. ─────────
+type hello there  ==>  actuation
+click the send button  ==>  actuation
+press enter  ==>  actuation
+scroll down  ==>  actuation
+send it  ==>  actuation
+
+# ...and the conversation that must never move his mouse.
+what type of music do you like  ==>  llm
+that's my type of movie  ==>  llm
+I press my shirts on sundays  ==>  llm
+the press has been brutal lately  ==>  llm
+scroll through my photos sometime  ==>  llm
+send a text to mom  ==>  unsupported

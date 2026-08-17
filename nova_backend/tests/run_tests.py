@@ -120,6 +120,9 @@ SUITES = {
                 "voice navigation reaches the right screen and fakes nothing", False, False),
     "market":  ("test_market.py",
                 "market answers are real numbers, and never advice", False, False),
+    "act":     ("test_actuation.py",
+                "Nova types and clicks, and refuses to do either carelessly",
+                False, False),
     "conf":    ("test_confidence.py",
                 "Nova acts only when sure enough for what it costs", False, False),
     "echo":    ("test_echo_cancellation.py",
@@ -139,8 +142,10 @@ CANNOT_VERIFY = [
     "barge-in over speakers with REAL speakers in a real room — the echo "
     "suite measures the canceller against a simulated speaker path, not his desk",
     "music transport unless a player is already running",
-    "anything TCC-gated inside NovaOS.app — screen recording and location are "
-    "granted to the app bundle, not to this interpreter",
+    "anything TCC-gated inside NovaOS.app — screen recording, location and "
+    "ACCESSIBILITY are granted to the app bundle, not to this interpreter",
+    "that a click lands on the right pixels in a real app — the Vision "
+    "bottom-left to screen top-left flip needs a real window and his eyes",
 ]
 
 
@@ -169,7 +174,7 @@ def main() -> int:
         chosen = list(SUITES)
     elif args.quick:
         chosen = ["env", "routing", "loop", "wake", "cache", "rag", "tts",
-                  "weather", "music", "views", "market", "conf", "echo"]
+                  "weather", "music", "views", "market", "act", "conf", "echo"]
     else:
         chosen = [k for k in SUITES if getattr(args, k)]
     if not chosen:

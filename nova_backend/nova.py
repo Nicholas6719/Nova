@@ -112,6 +112,18 @@ def _content_before_sleep(text: str, idx: int) -> str:
     # Needs to be a real sentence, not a stray word.
     return lead if len(lead.split()) >= 3 else ""
 
+# Musing, not commanding. "Scroll through my photos sometime" opens with an
+# action verb and survives every handler, so the unsupported guard refused it
+# with "I can't do that" — when he was thinking out loud, not asking. Same
+# family as the sign-off guard: "I was so tired I had to go to sleep early" is
+# a story, not an instruction.
+_HYPOTHETICAL_RE = re.compile(
+    r"\b(?:sometime|someday|some\s+day|one\s+day|at\s+some\s+point|"
+    r"eventually|one\s+of\s+these\s+days|when\s+i\s+get\s+a\s+chance)\b"
+    r"[\s.!?]*$",
+    re.I,
+)
+
 # An imperative that survived every handler. The verbs are ones Nova either
 # performs deterministically or cannot perform at all — so if one reaches the
 # LLM stage, the honest answer is "I can't", never the model's guess.
@@ -284,6 +296,7 @@ class VoiceAssistant:
         self._init_screen()
         self._init_weather()
         self._init_market()
+        self._init_actuation()
         self._init_ws()
         self._init_views()          # after _init_ws: it needs the WS server
         self._verify_engines()
@@ -317,7 +330,8 @@ class VoiceAssistant:
     # __init__, and the behaviour suite missed it because the test harness
     # initialized engines by hand. Fail loudly at startup instead.
     _REQUIRED_ENGINES = ("stt", "llm", "tts", "memory", "tools",
-                         "calendar", "files", "screen", "weather", "market", "ws",
+                         "calendar", "files", "screen", "weather", "market", "actuation",
+                         "ws",
                          "views")
 
     def _verify_engines(self) -> None:
@@ -499,6 +513,12 @@ class VoiceAssistant:
         # temperature. See weather_engine.py for the invariant-3 decision.
         from weather_intents import NovaWeather
         self.weather = NovaWeather(self.config)
+
+    def _init_actuation(self) -> None:
+        # Typing and clicking. Needs the assistant so it can check work mode,
+        # which is the gate that keeps it from driving his Mac unasked.
+        from actuation_intents import NovaActuation
+        self.actuation = NovaActuation(self.config, assistant=self)
 
     def _init_market(self) -> None:
         # Deterministic end to end: no model ever phrases a price. See
@@ -958,6 +978,23 @@ class VoiceAssistant:
             self._respond(self.views.handle(view_intent, text))
             return
 
+        # ── 2d. Actuation confirmation ────────────────────────────────────────
+        # "That would send it. Want me to?" — answered before routing, so the
+        # yes cannot be re-read as a fresh command.
+        if self.actuation.pending is not None:
+            resp = self.actuation.resolve_pending(text)
+            if resp is not None:
+                self._respond(resp)
+                return
+
+        # ── 2e. Actuation ─────────────────────────────────────────────────────
+        # Typing and clicking, WORK MODE ONLY. Before tools, whose "open X" and
+        # "search X" rules would claim some of this phrasing.
+        act_intent = self.actuation.detect_intent(text)
+        if act_intent is not None:
+            self._respond(self.actuation.handle(act_intent, text))
+            return
+
         # ── 3. Calendar / reminders intents ──────────────────────────────────
         # BEFORE memory + fast-path + tools: detection is strict (needs an
         # unambiguous calendar word), and running it early stops the greedy
@@ -1067,7 +1104,7 @@ class VoiceAssistant:
         # replied "I've opened the coding projects folder for you." A system
         # prompt rule cut that from 4 cases to 1; only refusing deterministically
         # makes it zero.
-        if _ACTION_REQUEST_RE.match(text):
+        if (_ACTION_REQUEST_RE.match(text) and not _HYPOTHETICAL_RE.search(text)):
             log.info(f"[unsupported-action] {text}")
             self._respond(
                 "I can't do that one yet. I'll tell you when I can, rather "

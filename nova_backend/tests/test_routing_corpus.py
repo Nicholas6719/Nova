@@ -120,6 +120,11 @@ def build_assistant():
     va._init_screen()
     va._init_weather()
     va._init_market()
+    va._init_actuation()
+    # Actuation only claims phrases in work mode by design, so the
+    # corpus exercises it there. The NOT-in-work-mode behaviour is
+    # covered by test_actuation.py.
+    va.work_mode = True
     va._init_views()                     # tolerates a missing ws by design
     return va
 
@@ -135,6 +140,8 @@ def route_of(va, text: str) -> str:
     # Nova does not have.
     if va.views.detect_intent(text) is not None:
         return "view"
+    if va.actuation.detect_intent(text) is not None:
+        return "actuation"
     if va.calendar.detect_intent(text) is not None:
         return "calendar"
     if va.screen.detect_intent(text) is not None:
@@ -158,7 +165,8 @@ def route_of(va, text: str) -> str:
         # A handler that blew up on stubbed output still CLAIMED the phrase,
         # which is what routing is about.
         return "tools"
-    if nova_mod._ACTION_REQUEST_RE.match(text):
+    if (nova_mod._ACTION_REQUEST_RE.match(text)
+            and not nova_mod._HYPOTHETICAL_RE.search(text)):
         return "unsupported"
     return "llm"
 
