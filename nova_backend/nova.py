@@ -496,7 +496,26 @@ class VoiceAssistant:
         # without booting a server, and a harness that had to build NovaViews
         # itself is exactly the drift rule 1 exists to prevent.
         from views import NovaViews
-        self.views = NovaViews(self.config, ws=getattr(self, "ws", None))
+        self.views = NovaViews(self.config, ws=getattr(self, "ws", None),
+                               assistant=self)
+
+    def _emit_panel(self, engine) -> None:
+        """Send the panel a handler just built, if it built one.
+
+        One-shot and cleared on read, like `pending_offer`. A handler that
+        produced no panel simply leaves the previous screen alone rather than
+        blanking it — asking the time should not clear his weather.
+        """
+        panel = getattr(engine, "last_panel", None)
+        if panel is None:
+            return
+        engine.last_panel = None
+        try:
+            view_name, payload = panel
+            self.ws.send_view(view_name, payload)
+        except Exception as exc:
+            # A panel failing must never cost him the spoken answer.
+            log.warning(f"could not send panel: {exc}")
 
     # ── State broadcasting ────────────────────────────────────────────────────────
     def set_state(self, state: str) -> None:
@@ -836,6 +855,7 @@ class VoiceAssistant:
             self.calendar.pending_intent = None
             if followup:
                 self._calendar_offer = lambda fi=followup: self.calendar.handle(fi, "")
+            self._emit_panel(self.calendar)
             self._respond(resp)
             return
 
@@ -855,7 +875,9 @@ class VoiceAssistant:
         # a weather word must appear, and an action verb rules it out.
         weather_intent = self.weather.detect_intent(text)
         if weather_intent is not None:
-            self._respond(self.weather.handle(text, weather_intent))
+            resp = self.weather.handle(text, weather_intent)
+            self._emit_panel(self.weather)
+            self._respond(resp)
             return
 
         # ── 5. File management intents ───────────────────────────────────────

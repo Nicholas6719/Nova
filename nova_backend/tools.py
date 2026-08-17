@@ -1142,6 +1142,22 @@ class NovaTools:
         name, artist, state = (out.split("||") + ["", "", ""])[:3]
         return name.strip(), artist.strip(), state.strip().lower()
 
+    def current_track_for_panel(self) -> Optional[tuple]:
+        """(title, artist) if music is ACTUALLY playing, else None.
+
+        For the home screen, where Now Playing appears only while something is
+        playing — a paused player is not something he wants staring at him.
+        Never launches a player: `_running_player` without launch_if_none, so
+        asking for home does not open Spotify.
+        """
+        app = self._running_player(launch_if_none=False)
+        if not app:
+            return None
+        np = self._now_playing(app)
+        if not np or not np[0] or np[2] != "playing":
+            return None
+        return np[0], np[1]
+
     def _track_seconds(self, app: str) -> tuple:
         """(position, duration) in seconds — normalising Spotify's ms duration."""
         pos = self._player_get(app, "player position")

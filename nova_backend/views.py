@@ -21,11 +21,23 @@ just acknowledges. Nothing here touches the LLM.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 from typing import Callable, Optional
 
 log = logging.getLogger("nova.views")
+
+
+def _greeting() -> str:
+    hour = datetime.datetime.now().hour
+    if hour < 12:
+        return "Good morning"
+    return "Good afternoon" if hour < 18 else "Good evening"
+
+
+def _today_line() -> str:
+    return datetime.datetime.now().strftime("%A, %B %-d")
 
 
 class View:
@@ -146,9 +158,13 @@ class NovaViews:
     anything that isn't unmistakably a command is somebody else's problem.
     """
 
-    def __init__(self, config: dict, ws=None) -> None:
+    def __init__(self, config: dict, ws=None, assistant=None) -> None:
         self.config = config
         self.ws = ws
+        # The running VoiceAssistant, so home can reach the same engines that
+        # answer these questions out loud. Optional: the routing harness builds
+        # views without one, and home degrades to what it can reach.
+        self.assistant = assistant
         self.current: str = "home"
 
     # ── Detection ─────────────────────────────────────────────────────────────
@@ -189,11 +205,88 @@ class NovaViews:
 
     # ── Payloads ──────────────────────────────────────────────────────────────
     def _payload(self, view: View) -> dict:
-        """Panel data for a view. Phase 1 ships the protocol and the menu, which
-        is real content; the data-bearing panels are filled in Phase 3."""
         if view.name == "menu":
             return {"sections": self.menu_sections()}
+        if view.name == "home":
+            return self._home_payload()
         return {}
+
+    # ── Home ──────────────────────────────────────────────────────────────────
+    def _home_payload(self) -> dict:
+        """Everything he wants at a glance, and nothing he doesn't.
+
+        Deliberately NOT the mockup's dashboard: no quick actions, no recent
+        activity, no CPU gauges. Now Playing appears only when something is
+        actually playing, which is the rule he set.
+
+        Every block is defensive. Home must render if the calendar is
+        permission-blocked, the weather service is down and no music is open —
+        a broken tile is not a reason to show him a broken screen.
+        """
+        import panels as P
+
+        return P.panel(
+            title=_greeting(),
+            subtitle=_today_line(),
+            blocks=[
+                self._home_events(),
+                self._home_weather(),
+                self._home_music(),
+            ],
+        )
+
+    def _home_events(self) -> Optional[dict]:
+        import panels as P
+        try:
+            import calendar_reminders as cal
+            from calendar_intents import build_events_panel
+            events = cal.get_today_events()
+        except Exception as exc:
+            log.warning(f"home: calendar unavailable ({exc})")
+            return None
+        if not events:
+            return P.note("Nothing on your calendar today.")
+        inner = build_events_panel(events, "Today")
+        block = inner["blocks"][0]
+        block["title"] = "Today"
+        return block
+
+    def _home_weather(self) -> Optional[dict]:
+        import panels as P
+        try:
+            import maps_engine
+            import weather_engine as we
+            coord = maps_engine.current_location()
+            if coord is None:
+                return None
+            data = we.fetch(coord[0], coord[1], days=1)
+            if not data.get("ok"):
+                return None
+            cur = data.get("current") or {}
+            temp = cur.get("temp")
+            if not isinstance(temp, (int, float)):
+                return None
+            return P.stat(f"{round(temp)}°", label="Weather",
+                          detail=we.describe_code(cur.get("code")).capitalize())
+        except Exception as exc:
+            log.warning(f"home: weather unavailable ({exc})")
+            return None
+
+    def _home_music(self) -> Optional[dict]:
+        """Only when something is actually playing — his rule."""
+        import panels as P
+        tools = getattr(self.assistant, "tools", None)
+        if tools is None:
+            return None
+        try:
+            playing = tools.current_track_for_panel()
+        except Exception as exc:
+            log.warning(f"home: music unavailable ({exc})")
+            return None
+        if not playing:
+            return None
+        title, artist = playing
+        return P.items([{"title": title, "detail": artist}], title="Now playing")
 
     def menu_sections(self) -> list[dict]:
         """What Nova can do and where you can go. Generated from the registry so

@@ -65,21 +65,37 @@ struct ShellView: View {
 
     private var fullShell: some View {
         VStack(spacing: 0) {
-            Spacer(minLength: 0)
+            HStack(spacing: 26) {
+                orbColumn
+                    // With a panel up the orb steps aside rather than dominating;
+                    // on its own it takes the whole window.
+                    .frame(maxWidth: panel.isEmpty ? .infinity : 340)
 
-            OrbView(state: vm.state, density: .reactor)
-                .frame(maxWidth: 460, maxHeight: 460)
-                .aspectRatio(1, contentMode: .fit)
-
-            readout
-                .padding(.top, 6)
-
-            Spacer(minLength: 0)
-
-            if typing { composer }
+                if !panel.isEmpty {
+                    PanelView(panel: panel, tint: vm.state.tint)
+                        .frame(maxWidth: .infinity)
+                        .transition(.opacity)
+                }
+            }
+            if typing { composer.padding(.top, 20) }
         }
         .padding(28)
+        .animation(.easeOut(duration: 0.22), value: panel.isEmpty)
     }
+
+    private var orbColumn: some View {
+        VStack(spacing: 6) {
+            Spacer(minLength: 0)
+            OrbView(state: vm.state, density: .reactor)
+                .frame(maxWidth: 420, maxHeight: 420)
+                .aspectRatio(1, contentMode: .fit)
+            readout
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The screen Nova last put up. Empty means orb only.
+    private var panel: Panel { Panel(vm.viewData) }
 
     /// Tiny, dim, and easy to ignore — but it is the only thing that
     /// distinguishes idle from sleeping at a glance.

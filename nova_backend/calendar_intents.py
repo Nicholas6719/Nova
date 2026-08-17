@@ -32,8 +32,42 @@ import re
 from typing import Optional
 
 import calendar_reminders as cal
+import panels as P
 
 log = logging.getLogger("nova.calendar.intents")
+
+
+def build_events_panel(events: list, subtitle: str) -> dict:
+    """Turn engine event records into a panel.
+
+    Module-level so the home screen can build the same panel without going
+    through an intent — home shows today's events, and it should be the exact
+    same rendering he sees when he asks for them.
+    """
+    rows = []
+    for e in events:
+        start = str(e.get("start") or "")
+        # Engine records carry a long formatted date ("Monday, August 16, 2026
+        # at 3:00:00 PM"). Only the time is useful on a panel already titled
+        # with the day.
+        when = ""
+        if " at " in start:
+            when = start.split(" at ", 1)[1].strip()
+            when = re.sub(r":00\s*(AM|PM)$", r" \1", when, flags=re.I)
+        rows.append({
+            "title": e.get("title") or "Untitled",
+            "detail": when,
+            "meta": e.get("location") or "",
+        })
+
+    return P.panel(
+        title="Calendar",
+        subtitle=subtitle,
+        blocks=[
+            P.items(rows) if rows
+            else P.note("Nothing on the calendar."),
+        ],
+    )
 
 
 # Words that mean "this is about a file on disk" and words that mean "this is
@@ -99,6 +133,10 @@ class NovaCalendar:
         self.config = config
         self.llm = llm
         self.memory = memory
+        # (view_name, payload) for the panel; nova.py collects it after the
+        # spoken answer. Built from the SAME event records the summary reads,
+        # so the screen can never disagree with the voice.
+        self.last_panel = None
         self.name = config["user"]["address_as"]
         cal_cfg = config.get("calendar", {})
         # Template confirmations are ~4-6s faster than an extra LLM round-trip
@@ -673,6 +711,9 @@ class NovaCalendar:
         """Read TODAY's events, then softly offer the rest of the week. The
         default is always today; the user opts into 'what's coming up'."""
         events = cal.get_today_events()
+        # The panel shows every event with its real time; the spoken summary
+        # stays short. Same data, two channels.
+        self.last_panel = ("calendar", build_events_panel(events, "Today"))
         today_txt = self._summarize_today(events)
 
         rest = self._rest_of_week_events()
