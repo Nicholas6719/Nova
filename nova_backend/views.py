@@ -24,7 +24,7 @@ from __future__ import annotations
 import datetime
 import logging
 import re
-from typing import Callable, Optional
+from typing import Optional
 
 log = logging.getLogger("nova.views")
 
@@ -43,18 +43,16 @@ def _today_line() -> str:
 class View:
     """One navigable destination.
 
-    `builder` returns the panel payload, or None for a view whose panel does
-    not exist yet — in which case Nova says so out loud rather than showing an
-    empty screen.
+    A view with a non-empty `planned` has no panel yet: Nova says so out loud
+    rather than showing an empty screen. Payloads are built by
+    `NovaViews._payload`, not here.
     """
 
     def __init__(self, name: str, spoken: str, aliases: tuple[str, ...] = (),
-                 builder: Optional[Callable[[], dict]] = None,
                  planned: str = "") -> None:
         self.name = name
         self.spoken = spoken        # what Nova says on arriving
         self.aliases = aliases
-        self.builder = builder
         self.planned = planned      # non-empty => not built yet; this is the excuse
 
     @property

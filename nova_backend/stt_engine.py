@@ -84,8 +84,12 @@ PRE_ROLL_MS_DEFAULT      = 480
 
 class STTEngine:
     def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None,
-                 wake_config: Optional[dict] = None) -> None:
+                 wake_config: Optional[dict] = None, echo=None) -> None:
         self.config = config
+        # Optional EchoCanceller. When present, every mic frame is cleaned of
+        # Nova's own voice before wake detection or capture sees it — which is
+        # what makes being interrupted over speakers possible at all.
+        self._echo = echo
         # Wake-word settings (engine choice + OpenWakeWord tuning). Kept separate
         # from the stt block so the wake engine can be swapped without touching
         # STT. Defaults keep the legacy transcript engine if unspecified.
@@ -154,8 +158,16 @@ class STTEngine:
         def _cb(indata, frames, time_info, status):  # noqa: ANN001
             # Runs on PortAudio's thread. Drop frames while Nova is speaking so
             # its own TTS never enters the queue.
-            if self._mic_gate.is_set():
+            # With echo cancellation on, frames are kept even while Nova
+            # speaks — that is the point. Without it, the gate still drops
+            # them, exactly as before.
+            gate_open = self._mic_gate.is_set()
+            if self._echo is not None and self._echo.enabled:
+                gate_open = True
+            if gate_open:
                 data = bytes(indata)
+                if self._echo is not None and self._echo.enabled:
+                    data = self._echo.process(data)
                 try:
                     self._audio_q.put_nowait(data)
                 except queue.Full:

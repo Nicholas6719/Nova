@@ -26,7 +26,7 @@ struct NovaApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ShellView(backendManager: backendManager)
+            ShellView()
                 .onAppear {
                     appDelegate.backendManager = backendManager
                     backendManager.start()

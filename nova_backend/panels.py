@@ -80,23 +80,3 @@ def panel(title: str, blocks: list[Optional[dict]],
         "subtitle": subtitle,
         "blocks": [b for b in blocks if b],
     }
-
-
-# ── Shared formatting ─────────────────────────────────────────────────────────
-
-def clock(dt: Any) -> str:
-    """A spoken-style time for the screen: 3:00 PM, not 15:00:00."""
-    try:
-        return dt.strftime("%-I:%M %p")
-    except Exception:
-        return str(dt)
-
-
-def duration(minutes: Optional[float]) -> str:
-    if not minutes:
-        return ""
-    minutes = int(minutes)
-    if minutes < 60:
-        return f"{minutes}m"
-    hours, rest = divmod(minutes, 60)
-    return f"{hours}h" if rest == 0 else f"{hours}h {rest}m"

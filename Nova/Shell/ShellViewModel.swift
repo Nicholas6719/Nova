@@ -21,7 +21,7 @@ final class ShellViewModel: ObservableObject {
 
     /// What Nova is doing. Drives the orb and the readout under it.
     @Published private(set) var state: NovaState = .idle
-    /// Which screen is showing, and its panel data. Phase 3 renders these.
+    /// Which screen is showing, and its panel data, as sent by the backend.
     @Published private(set) var view: String = "home"
     @Published private(set) var viewData: [String: Any] = [:]
     /// Parked in the corner, above everything, while working alongside him.
@@ -29,11 +29,9 @@ final class ShellViewModel: ObservableObject {
     @Published private(set) var isConnected: Bool = false
 
     private let api: NovaAPIClient
-    private let backendManager: BackendManager
     private var cancellables = Set<AnyCancellable>()
 
-    init(backendManager: BackendManager) {
-        self.backendManager = backendManager
+    init() {
         self.api = NovaAPIClient()
 
         api.$currentState

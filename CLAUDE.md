@@ -11,7 +11,7 @@ It is his personal AI — built from the ground up to know him, serve him, and g
 
 Nova has two parts:
 1. A **Python backend** (`nova_backend/`) — the brain. Handles all voice, AI, memory, and tools.
-2. A **SwiftUI frontend** (`Nova/`) — the face. Handles the chat UI and communicates with the Python backend.
+2. A **SwiftUI frontend** (`Nova/`) — the face. An orb and a panel; no chat, no transcript. Communicates with the Python backend.
 
 ---
 
@@ -44,6 +44,8 @@ Nova has two parts:
     screen_awareness.py      window list + Vision OCR: "what's on my screen"
     rag.py                   local document retrieval
     views.py                 voice navigation between UI screens
+    panels.py                structured payloads for the screen
+    echo_canceller.py        subtracts Nova's own voice from the mic
     ws_server.py             HTTP :5001 + WS :8766 bridge
     training/                wake-model training kit (Colab)
     tests/                   the test harness — see "Testing" below
@@ -56,7 +58,7 @@ Nova has two parts:
 
 ## Python Backend — What Each File Does
 
-**`nova.py`** — Main entry point. `VoiceAssistant` class owns the entire pipeline. Initializes all engines, runs the wake word loop, routes every user utterance through an 8-stage handler chain (first match wins).
+**`nova.py`** — Main entry point. `VoiceAssistant` class owns the entire pipeline. Initializes all engines, runs the wake word loop, routes every user utterance through a 10-stage handler chain (first match wins).
 
 **`config.json`** — All tuneable settings. Model name, ports, voice, user name, silence timing, RAG toggle. Edit this without touching Python code.
 
@@ -100,6 +102,10 @@ Nova has two parts:
 
 **`views.py`** — Voice navigation between UI destinations ("go home", "show me the menu", "go to finance"). Nova's UI has no sidebar and nothing to click, so **speech is the navigation**. Detection is strict regex anchored at BOTH ends and the destination must be a name in the registry, because navigation words are ordinary English: "go home" navigates, "I go home every friday" is conversation, and "I want to go to italy someday" falls through because Italy is not a view. Routing stage 2c — ahead of calendar, weather, files and tools, every one of which would otherwise claim these ("go to the weather" carries a weather word, "open the memory panel" looks like an app launch). A view whose panel does not exist yet **says so out loud and shows nothing**, rather than displaying an empty screen. The menu is generated from the registry so it cannot drift from what actually exists. Never touches the LLM.
 
+**`panels.py`** — The structured half of Nova's answers. Every deterministic handler already computed real structure and then flattened it to one spoken line; this is how that reaches the screen. **The spoken and shown halves are different channels with different rules**: the voice stays under the listener rules (no markdown, no lists, invariant 10), the panel can be as rich as it likes because it is read with eyes. The LLM never touches a panel — every number on screen comes from the payload the engine already templated, which is what keeps invented figures off it. The block vocabulary is deliberately tiny (`stat` / `rows` / `items` / `text` / `note`) so a new panel is a backend change and never needs a new SwiftUI view. Weather's panel gets the whole week while the voice gets three days; a folder listing gets every file while the voice names four — that trade is the point of having both.
+
+**`echo_canceller.py`** — Subtracts Nova's own voice from the microphone, so she can be interrupted while speaking. Nova is unusually well placed for this: the hard part of software AEC is a clean reference of what the speaker is playing, and **Nova synthesises her own speech**, so Kokoro hands over that signal before it is ever played. Measured on real Kokoro output against real speech: **27-36 dB of her voice removed, his attenuated only 1.5-3.9 dB, and 0.2 dB when she is silent.** Two traps it exists to handle: the APM works in 10 ms frames (160 samples) while the mic delivers 30 ms (480) and the library does NOT reject a wrong size — it degrades silently; and the reference must be consumed in step with incoming mic frames, because playback runs ahead of capture. **Default OFF** (`stt.echo_cancellation`): enabling it also means keeping mic frames during playback, and Nova listens far more often than she speaks. Nothing raises — a failure returns the raw microphone. `feat/barge-in` is the other half.
+
 **`ws_server.py`** — Bridge between Python and Swift. HTTP server on :5001, WebSocket server on :8766. Swift connects here to receive state changes, message content, streaming tokens, and **which screen to show** in real time. The current view and its data are held like the current state, so a client that connects — or reconnects after an app relaunch — is told immediately instead of coming up blank.
 
 **`requirements.txt`** — All Python dependencies. Install with `pip install -r requirements.txt`.
@@ -111,7 +117,7 @@ Nova has two parts:
 1. System commands — sleep / wake / mute (always intercepted first)
 2. Calendar follow-up offer — answers a "want to hear what's coming up?" with yes/no
 2b. Pending file question — "which one?" / "move it to Documents?" answered before routing
-2c. UI navigation — go home / show me the menu / go to a named screen
+2c. UI navigation — go home / show me the menu / go to a named screen / work mode
 3. Calendar / reminders intents — read / create / complete / delete / update (EventKit)
 4. Screen awareness — what's on my screen / what app am I in
 4b. Weather — now / tomorrow / next few days, here or a named place
@@ -147,33 +153,46 @@ Nova has two parts:
 
 ## Swift Side — Current State
 
-The migration to the Python backend is DONE. Every remaining Swift file is live
-and in the build (verified by removing the dead ones and rebuilding):
+**There is no chat UI.** No transcript, no message bubbles, no mic button. The
+orb is the entire interface and the word under it is the only thing that says
+what Nova is doing.
 
-- **`Nova/NovaApp.swift`** — app entry; starts `BackendManager`.
-- **`Nova/SwiftBackend/BackendManager.swift`** — locates Python + `nova_backend/nova.py`,
-  launches it as a child process with `NOVA_DATA_DIR` set, polls `/api/status`
-  until ready, restarts on crash, passes its own PID as `NOVA_PARENT_PID` so the
-  backend exits if the app is SIGKILLed. **Runs the backend from the REPO path
-  (nova_backend is NOT bundled) — so Python-only changes need only an app
-  relaunch, never an Xcode rebuild.**
-- **`Nova/SwiftBackend/NovaAPIClient.swift`** — HTTP (:5001) + WebSocket (:8766)
-  client; publishes state/messages/tokens via `@Published`.
-- **`Nova/ContentView.swift`**, **`Features/Chat/ChatViewModel.swift`**,
-  **`Features/Chat/Message.swift`** — the chat UI, wired to `NovaAPIClient`.
-- **`Nova/Core/DebugLog.swift`**, **`Nova/Core/NovaLogger.swift`** — logging (active).
-- **`Nova/Voice/SpeechManager.swift`**, **`SpeechRecognizer.swift`** — legacy
-  on-device voice. **Python owns all voice I/O now**, so these are effectively
-  inert, but `ChatViewModel` is still wired to them through Combine. Untangling
-  that is a real refactor, not a cleanup — do it deliberately, with a build to
-  verify, not as a drive-by.
+- **`Nova/NovaApp.swift`** — app entry; starts `BackendManager`, owns
+  `LocationProvider`. `.windowStyle(.hiddenTitleBar)` is load-bearing: AppKit is
+  the wrong layer for it (see WindowChrome).
+- **`Nova/Shell/OrbView.swift`** — **Reactor** at full size, **Array** in the
+  puck: the same design at two densities, so Nova sheds detail as she shrinks
+  rather than becoming a different shape. The core is a TORUS — a ring of light
+  white-hot at its crest, built from gradient stops peaking at the ring radius,
+  which is the thing a stroked circle cannot do. Canvas + TimelineView.
+- **`Nova/Shell/NovaState.swift`** — the seven states. Cyan throughout except
+  `working` (amber, real progress sweep) and `unsure` (coral, arcs that will not
+  lock), because those two must be unmistakable at a glance.
+- **`Nova/Shell/Panel.swift`** — renders `panels.py`'s vocabulary generically,
+  decoding defensively so a malformed payload costs the panel and never the
+  answer.
+- **`Nova/Shell/ShellView.swift`** / **`ShellViewModel.swift`** — the window.
+  Replaced `ChatViewModel` (1,022 lines of the old on-device pipeline) outright
+  rather than untangling it. Cmd-T types to Nova and she answers in TEXT, not
+  aloud.
+- **`Nova/Shell/WindowChrome.swift`** — frameless, drags from anywhere, and the
+  130pt puck that floats above everything including fullscreen apps and other
+  Spaces. **Measured traps:** `titlebarAppearsTransparent` +
+  `fullSizeContentView` + a black background + hiding `NSTitlebarContainerView`
+  all applied cleanly and STILL left a 32pt #1D1F20 strip, because the scene
+  paints that area itself; macOS restores the previous frame AFTER `onAppear`,
+  so Nova came back puck-sized after being quit while parked; and changing the
+  style mask rebuilds the frame view, which brought the traffic lights back.
+- **`Nova/SwiftBackend/`** — `BackendManager` (locates Python, supervises the
+  child process, runs it from the REPO path so Python-only changes need only an
+  app relaunch), `NovaAPIClient` (HTTP + WS), `LocationProvider`.
 
-Already deleted (2026-08-06 cleanup, build verified): `Nova/Core/`
-NovaEngine, NovaEngineCore, LLMClient, IntentDetector, MathRouter,
-NovaPersonality, APIKeyProvider; all of `Nova/Memory/` and `Nova/Tools/`;
-`Nova/Voice/AudioSessionQueue.swift`.
+**The Xcode target takes its files from disk** (`PBXFileSystemSynchronizedRootGroup`).
+Anything under `Nova/` is in the build because it exists — there is no list to
+forget to update.
 
----
+Deleted in the overhaul: `ContentView.swift`, `Features/Chat/ChatViewModel.swift`,
+`Voice/SpeechManager.swift`, `Voice/SpeechRecognizer.swift`.
 
 ## Testing
 
@@ -193,6 +212,7 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | `test_weather.py` | weather answers are real numbers, and steal nothing else | real intents + canned payloads, live calls optional |
 | `test_music.py` | play-by-name works and shadows no transport command | real router, AppleScript + network stubbed |
 | `test_views.py` | voice navigation reaches the right screen and fakes nothing | real views + real WS server, transport captured |
+| `test_echo_cancellation.py` | Nova's own voice is removed from the mic, his is not | real Kokoro + real speech, simulated speaker path |
 | `test_tts_chunking.py` | Nova starts speaking sooner and says the SAME words | real `_stream_response`, scripted LLM |
 | `smoke_launch.py` | the REAL process starts and answers over HTTP | real process |
 | `test_full_sweep.py` | every subsystem vs real system state | real code + real system |
@@ -283,9 +303,11 @@ The MLX model (~2GB) downloads automatically on first run.
    describe pictures. `file_intents` still says "I can't see inside images yet".
    Needs a real vision model; see screen_awareness.py for why Moondream was rejected.
 2. Proactive notifications — background monitor for upcoming events / due reminders
-3. Barge-in over speakers — needs acoustic echo cancellation (see branch `feat/barge-in`;
-   measured: the wake model's score collapses to ~0 once Nova's own voice reaches the mic,
-   so this is NOT a tuning problem). Works on headphones today.
-4. UI overhaul — deliberately late, after capabilities are concrete
+3. Barge-in over speakers — the canceller now EXISTS (`echo_canceller.py`, measured
+   27-36 dB of Nova's voice removed) and `feat/barge-in` is the other half, but
+   `stt.echo_cancellation` ships OFF: turning it on also keeps mic frames during
+   playback, and that needs his ears on real speakers before it becomes the default.
+4. UI overhaul — DONE through phase 3 (orb, panel, home, menu, work mode).
+   Remaining: finance and health screens, click-by-OCR actuation.
 5. iOS app — far back burner, separate on-device architecture
 

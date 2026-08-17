@@ -182,7 +182,12 @@ def _normalize_for_speech(text: str) -> str:
 
 
 class TTSEngine:
-    def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None) -> None:
+    def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None,
+                 echo=None) -> None:
+        # Optional EchoCanceller. TTS is the only thing that knows what is
+        # about to be played, so it is the only place the reference can come
+        # from. None means cancellation is off and nothing changes.
+        self._echo = echo
         self.config   = config
         self._queue   = queue.Queue()
         self._stop    = threading.Event()
@@ -330,6 +335,11 @@ class TTSEngine:
     def _finish_player(self) -> None:
         """Called when a response's sentences are all queued: drain the player,
         settle briefly, then re-open the mic."""
+        # Nova stopped speaking: drop the echo reference so the next capture
+        # adapts against silence rather than audio that is no longer playing.
+        if self._echo is not None:
+            self._echo.reset()
+
         if self._player is not None:
             self._player.mark_done()
             self._player.wait()   # blocks until the buffer empties
@@ -353,6 +363,11 @@ class TTSEngine:
             lang="en-us",
         )
         audio = np.array(samples, dtype=np.float32)
+        # Hand the SAME samples to the echo canceller before they are played.
+        # This is the whole reason cancellation is tractable for Nova: she
+        # knows exactly what is about to come out of the speakers.
+        if self._echo is not None:
+            self._echo.feed_far(audio, sample_rate)
         if self._player is not None:
             self._player.feed(audio)
 

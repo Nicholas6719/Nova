@@ -24,7 +24,10 @@
     "post_wake_grace_s": 2.0,
     "_grace_note": "How long Nicholas has to START his command after saying the wake word. The wake word is replayed from the pre-wake buffer, so the recorder already counts itself as 'speaking' and the normal 700ms silence cutoff applied immediately \u2014 saying 'Nova', pausing to think, then speaking looked like the wake word not working. Only applies until he starts talking; normal cutoffs take over after that.",
     "min_speech_duration_s": 0.5,
-    "command_max_duration_s": 15.0
+    "command_max_duration_s": 15.0,
+    "echo_cancellation": false,
+    "echo_stream_delay_ms": 35,
+    "_aec_note": "Subtract Nova's own voice from the microphone so she can be interrupted while speaking. Measured on real Kokoro output: 27-36 dB of her voice removed, his voice attenuated only 1.5-3.9 dB, and 0.2 dB when she is silent. DEFAULT FALSE because turning it on also means keeping mic frames during playback, which is a change to the live listening path that needs his ears on real speakers. echo_stream_delay_ms is the speaker-to-mic delay estimate."
   },
   "tts": {
     "primary": "kokoro",

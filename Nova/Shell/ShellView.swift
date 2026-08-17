@@ -8,8 +8,9 @@
 //  is doing. The typing field is deliberately hidden until asked for — speech
 //  is the primary channel, and typing exists for the times he cannot talk.
 //
-//  Panels arrive in phase 3; the screen name is already plumbed through so the
-//  panel has somewhere to land.
+//  A panel sits beside the orb when Nova has structure to show. Everything on
+//  it was built by a deterministic handler in Python — the model never touches
+//  a panel, which is what keeps invented numbers off the screen.
 //
 
 import SwiftUI
@@ -20,8 +21,8 @@ struct ShellView: View {
     @State private var draft = ""
     @FocusState private var draftFocused: Bool
 
-    init(backendManager: BackendManager) {
-        _vm = StateObject(wrappedValue: ShellViewModel(backendManager: backendManager))
+    init() {
+        _vm = StateObject(wrappedValue: ShellViewModel())
     }
 
     var body: some View {

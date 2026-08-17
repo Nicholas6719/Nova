@@ -63,7 +63,7 @@ class CapturingWS:
     def __init__(self):
         from ws_server import NovaWSServer
         self.server = NovaWSServer(http_port=0, ws_port=0,
-                                   on_text_message=lambda _t: None)
+                                   on_text_message=lambda _t, _s=False: None)
         self.sent: list[dict] = []
         self.server._ws_broadcast = self.sent.append   # only the transport
 

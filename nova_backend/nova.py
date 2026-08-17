@@ -331,11 +331,32 @@ class VoiceAssistant:
     def _init_stt(self) -> None:
         log.info("Loading STT (faster-whisper)…")
         from stt_engine import STTEngine
+        self._init_echo()
         self.stt = STTEngine(
             self.config["stt"],
             mic_gate=self.mic_gate,
             wake_config=self.config.get("wake_word", {}),
+            echo=self.echo,
         )
+
+    def _init_echo(self) -> None:
+        """Optional echo canceller, shared by TTS (which supplies the
+        reference) and STT (which consumes it). Default OFF: it also means
+        keeping mic frames during playback, and Nova listens far more often
+        than she speaks."""
+        self.echo = None
+        if not self.config["stt"].get("echo_cancellation", False):
+            return
+        try:
+            from echo_canceller import EchoCanceller
+            self.echo = EchoCanceller(
+                stream_delay_ms=int(self.config["stt"].get(
+                    "echo_stream_delay_ms", 35)))
+            if not self.echo.enabled:
+                self.echo = None
+        except Exception as exc:
+            log.warning(f"echo cancellation unavailable: {exc}")
+            self.echo = None
 
     def _init_llm(self) -> None:
         # MLX arrays and Metal GPU streams are thread-local: the model must be
@@ -411,7 +432,8 @@ class VoiceAssistant:
     def _init_tts(self) -> None:
         log.info("Loading TTS (Kokoro ONNX)…")
         from tts_engine import TTSEngine
-        self.tts = TTSEngine(self.config["tts"], mic_gate=self.mic_gate)
+        self.tts = TTSEngine(self.config["tts"], mic_gate=self.mic_gate,
+                             echo=self.echo)
 
     def _init_memory(self) -> None:
         from memory import NovaMemory
