@@ -272,6 +272,8 @@ class VoiceAssistant:
         # home. Entered by phrase OR automatically the moment she does
         # something on his machine.
         self.work_mode = False
+        # Said once per episode, not every pass round the wake loop.
+        self._mic_warned = False
 
         # Shared microphone gate. Set = capture allowed; cleared = mic paused.
         # A voice assistant must not record while it speaks — both to avoid
@@ -554,6 +556,36 @@ class VoiceAssistant:
         self.views = NovaViews(self.config, ws=getattr(self, "ws", None),
                                assistant=self)
 
+    def _check_mic_health(self) -> None:
+        """Notice a microphone that is delivering nothing, and say so.
+
+        Measured on his Mac: with AirPods Pro as the default input the stream
+        returned RMS 0.0 and peak 0, while the built-in mic in the same room
+        returned RMS 29. Nova scored 0.000 forever and looked perfectly fine.
+        """
+        if not getattr(self.stt, "mic_is_silent", False):
+            self._mic_warned = False
+            return
+        if self._mic_warned:
+            return
+        self._mic_warned = True
+
+        # Reopening picks up the CURRENT default device, which fixes the common
+        # case: he switched headphones and the old stream is bound to nothing.
+        recovered = False
+        try:
+            recovered = self.stt.reopen_stream()
+        except Exception as exc:
+            log.warning(f"mic reopen failed: {exc}")
+        if recovered:
+            log.info("Mic reopened; waiting to see whether audio returns.")
+            return
+
+        self.set_state("unsure")
+        self._respond(
+            "I can't hear anything. My microphone is connected but it isn't "
+            "picking up any sound. Check which input device is selected.")
+
     def set_work_mode(self, on: bool, *, reason: str = "") -> None:
         """Enter or leave work mode, and tell the app to park or restore.
 
@@ -716,6 +748,12 @@ class VoiceAssistant:
             else:
                 just_woke = False
 
+            # ── Mic health ───────────────────────────────────────────────
+            # A dead input is the one failure Nova cannot notice by listening
+            # harder. Say it out loud ONCE, after trying to recover, so being
+            # deaf is never silent.
+            self._check_mic_health()
+
             # ── Phase 2: Record command (VAD-gated) ──────────────────────────
             self.set_state("listening")
             # In conversation mode, cap how long we wait for the user to start
@@ -837,6 +875,11 @@ class VoiceAssistant:
         """Called when the conversation ends and Nova returns to wake mode.
         Kicks off the memory reconciliation pass over what was just said — on the
         nova-llm worker thread, off the live path, silent."""
+        # Tell the UI she has gone back to waiting for her name. Nothing ever
+        # broadcast this, so "waiting for the wake word" and "mid-conversation"
+        # looked identical on screen — which is precisely the distinction the
+        # readout under the orb exists to make.
+        self.set_state("sleeping")
         turns = self._session_turns
         self._session_turns = []
         if not turns:

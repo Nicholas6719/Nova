@@ -64,6 +64,11 @@ LONG_SPEECH_THRESHOLD_MS = 2500   # switch to the long cutoff after 2.5s of spee
 MAX_RECORDING_MS         = 15000  # hard safety cap on one utterance
 NOISE_FLOOR_RMS          = 150    # below this RMS, treat the buffer as silence
 
+# How long a run of EXACTLY-zero frames means the input is broken rather than
+# quiet. 5s: long enough that a brief device switch does not cry wolf, short
+# enough that he is told before he has repeated himself twice.
+_SILENT_FRAMES_TO_ALARM  = int(5000 / FRAME_MS)
+
 # How much audio to keep from BEFORE speech was detected. webrtcvad triggers a
 # little late, especially on soft onsets ("what", "set", "how"), and losing the
 # first syllable is the single most damaging thing that can happen to a
@@ -131,6 +136,17 @@ class STTEngine:
         # scoring audio from seconds ago — Nicholas said "Nova" and it fired
         # twelve seconds later. Live audio is only useful while it is live, so
         # on overflow we drop the OLDEST frame and stay near realtime.
+        # Digital silence detection. An input device can deliver frames of
+        # EXACTLY zero — AirPods that connected but never negotiated a mic path
+        # do this — and Nova cannot tell that from a quiet room. Measured on his
+        # Mac: AirPods Pro as the default input gave RMS 0.0 and peak 0, while
+        # the built-in mic in the same silent room gave RMS 29 and peak 442.
+        # Room tone is never exactly zero, so exactly zero is a broken input.
+        #
+        # Without this Nova sits in the wake loop indefinitely, scoring 0.000
+        # forever, looking completely healthy and hearing nothing.
+        self._zero_frames = 0
+        self._mic_silent = False
         self._audio_q: "queue.Queue[bytes]" = queue.Queue(maxsize=_AUDIO_Q_MAXLEN)
         self._stream: Optional[sd.RawInputStream] = None
         # Rolling pre-wake buffer; on a wake hit its contents prime the command
@@ -139,6 +155,41 @@ class STTEngine:
         self._pending_pre_wake: bytes = b""
 
         log.info("STT ready.")
+
+    @property
+    def mic_is_silent(self) -> bool:
+        """True when the input has been delivering exactly-zero samples.
+
+        Deliberately not "quiet": the check is for digital silence, which a
+        real microphone in a real room never produces.
+        """
+        return self._mic_silent
+
+    def reopen_stream(self) -> bool:
+        """Tear down and reopen the mic, picking up the CURRENT default device.
+
+        The stream is opened once at startup and bound to whatever was default
+        then. When his AirPods connect, macOS moves the default input and the
+        old stream keeps running against a device that returns nothing — so
+        recovery has to actually reopen, not just wait.
+        """
+        try:
+            if self._stream is not None:
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except Exception:
+                    pass
+                self._stream = None
+            self._zero_frames = 0
+            self._mic_silent = False
+            self._drain_audio_q()
+            self._ensure_stream()
+            log.info("Microphone stream reopened on the current default device.")
+            return True
+        except Exception as exc:
+            log.error(f"could not reopen the microphone: {exc}")
+            return False
 
     # ── Persistent audio stream ────────────────────────────────────────────────────
     def _drain_audio_q(self) -> int:
@@ -171,6 +222,20 @@ class STTEngine:
                 gate_open = True
             if gate_open:
                 data = bytes(indata)
+                # Cheap: only the max magnitude, on the audio thread.
+                if not any(data):
+                    self._zero_frames += 1
+                    if (self._zero_frames >= _SILENT_FRAMES_TO_ALARM
+                            and not self._mic_silent):
+                        self._mic_silent = True
+                        log.error(
+                            "Microphone is delivering DIGITAL SILENCE "
+                            f"({_SILENT_FRAMES_TO_ALARM * FRAME_MS / 1000:.0f}s "
+                            "of exactly-zero samples). The input device is not "
+                            "actually capturing.")
+                else:
+                    self._zero_frames = 0
+                    self._mic_silent = False
                 if self._echo is not None and self._echo.enabled:
                     data = self._echo.process(data)
                 try:

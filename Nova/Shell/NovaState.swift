@@ -22,10 +22,26 @@ enum NovaState: String, CaseIterable {
     case sleeping
     case unsure
 
-    /// Parsed from the backend's `{"type":"state"}` message. Anything
-    /// unrecognised falls back to idle rather than freezing on a stale state.
+    /// Parsed from the backend's `{"type":"state"}` message.
+    ///
+    /// The backend's vocabulary is not identical to this enum, and the gap was
+    /// invisible: the main path broadcasts "processing", which had no case and
+    /// silently fell back to .idle — so the orb sat at IDLE for the whole time
+    /// Nova was thinking, and the thinking state effectively never appeared.
+    /// Aliases are mapped explicitly; anything genuinely unknown still falls
+    /// back to idle rather than freezing on a stale state.
     init(wire: String) {
-        self = NovaState(rawValue: wire.lowercased()) ?? .idle
+        let raw = wire.lowercased()
+        switch raw {
+        case "processing", "generating":
+            self = .thinking
+        case "busy":
+            self = .working
+        case "asleep":
+            self = .sleeping
+        default:
+            self = NovaState(rawValue: raw) ?? .idle
+        }
     }
 
     /// The word under the orb. Tiny and dim by design — it is the only thing

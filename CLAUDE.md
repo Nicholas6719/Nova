@@ -289,7 +289,7 @@ small change — Nicholas asked for this explicitly and it is faster and sharper
 6. **TTS and LLM overlap.** The sentence-chunked streaming pipeline in `nova.py._stream_response` must not be changed to a blocking pattern.
 7. **Kokoro model files** (`kokoro-v1.0.onnx`, `voices-v1.0.bin`) live in `nova_backend/` — same files as Jarvis. TTS falls back to macOS `say` if they are missing.
 8. **NOVA_DATA_DIR** must be set by the Swift BackendManager so data survives app updates.
-9. **Wake word keywords** are `["nova", "hey nova"]` — do not change without updating config.json.
+9. **The wake phrase is "Nova", NOT "Hey Nova".** Measured over the speakers, 3 trials each: `"Nova, <command>"` fires 6/6 at 0.86-0.99, `"Hey Nova"` fires **0/6 at 0.001-0.211** — the "Hey" prefix destroys the score. With `engine: openwakeword` the `keywords` list is **ignored entirely** (`record_wake` dispatches to `_record_wake_oww` without passing it); it survives only for the transcript fallback. `trigger_level` stays at 2: at 1, "November is cold" false-fires.
 10. **Do not add markdown, bullet points, numbered lists, or em dashes** to anything the LLM outputs. Nova speaks its responses aloud.
 
 ---

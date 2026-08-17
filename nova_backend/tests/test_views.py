@@ -310,6 +310,42 @@ def test_work_mode(ws) -> None:
         T.subprocess.run, T.time.sleep = saved_run, saved_sleep
 
 
+# ── 7. The state vocabulary crosses a language boundary ───────────────────────
+def test_state_contract() -> None:
+    """Every state the BACKEND can broadcast must be understood by the ORB.
+
+    Nothing checked this, and the gap was invisible in both languages: the main
+    path broadcasts "processing", Swift had no such case, and
+    `NovaState(rawValue:) ?? .idle` silently turned it into idle — so the orb
+    sat at IDLE for the entire time Nova was thinking. Found by watching a real
+    exchange, not by reading either file.
+    """
+    print("\n7. STATE VOCABULARY (python -> swift)")
+    import re
+
+    backend = BACKEND
+    swift = backend.parent / "Nova" / "Shell" / "NovaState.swift"
+    if not swift.exists():
+        check(False, "NovaState.swift is where expected", str(swift))
+        return
+
+    broadcast = set()
+    for f in backend.glob("*.py"):
+        broadcast |= set(re.findall(r'set_state\(\s*["\']([a-z_]+)["\']', f.read_text()))
+    src = swift.read_text()
+    cases = set(re.findall(r"^\s*case ([a-z]+)$", src, re.M))
+    aliases = set(re.findall(r'case "([a-z_]+)"', src))
+    known = cases | aliases
+
+    check(bool(broadcast), "found the states the backend broadcasts", str(broadcast))
+    for state in sorted(broadcast):
+        check(state in known,
+              f"the orb understands '{state}'",
+              f"not in NovaState cases {sorted(cases)} or aliases {sorted(aliases)}")
+    print(f"     backend broadcasts: {sorted(broadcast)}")
+    print(f"     orb understands   : {sorted(known)}")
+
+
 def main() -> int:
     print("=" * 72)
     print("VIEW PROTOCOL — navigation, broadcast, and honest degradation")
@@ -322,6 +358,7 @@ def main() -> int:
     test_menu_payload(views, ws)
     test_spoken(views)
     test_work_mode(ws)
+    test_state_contract()
 
     print(f"\n  {PASS}/{PASS + FAIL} checks passed")
     if FAILURES:
