@@ -55,6 +55,14 @@ final class ShellViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Work mode is decided by the backend — it knows when Nova acted on his
+        // Mac and when he said "go home" — so the window follows it rather than
+        // the two keeping separate opinions about where Nova should be.
+        api.$isPuck
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] puck in self?.setPuck(puck) }
+            .store(in: &cancellables)
+
         api.connect()
     }
 

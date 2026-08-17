@@ -17,12 +17,12 @@
     "vad_aggressiveness": 2,
     "beam_size": 5,
     "pre_roll_ms": 480,
-    "_beam_note": "5 = beam search. An earlier 8-clip test at one noise level made greedy (1) look better; a proper sweep (126 clips, 3 voices, 3 noise levels) says the opposite — beam=5 scores 20.4% WER / 61.1% exact against greedy's 23.6% / 53.2%, for 44ms. Beam search CAN loop on the initial_prompt, which is what the transcription-loop guard in this file is for.",
+    "_beam_note": "5 = beam search. An earlier 8-clip test at one noise level made greedy (1) look better; a proper sweep (126 clips, 3 voices, 3 noise levels) says the opposite \u2014 beam=5 scores 20.4% WER / 61.1% exact against greedy's 23.6% / 53.2%, for 44ms. Beam search CAN loop on the initial_prompt, which is what the transcription-loop guard in this file is for.",
     "_pre_roll_note": "pre_roll_ms: audio kept from BEFORE speech is detected. webrtcvad fires late on soft onsets, and losing the first syllable is the worst thing that can happen to a transcript: measured, 200ms lost drops exact matches from 81% to 21%, while carrying 500ms of extra lead-in costs nothing. Was 150ms.",
     "sample_rate": 16000,
     "silence_duration_s": 1.2,
     "post_wake_grace_s": 2.0,
-    "_grace_note": "How long Nicholas has to START his command after saying the wake word. The wake word is replayed from the pre-wake buffer, so the recorder already counts itself as 'speaking' and the normal 700ms silence cutoff applied immediately — saying 'Nova', pausing to think, then speaking looked like the wake word not working. Only applies until he starts talking; normal cutoffs take over after that.",
+    "_grace_note": "How long Nicholas has to START his command after saying the wake word. The wake word is replayed from the pre-wake buffer, so the recorder already counts itself as 'speaking' and the normal 700ms silence cutoff applied immediately \u2014 saying 'Nova', pausing to think, then speaking looked like the wake word not working. Only applies until he starts talking; normal cutoffs take over after that.",
     "min_speech_duration_s": 0.5,
     "command_max_duration_s": 15.0
   },
@@ -65,7 +65,9 @@
     "oww_threshold": 0.5,
     "oww_trigger_level": 2,
     "oww_vad_threshold": 0.5,
-    "_note": "engine: 'transcript' (legacy Whisper scan) or 'openwakeword' (neural, noise-robust). Stays 'transcript' until the trained nova.onnx is validated, then flip to 'openwakeword'. oww_* tune the neural detector: threshold=per-window score to count as a hit, trigger_level=consecutive hits to fire, vad_threshold=Silero speech gate (0 disables). After Nova replies it stays in conversation mode (no wake word) until conversation_timeout_s of silence."
+    "_note": "engine: 'transcript' (legacy Whisper scan) or 'openwakeword' (neural, noise-robust). Stays 'transcript' until the trained nova.onnx is validated, then flip to 'openwakeword'. oww_* tune the neural detector: threshold=per-window score to count as a hit, trigger_level=consecutive hits to fire, vad_threshold=Silero speech gate (0 disables). After Nova replies it stays in conversation mode (no wake word) until conversation_timeout_s of silence.",
+    "work_mode_timeout_s": 60.0,
+    "_work_mode_note": "How long Nova waits for him to start speaking while working alongside him in the puck, versus conversation_timeout_s everywhere else. Longer because while they work he reads, thinks and scrolls, and the 15s default would drop the session every time he paused. The session does not end here either: saying the wake word resumes IN the puck with the conversation intact."
   },
   "server": {
     "http_port": 5001,
@@ -82,7 +84,7 @@
     "rag_enabled": true,
     "rag_docs_dir": "~/Documents",
     "rag_max_distance": 0.45,
-    "_rag_note": "rag_max_distance: how close a document chunk must be before Nova puts it in front of the model (cosine distance, lower = stricter). Raise toward 0.6 to retrieve more eagerly at the cost of injecting irrelevant text into ordinary conversation; see the sweep in rag.py. Dependency and build directories (node_modules, site-packages, .venv, DerivedData…) are never indexed — they were 98% of the corpus."
+    "_rag_note": "rag_max_distance: how close a document chunk must be before Nova puts it in front of the model (cosine distance, lower = stricter). Raise toward 0.6 to retrieve more eagerly at the cost of injecting irrelevant text into ordinary conversation; see the sweep in rag.py. Dependency and build directories (node_modules, site-packages, .venv, DerivedData\u2026) are never indexed \u2014 they were 98% of the corpus."
   },
   "calendar": {
     "natural_confirmations": false,
@@ -91,7 +93,7 @@
   "music": {
     "duck_while_listening": true,
     "duck_level": 20,
-    "_note": "Turn the music down while Nova is listening, then put it back when the conversation ends. Music coming out of the speakers goes into the microphone: measured with music mixed into real command audio, Whisper went from 0% word error in silence to 9.7% at full volume and 709% when loud, where it starts transcribing the music itself. Ducking to 20% recovers most of that. The PLAYER's volume is ducked, never the system's — system volume would take Nova's own voice down with it. Set false to leave the music alone."
+    "_note": "Turn the music down while Nova is listening, then put it back when the conversation ends. Music coming out of the speakers goes into the microphone: measured with music mixed into real command audio, Whisper went from 0% word error in silence to 9.7% at full volume and 709% when loud, where it starts transcribing the music itself. Ducking to 20% recovers most of that. The PLAYER's volume is ducked, never the system's \u2014 system volume would take Nova's own voice down with it. Set false to leave the music alone."
   },
   "weather": {
     "enabled": true,

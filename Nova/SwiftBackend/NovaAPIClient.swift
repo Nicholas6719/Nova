@@ -23,6 +23,8 @@ final class NovaAPIClient: ObservableObject {
     /// sends this on connect as well as on every navigation, so a relaunched
     /// app comes up on the right screen instead of blank.
     @Published private(set) var currentView: ViewPayload?
+    /// Backend asked Nova to park in the corner (work mode) or come back.
+    @Published private(set) var isPuck: Bool = false
 
     struct ViewPayload {
         let name: String
@@ -231,6 +233,12 @@ final class NovaAPIClient: ObservableObject {
             if let name = object["view"] as? String {
                 currentView = ViewPayload(name: name,
                                           data: object["data"] as? [String: Any] ?? [:])
+            }
+
+        case "mode":
+            // Work mode: park in the corner, or come back.
+            if let puck = object["puck"] as? Bool {
+                isPuck = puck
             }
 
         case "need_location":

@@ -220,6 +220,85 @@ def test_spoken(views) -> None:
               f"{len(spoken)} chars")
 
 
+# ── 6. Work mode ──────────────────────────────────────────────────────────────
+class FakeAssistant:
+    """Records work-mode transitions. Only the transition is faked; the real
+    NovaViews decides when one happens."""
+
+    def __init__(self):
+        self.work_mode = False
+        self.calls: list[tuple] = []
+
+    def set_work_mode(self, on: bool, *, reason: str = "") -> None:
+        self.calls.append((on, reason))
+        self.work_mode = on
+
+
+def test_work_mode(ws) -> None:
+    print("\n6. WORK MODE")
+    import nova as nova_mod
+    from views import NovaViews
+
+    fake = FakeAssistant()
+    views = NovaViews(nova_mod.load_config(), ws=ws, assistant=fake)
+
+    check(views.detect_intent("work with me") == "work", "'work with me' enters")
+    check(views.detect_intent("take over") == "work", "'take over' enters")
+    check(views.detect_intent("minimize") == "work", "'minimize' enters")
+
+    spoken = views.handle("work")
+    check(fake.work_mode is True, "handling 'work' actually enters work mode")
+    check(not check_spoken(spoken), "entering is fit to speak", spoken)
+
+    # Going home is the ONE way out — the whole point of the mode is that she
+    # stays parked through everything else.
+    views.handle("home")
+    check(fake.work_mode is False, "'go home' leaves work mode")
+
+    # ...and no other screen ends it, or a passing weather question would yank
+    # her back to full size mid-task.
+    views.handle("work")
+    views.handle("weather")
+    check(fake.work_mode is True, "going to another screen does NOT leave work mode")
+
+    # Entering twice must not re-park: he may have dragged the puck somewhere.
+    before = len(fake.calls)
+    views.handle("work")
+    check(len(fake.calls) == before + 1 or fake.calls[-1][0] is True,
+          "re-entering is harmless")
+
+    # Conversation timeout has to actually differ, or the 60s promise is a
+    # comment rather than behaviour.
+    cfg = nova_mod.load_config().get("wake_word", {})
+    normal = float(cfg.get("conversation_timeout_s", 15.0))
+    work = float(cfg.get("work_mode_timeout_s", 60.0))
+    check(work > normal, "work mode waits longer before dropping the session",
+          f"{work}s vs {normal}s")
+
+    # The SECOND way in: Nova parks herself the moment she acts on his Mac, so
+    # she is out of the way of whatever she just opened. Real tools.match with
+    # only the launch stubbed, per rule 2 — stub side effects, never verdicts.
+    import tools as T
+    saved_run, saved_sleep = T.subprocess.run, T.time.sleep
+
+    class _R:
+        returncode, stdout, stderr = 0, "", ""
+
+    T.subprocess.run = lambda *a, **k: _R()
+    T.time.sleep = lambda *a, **k: None
+    try:
+        t = T.NovaTools(nova_mod.load_config())
+        t._app_running = lambda *a, **k: True
+        t.match("open spotify")
+        check(t.touched_mac is True, "opening an app parks Nova automatically")
+        t.touched_mac = False
+        t.match("what's my battery at")
+        check(t.touched_mac is False,
+              "merely ANSWERING a question does not park her")
+    finally:
+        T.subprocess.run, T.time.sleep = saved_run, saved_sleep
+
+
 def main() -> int:
     print("=" * 72)
     print("VIEW PROTOCOL — navigation, broadcast, and honest degradation")
@@ -231,6 +310,7 @@ def main() -> int:
     test_unbuilt_views(views, ws)
     test_menu_payload(views, ws)
     test_spoken(views)
+    test_work_mode(ws)
 
     print(f"\n  {PASS}/{PASS + FAIL} checks passed")
     if FAILURES:

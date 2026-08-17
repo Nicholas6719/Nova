@@ -150,3 +150,15 @@ remind me to call mom when I get home  ==>  calendar
 show me my calendar  ==>  calendar
 what's my schedule at home tomorrow  ==>  calendar
 what's the weather at home  ==>  weather
+
+# ── Work mode (Phase 3): Nova parks in the corner and works alongside him ───
+nova work with me  ==>  view
+work with me  ==>  view
+take over  ==>  view
+work mode  ==>  view
+minimize  ==>  view
+# ...and the sentences that must NOT park her
+let's work on this budget together tomorrow  ==>  llm
+I have to work with my team on that  ==>  llm
+he took over the project last year  ==>  llm
+I work on my mac all day  ==>  llm

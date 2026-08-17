@@ -255,6 +255,11 @@ class VoiceAssistant:
         # This turn came from the keyboard and must not be spoken aloud. Only
         # ever set for the duration of one typed turn.
         self._silent_turn = False
+        # Working alongside him on his Mac: Nova is parked in the puck, the
+        # conversation timeout is long, and she stays there until he says go
+        # home. Entered by phrase OR automatically the moment she does
+        # something on his machine.
+        self.work_mode = False
 
         # Shared microphone gate. Set = capture allowed; cleared = mic paused.
         # A voice assistant must not record while it speaks — both to avoid
@@ -499,6 +504,23 @@ class VoiceAssistant:
         self.views = NovaViews(self.config, ws=getattr(self, "ws", None),
                                assistant=self)
 
+    def set_work_mode(self, on: bool, *, reason: str = "") -> None:
+        """Enter or leave work mode, and tell the app to park or restore.
+
+        Idempotent: entering while already in work mode must not re-park the
+        window, or every app launch during a session would yank it back to the
+        corner while he is dragging it somewhere else.
+        """
+        if self.work_mode == on:
+            return
+        self.work_mode = on
+        log.info(f"[work-mode] {'on' if on else 'off'}"
+                 + (f" ({reason})" if reason else ""))
+        try:
+            self.ws.send_mode(puck=on)
+        except Exception as exc:
+            log.warning(f"could not send mode: {exc}")
+
     def _emit_panel(self, engine) -> None:
         """Send the panel a handler just built, if it built one.
 
@@ -601,7 +623,16 @@ class VoiceAssistant:
             self.set_state("listening")
             # In conversation mode, cap how long we wait for the user to start
             # speaking; if they stay silent past the timeout, drop back to wake.
-            conv_timeout = float(self.config["wake_word"].get("conversation_timeout_s", 15.0))
+            # Work mode gets a much longer leash. While they are working
+            # together he reads an email, thinks, scrolls — and the ordinary
+            # 15s would drop the session constantly, forcing a wake word every
+            # time he paused. The session does NOT end at this timeout either:
+            # saying "Nova" resumes in the puck with the conversation intact.
+            conv_timeout = float(
+                self.config["wake_word"].get(
+                    "work_mode_timeout_s" if self.work_mode
+                    else "conversation_timeout_s",
+                    60.0 if self.work_mode else 15.0))
             command_audio = self.stt.record_command(
                 max_duration_s=self.config["stt"]["command_max_duration_s"],
                 start_timeout_s=None if just_woke else conv_timeout,
@@ -920,6 +951,11 @@ class VoiceAssistant:
             if self.tools.pending_offer is not None:
                 self._calendar_offer = self.tools.pending_offer
                 self.tools.pending_offer = None
+            # She just did something on his Mac, so she steps aside into the
+            # corner — the second way into work mode, alongside asking for it.
+            if getattr(self.tools, "touched_mac", False):
+                self.tools.touched_mac = False
+                self.set_work_mode(True, reason="acted on the Mac")
             self._respond(resp)
             return
 

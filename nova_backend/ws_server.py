@@ -46,6 +46,7 @@ class NovaWSServer:
         # window comes up blank until Nicholas happens to navigate somewhere.
         self._view            = "home"
         self._view_data: dict = {}
+        self._puck            = False
         self._running         = False
         # Event loop that owns the WS connections. Broadcasts originate on other
         # threads (LLM worker, main), so sends must be scheduled back onto it.
@@ -75,6 +76,15 @@ class NovaWSServer:
 
     def stream_token(self, token: str) -> None:
         self._ws_broadcast({"type": "token", "token": token})
+
+    def send_mode(self, puck: bool) -> None:
+        """Park Nova in the corner, or bring her back.
+
+        Held like the state and the view so a reconnecting app lands in the
+        right shape — though Nova always LAUNCHES full size regardless, which
+        the app enforces on its side."""
+        self._puck = puck
+        self._ws_broadcast({"type": "mode", "puck": puck})
 
     def send_view(self, view: str, data: Optional[dict] = None) -> None:
         """Tell the UI which screen to show, and give it the data to show.

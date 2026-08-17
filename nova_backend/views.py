@@ -142,6 +142,17 @@ _GOTO_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 3b. Work mode: park in the corner and work alongside him. Anchored like the
+#     rest — "let's work on this together" is conversation, not a command.
+_WORK_RE = re.compile(
+    _LEAD + r"(?:let's\s+)?work\s+(?:with\s+me|on\s+this|together)\s*[.?!]?$"
+    + r"|" + _LEAD + r"(?:take\s+over|take\s+the\s+wheel)"
+    r"(?:\s+(?:my\s+)?(?:computer|mac|screen))?\s*[.?!]?$"
+    + r"|" + _LEAD + r"(?:go\s+to\s+)?(?:work\s+mode|puck\s+mode)\s*[.?!]?$"
+    + r"|" + _LEAD + r"minimi[sz]e\s*[.?!]?$",
+    re.IGNORECASE,
+)
+
 # 4. Bare "<name> screen" — "finance screen", "the memory panel".
 _BARE_RE = re.compile(
     _LEAD + r"(?:the\s+)?(" + _ALIAS_ALT + r")\s+(?:screen|panel|page|view|tab)"
@@ -175,6 +186,8 @@ class NovaViews:
 
         if _HOME_RE.match(t):
             return "home"
+        if _WORK_RE.match(t):
+            return "work"
         if _MENU_RE.match(t):
             return "menu"
         for pattern in (_GOTO_RE, _BARE_RE):
@@ -185,9 +198,20 @@ class NovaViews:
 
     # ── Handling ──────────────────────────────────────────────────────────────
     def handle(self, view_name: str, text: str = "") -> str:
+        # Work mode is a MODE, not a screen: Nova parks in the corner and the
+        # conversation timeout lengthens. Going home is what ends it, which is
+        # why "go home" is the one phrase that always brings her back.
+        if view_name == "work":
+            if self.assistant is not None:
+                self.assistant.set_work_mode(True, reason="asked")
+            return "Alright, I'm right here."
+
         view = VIEWS.get(view_name)
         if view is None:                      # unreachable via detect_intent
             return "I don't have a screen for that."
+
+        if view.name == "home" and self.assistant is not None:
+            self.assistant.set_work_mode(False, reason="went home")
 
         if not view.is_live:
             # Honest degradation: never show an empty panel and imply it works.

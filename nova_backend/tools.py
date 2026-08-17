@@ -114,6 +114,10 @@ class NovaTools:
         # Called by a timer/short-reminder when it fires. nova.py supplies a
         # callback that speaks safely (never on top of an in-flight response).
         self._on_announce = on_announce
+        # True when this turn actually manipulated his Mac (launched an app,
+        # drove the browser). nova.py reads it to park Nova in the corner, so
+        # she gets out of the way of whatever she just opened. One-shot.
+        self.touched_mac = False
         # Set to a zero-arg callable when the user must confirm before we act.
         self.pending_confirm: Optional[Callable[[], str]] = None
         # SOFT follow-up ("want me to pull up directions?"). Unlike
@@ -777,6 +781,10 @@ class NovaTools:
         resolved = self._resolve_app(name)
         target = resolved or name.title()
         was_running = self._app_running(target)
+        # Opening an app is Nova acting on his machine, which is what puts her
+        # in the corner so she is out of the way of the thing she just opened.
+        # Set BEFORE the launch: if it half-works he still wants her parked.
+        self.touched_mac = True
 
         # Unknown name => None, so the utterance keeps routing and ends up in
         # normal conversation instead of "I couldn't find an app called ...".
