@@ -201,6 +201,7 @@ class VoiceAssistant:
       1. System commands  (sleep / wake / mute)
       2. Calendar follow-up offer ("want to hear what's coming up?" -> yes/no)
       2b. Pending file question ("which one?" / "move it to Documents?")
+      2c. UI navigation  (go home / show me the menu / go to finance)
       3. Calendar intents (read/create/complete/delete/update events + reminders)
       4. Screen awareness (what's on my screen / what app am I in)
       4b. Weather (current / tomorrow / next few days, here or a named place)
@@ -275,6 +276,7 @@ class VoiceAssistant:
         self._init_screen()
         self._init_weather()
         self._init_ws()
+        self._init_views()          # after _init_ws: it needs the WS server
         self._verify_engines()
         self._warm_prompt_cache()
         log.info("Nova ready.")
@@ -306,7 +308,7 @@ class VoiceAssistant:
     # __init__, and the behaviour suite missed it because the test harness
     # initialized engines by hand. Fail loudly at startup instead.
     _REQUIRED_ENGINES = ("stt", "llm", "tts", "memory", "tools",
-                         "calendar", "files", "screen", "weather", "ws")
+                         "calendar", "files", "screen", "weather", "ws", "views")
 
     def _verify_engines(self) -> None:
         missing = [name for name in self._REQUIRED_ENGINES
@@ -482,6 +484,16 @@ class VoiceAssistant:
             maps_engine.set_location_requester(self.ws.request_location)
         except Exception as exc:
             log.warning(f"could not wire the location requester: {exc}")
+
+    def _init_views(self) -> None:
+        # UI navigation ("go home", "show me the menu"). Needs the WS server, so
+        # this must stay AFTER _init_ws. Deterministic regex only — the 3B is
+        # never asked which screen he meant.
+        # getattr, not self.ws: the routing harness calls the REAL _init_views()
+        # without booting a server, and a harness that had to build NovaViews
+        # itself is exactly the drift rule 1 exists to prevent.
+        from views import NovaViews
+        self.views = NovaViews(self.config, ws=getattr(self, "ws", None))
 
     # ── State broadcasting ────────────────────────────────────────────────────────
     def set_state(self, state: str) -> None:
@@ -788,6 +800,19 @@ class VoiceAssistant:
                     self.files.pending_offer = None
                 self._respond(resp)
                 return
+
+        # ── 2c. UI navigation ────────────────────────────────────────────────
+        # "go home", "show me the menu", "go to finance". BEFORE calendar,
+        # weather, files and tools, all of which would otherwise claim these:
+        # "go to the weather" has a weather word, "open the memory panel" looks
+        # like an app launch, "go back home" looked like a browser Back.
+        # Detection is anchored at BOTH ends and the destination must be a known
+        # view, so "I go home every friday" and "I want to go to italy someday"
+        # fall straight through to conversation.
+        view_intent = self.views.detect_intent(text)
+        if view_intent is not None:
+            self._respond(self.views.handle(view_intent, text))
+            return
 
         # ── 3. Calendar / reminders intents ──────────────────────────────────
         # BEFORE memory + fast-path + tools: detection is strict (needs an

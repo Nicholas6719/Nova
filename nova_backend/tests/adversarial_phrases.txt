@@ -12,6 +12,7 @@
 #   files       file or folder handler
 #   calendar    calendar or reminders handler
 #   screen      screen awareness
+#   view        navigation to a UI destination (home / menu / a named panel)
 #   memory      memory recall/store/forget
 #   fastpath    greeting / date / time / repeat
 #   unsupported an action Nova cannot perform; must be refused, never faked
@@ -113,3 +114,39 @@ play a movie  ==>  unsupported
 play the office on netflix  ==>  unsupported
 play a show on hulu  ==>  unsupported
 play a youtube video  ==>  unsupported
+
+# ── UI navigation (Phase 1 of the overhaul) ─────────────────────────────────
+# Nova is navigated BY VOICE now: no sidebar, no clicking. These must reach the
+# view router. Written BEFORE views.py existed, per the regression-first rule.
+go home  ==>  view
+nova go home  ==>  view
+return home  ==>  view
+take me home  ==>  view
+go back home  ==>  view
+home screen  ==>  view
+show me the menu  ==>  view
+show the menu  ==>  view
+open the menu  ==>  view
+what can you do  ==>  view
+what can you show me  ==>  view
+go to finance  ==>  view
+take me to finance  ==>  view
+go to the weather  ==>  view
+show me the finance screen  ==>  view
+open the memory panel  ==>  view
+
+# ── ...and the collisions a loose navigation regex would cause. Every one of
+#    these contains a navigation word and must NOT be stolen. This is the same
+#    failure family as the memory regex eating "what's my calendar". ─────────
+I'm going home at five  ==>  llm
+I go home every friday  ==>  llm
+what's on the menu for dinner  ==>  llm
+the menu at that place is huge  ==>  llm
+I want to go to italy someday  ==>  llm
+home is where the heart is  ==>  llm
+open my home folder  ==>  tools
+find the menu pdf  ==>  files
+remind me to call mom when I get home  ==>  calendar
+show me my calendar  ==>  calendar
+what's my schedule at home tomorrow  ==>  calendar
+what's the weather at home  ==>  weather

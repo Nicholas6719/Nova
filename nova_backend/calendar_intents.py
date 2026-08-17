@@ -186,7 +186,9 @@ class NovaCalendar:
            re.search(r"\bwhat\s+do\s+i\s+have\s+(?:on\s+)?today\b", t) or \
            re.search(r"\banything\s+on\s+(?:my\s+)?calendar\b", t) or \
            re.search(r"\bwhat(?:'?s|\s+is)\s+on\s+(?:my\s+)?calendar\b", t) or \
-           re.search(r"\bwhat(?:'?s|\s+is)\s+my\s+schedule\b", t):
+           re.search(r"\bwhat(?:'?s|\s+is)\s+my\s+schedule\b", t) or \
+           re.search(r"\b(?:show|read|list|tell|give|check|pull\s+up)\s+(?:me\s+)?"
+                     r"(?:all\s+)?my\s+(?:calendar|schedule|agenda)\b", t):
             return "read_today"
 
         # ── Create reminder ──────────────────────────────────────────────

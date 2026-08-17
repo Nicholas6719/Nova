@@ -8,6 +8,7 @@ WS message types (JSON):
   {"type": "state",   "state": "idle|listening|thinking|speaking"}
   {"type": "message", "role": "user|assistant", "content": "..."}
   {"type": "token",   "token": "..."}    ← streaming LLM tokens
+  {"type": "view",    "view": "home", "data": {...}}   ← which screen to show
 
 Ports differ from Jarvis (3000/8765) so both can run simultaneously.
 """
@@ -19,7 +20,7 @@ import json
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Callable
+from typing import Callable, Optional
 
 log = logging.getLogger("nova.ws")
 
@@ -39,6 +40,12 @@ class NovaWSServer:
         self._clients_lock    = threading.Lock()
         self._messages: list  = []           # rolling window for /api/messages
         self._state           = "idle"
+        # Which screen the UI should be showing, and its panel data. Held so a
+        # client that connects (or reconnects after an app relaunch) is told
+        # immediately, the same way it is told the current state — otherwise the
+        # window comes up blank until Nicholas happens to navigate somewhere.
+        self._view            = "home"
+        self._view_data: dict = {}
         self._running         = False
         # Event loop that owns the WS connections. Broadcasts originate on other
         # threads (LLM worker, main), so sends must be scheduled back onto it.
@@ -68,6 +75,18 @@ class NovaWSServer:
 
     def stream_token(self, token: str) -> None:
         self._ws_broadcast({"type": "token", "token": token})
+
+    def send_view(self, view: str, data: Optional[dict] = None) -> None:
+        """Tell the UI which screen to show, and give it the data to show.
+
+        The panel is fed by whoever ALREADY computed the structure — the
+        calendar, weather and file handlers all build real objects and then
+        flatten them to one spoken sentence. This is how that structure reaches
+        the screen without the LLM ever touching it, which is what keeps the
+        panel free of invented numbers."""
+        self._view = view
+        self._view_data = data or {}
+        self._ws_broadcast({"type": "view", "view": view, "data": self._view_data})
 
     def request_location(self) -> None:
         """Ask the Swift app for a fresh location fix.
@@ -115,9 +134,14 @@ class NovaWSServer:
             async def handler(websocket):
                 with server_ref._clients_lock:
                     server_ref._clients.add(websocket)
-                # Send current state immediately on connect
+                # Send current state AND current view immediately on connect, so
+                # a relaunched app comes up on the right screen instead of blank.
                 await websocket.send(
                     json.dumps({"type": "state", "state": server_ref._state})
+                )
+                await websocket.send(
+                    json.dumps({"type": "view", "view": server_ref._view,
+                                "data": server_ref._view_data})
                 )
                 try:
                     async for raw in websocket:
@@ -162,6 +186,10 @@ class NovaWSServer:
 
                 elif self.path.startswith("/api/messages"):
                     self._json({"messages": server_ref._messages[-50:]})
+
+                elif self.path == "/api/view":
+                    self._json({"view": server_ref._view,
+                                "data": server_ref._view_data})
 
                 else:
                     self.send_error(404)

@@ -43,6 +43,7 @@ Nova has two parts:
     file_intents.py          file NL dispatch: detect, disambiguate, confirm
     screen_awareness.py      window list + Vision OCR: "what's on my screen"
     rag.py                   local document retrieval
+    views.py                 voice navigation between UI screens
     ws_server.py             HTTP :5001 + WS :8766 bridge
     training/                wake-model training kit (Colab)
     tests/                   the test harness — see "Testing" below
@@ -61,7 +62,7 @@ Nova has two parts:
 
 **`system_prompt.py`** — Nova's personality. Rebuilt fresh on every LLM call. Injects live memory context and RAG context. Defines Nova's identity, tone, and communication rules.
 
-**`stt_engine.py`** — Microphone input. One persistent 16 kHz mono stream feeds both wake detection and command capture. Wake detection dispatches on `wake_word.engine`: `openwakeword` (neural, noise-robust — see `wake_openwakeword.py`) or `transcript` (legacy Whisper rolling-window scan), auto-falling back to transcript if the OWW model can't load. VAD-gated command recording via webrtcvad with adaptive silence cutoffs. Transcription via faster-whisper (local, offline) with **`beam_size=1` (greedy)** — faster *and* more accurate here, which is not the usual trade: measured under fan-level noise, beam search latched onto the `initial_prompt` and looped ("what time is it" → "What time is it, what is the date, what is the date…" forty-odd times, 0.555s vs 0.296s), scoring 6/8 against greedy's 8/8. Same failure family as the fan-noise hallucinations that drove the neural wake word; `_is_noise_hallucination` does not catch it (too many distinct words). Tune via `stt.beam_size`.
+**`stt_engine.py`** — Microphone input. One persistent 16 kHz mono stream feeds both wake detection and command capture. Wake detection dispatches on `wake_word.engine`: `openwakeword` (neural, noise-robust — see `wake_openwakeword.py`) or `transcript` (legacy Whisper rolling-window scan), auto-falling back to transcript if the OWW model can't load. VAD-gated command recording via webrtcvad with adaptive silence cutoffs. Transcription via faster-whisper (local, offline) with **`beam_size=5` (beam search)**. This reversed an earlier call and the reversal is the lesson: an 8-clip test at ONE noise level made greedy look better, it shipped, and Nicholas was then misheard in real use ("went to 25% of 10%"). A proper sweep — 126 clips, 3 voices, 3 noise levels — says the opposite on both corpora: easy 0.5% WER / 71-of-72 exact for beam against greedy's 2.9% / 65-of-72; hard 20.4% / 61.1% against 23.6% / 53.2%, for 44ms. Also measured and rejected: `small.en` (2.6-3.8% WER on the easy corpus vs base.en's 0.5%, 3x slower), `distil-small.en` (5.4%), and float32/int8_float32 compute types. Beam search CAN loop on the `initial_prompt` — `patience=2` turned "what time is it" into forty repetitions — which is what `_is_transcription_loop` exists to catch, at any decode setting. Tune via `stt.beam_size`.
 
 **`wake_openwakeword.py`** — Neural wake-word detection via OpenWakeWord. `OpenWakeWordDetector` accumulates the stream's 30 ms frames into 80 ms chunks, scores them with onnxruntime (fully local), and fires on a score threshold held for N consecutive windows; OWW's built-in Silero VAD gate suppresses scoring on non-speech so steady noise never triggers. The custom "Nova" model (`nova.onnx`) is trained via `training/` (Colab). Replaces transcript-based wake, which couldn't survive steady background noise.
 
@@ -97,7 +98,9 @@ Nova has two parts:
 
 **`calendar_intents.py`** — Natural-language dispatch on top of `calendar_reminders.py`. `NovaCalendar.detect_intent` is strict regex only (no calendar word → None → normal chat); `handle` runs LLM JSON extraction (temp=0, heavily post-processed) and returns a single spoken string. Runs on the `nova-llm` worker thread, so its `self.llm.generate` calls are thread-safe. Reads are LLM-summarized with deterministic template fallbacks so a bad generation never invents a day/time.
 
-**`ws_server.py`** — Bridge between Python and Swift. HTTP server on :5001, WebSocket server on :8766. Swift connects here to receive state changes, message content, and streaming tokens in real time.
+**`views.py`** — Voice navigation between UI destinations ("go home", "show me the menu", "go to finance"). Nova's UI has no sidebar and nothing to click, so **speech is the navigation**. Detection is strict regex anchored at BOTH ends and the destination must be a name in the registry, because navigation words are ordinary English: "go home" navigates, "I go home every friday" is conversation, and "I want to go to italy someday" falls through because Italy is not a view. Routing stage 2c — ahead of calendar, weather, files and tools, every one of which would otherwise claim these ("go to the weather" carries a weather word, "open the memory panel" looks like an app launch). A view whose panel does not exist yet **says so out loud and shows nothing**, rather than displaying an empty screen. The menu is generated from the registry so it cannot drift from what actually exists. Never touches the LLM.
+
+**`ws_server.py`** — Bridge between Python and Swift. HTTP server on :5001, WebSocket server on :8766. Swift connects here to receive state changes, message content, streaming tokens, and **which screen to show** in real time. The current view and its data are held like the current state, so a client that connects — or reconnects after an app relaunch — is told immediately instead of coming up blank.
 
 **`requirements.txt`** — All Python dependencies. Install with `pip install -r requirements.txt`.
 
@@ -108,6 +111,7 @@ Nova has two parts:
 1. System commands — sleep / wake / mute (always intercepted first)
 2. Calendar follow-up offer — answers a "want to hear what's coming up?" with yes/no
 2b. Pending file question — "which one?" / "move it to Documents?" answered before routing
+2c. UI navigation — go home / show me the menu / go to a named screen
 3. Calendar / reminders intents — read / create / complete / delete / update (EventKit)
 4. Screen awareness — what's on my screen / what app am I in
 4b. Weather — now / tomorrow / next few days, here or a named place
@@ -127,6 +131,7 @@ Nova has two parts:
 |--------|----------------|--------------------------------|
 | GET    | /api/status    | Health check + current state   |
 | GET    | /api/messages  | Message history (last 50)      |
+| GET    | /api/view      | Current screen + its panel data|
 | POST   | /api/message   | Send text from UI to pipeline  |
 | POST   | /api/mute      | Toggle mute from UI            |
 
@@ -135,6 +140,7 @@ Nova has two parts:
 {"type": "state",   "state": "idle|listening|thinking|speaking"}
 {"type": "message", "role": "user|assistant", "content": "..."}
 {"type": "token",   "token": "..."}
+{"type": "view",    "view": "home", "data": {...}}
 ```
 
 ---
@@ -186,6 +192,7 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | `test_wake_capture.py` | the wake word gives him time; loops never reach the LLM | real `record_command`, scripted VAD |
 | `test_weather.py` | weather answers are real numbers, and steal nothing else | real intents + canned payloads, live calls optional |
 | `test_music.py` | play-by-name works and shadows no transport command | real router, AppleScript + network stubbed |
+| `test_views.py` | voice navigation reaches the right screen and fakes nothing | real views + real WS server, transport captured |
 | `test_tts_chunking.py` | Nova starts speaking sooner and says the SAME words | real `_stream_response`, scripted LLM |
 | `smoke_launch.py` | the REAL process starts and answers over HTTP | real process |
 | `test_full_sweep.py` | every subsystem vs real system state | real code + real system |

@@ -116,6 +116,8 @@ SUITES = {
                 "weather answers are real numbers, and steal nothing else", False, False),
     "music":   ("test_music.py",
                 "play-by-name works and shadows no transport command", False, False),
+    "views":   ("test_views.py",
+                "voice navigation reaches the right screen and fakes nothing", False, False),
     "smoke":   ("smoke_launch.py",
                 "the REAL process starts and answers a turn", True, True),
     "full":    ("test_full_sweep.py",
@@ -159,7 +161,8 @@ def main() -> int:
     if args.all:
         chosen = list(SUITES)
     elif args.quick:
-        chosen = ["env", "routing", "loop", "wake", "cache", "rag", "tts", "weather", "music"]
+        chosen = ["env", "routing", "loop", "wake", "cache", "rag", "tts",
+                  "weather", "music", "views"]
     else:
         chosen = [k for k in SUITES if getattr(args, k)]
     if not chosen:

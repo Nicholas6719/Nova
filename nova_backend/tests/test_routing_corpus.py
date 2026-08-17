@@ -118,6 +118,8 @@ def build_assistant():
     va._init_calendar()
     va._init_files()
     va._init_screen()
+    va._init_weather()
+    va._init_views()                     # tolerates a missing ws by design
     return va
 
 
@@ -128,10 +130,18 @@ def route_of(va, text: str) -> str:
     if nova_mod.find_signoff(text)[1] is not None:
         lead = nova_mod._content_before_sleep(text, nova_mod.find_signoff(text)[0])
         return "signoff" if not lead else "signoff+content"
+    # Order below MUST mirror _handle_turn_impl, or this suite tests a pipeline
+    # Nova does not have.
+    if va.views.detect_intent(text) is not None:
+        return "view"
     if va.calendar.detect_intent(text) is not None:
         return "calendar"
     if va.screen.detect_intent(text) is not None:
         return "screen"
+    # Weather sits at stage 4b and was missing from this harness entirely, so
+    # nothing here could catch a matcher stealing weather phrasing.
+    if va.weather.detect_intent(text) is not None:
+        return "weather"
     if va.files.detect_intent(text) is not None:
         return "files"
     if _memory_would_fire(va, text):
