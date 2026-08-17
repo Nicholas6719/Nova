@@ -283,6 +283,7 @@ class VoiceAssistant:
         self._init_files()
         self._init_screen()
         self._init_weather()
+        self._init_market()
         self._init_ws()
         self._init_views()          # after _init_ws: it needs the WS server
         self._verify_engines()
@@ -316,7 +317,8 @@ class VoiceAssistant:
     # __init__, and the behaviour suite missed it because the test harness
     # initialized engines by hand. Fail loudly at startup instead.
     _REQUIRED_ENGINES = ("stt", "llm", "tts", "memory", "tools",
-                         "calendar", "files", "screen", "weather", "ws", "views")
+                         "calendar", "files", "screen", "weather", "market", "ws",
+                         "views")
 
     def _verify_engines(self) -> None:
         missing = [name for name in self._REQUIRED_ENGINES
@@ -497,6 +499,12 @@ class VoiceAssistant:
         # temperature. See weather_engine.py for the invariant-3 decision.
         from weather_intents import NovaWeather
         self.weather = NovaWeather(self.config)
+
+    def _init_market(self) -> None:
+        # Deterministic end to end: no model ever phrases a price. See
+        # market_engine.py for the invariant-3 decision.
+        from market_intents import NovaMarket
+        self.market = NovaMarket(self.config)
 
     def _init_ws(self) -> None:
         from ws_server import NovaWSServer
@@ -986,6 +994,18 @@ class VoiceAssistant:
         if weather_intent is not None:
             resp = self.weather.handle(text, weather_intent)
             self._emit_panel(self.weather)
+            self._respond(resp)
+            return
+
+        # ── 4c. Market data ───────────────────────────────────────────────────
+        # AFTER weather (both answer "how's the X") and BEFORE files and tools,
+        # whose "find X" and "open X" rules would swallow "what's Apple stock
+        # at". Detection needs a finance word AND a resolvable subject, so
+        # "how are you doing" and "I had apple pie" fall straight through.
+        market_intent = self.market.detect_intent(text)
+        if market_intent is not None:
+            resp = self.market.handle(market_intent, text)
+            self._emit_panel(self.market)
             self._respond(resp)
             return
 

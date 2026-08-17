@@ -119,6 +119,7 @@ def build_assistant():
     va._init_files()
     va._init_screen()
     va._init_weather()
+    va._init_market()
     va._init_views()                     # tolerates a missing ws by design
     return va
 
@@ -142,6 +143,8 @@ def route_of(va, text: str) -> str:
     # nothing here could catch a matcher stealing weather phrasing.
     if va.weather.detect_intent(text) is not None:
         return "weather"
+    if va.market.detect_intent(text) is not None:
+        return "market"
     if va.files.detect_intent(text) is not None:
         return "files"
     if _memory_would_fire(va, text):

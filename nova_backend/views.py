@@ -84,7 +84,6 @@ _VIEW_DEFS: tuple[tuple, ...] = (
 # Views whose panel does not exist yet, and what Nova says instead. Kept here so
 # adding the panel is a one-line deletion.
 _PLANNED = {
-    "finance": "I don't have markets wired up yet.",
     "health":  "I can't see your health data yet. That needs the phone app.",
 }
 
@@ -235,7 +234,24 @@ class NovaViews:
             return self._home_payload()
         if view.name == "memory":
             return self._memory_payload()
+        if view.name == "finance":
+            return self._finance_payload()
         return {}
+
+    def _finance_payload(self) -> dict:
+        """The indices and his watchlist. Built by market_intents so the screen
+        and the spoken answer come from the same templated numbers."""
+        import panels as P
+        market = getattr(self.assistant, "market", None)
+        if market is None:
+            return P.panel(title="Markets",
+                           blocks=[P.note("Market data isn't available.")])
+        try:
+            return market.screen_payload()
+        except Exception as exc:
+            log.warning(f"finance panel unavailable ({exc})")
+            return P.panel(title="Markets",
+                           blocks=[P.note("I couldn't reach market data just now.")])
 
     # ── Memory ────────────────────────────────────────────────────────────────
     def _memory_payload(self) -> dict:

@@ -45,6 +45,8 @@ Nova has two parts:
     rag.py                   local document retrieval
     views.py                 voice navigation between UI screens
     panels.py                structured payloads for the screen
+    market_engine.py         quotes, indices, analyst ratings (Yahoo + Finnhub)
+    market_intents.py        market NL dispatch
     confidence.py            how sure Nova must be before acting
     echo_canceller.py        subtracts Nova's own voice from the mic
     ws_server.py             HTTP :5001 + WS :8766 bridge
@@ -216,6 +218,7 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | `test_music.py` | play-by-name works and shadows no transport command | real router, AppleScript + network stubbed |
 | `test_views.py` | voice navigation reaches the right screen and fakes nothing | real views + real WS server, transport captured |
 | `test_confidence.py` | Nova acts only when sure enough for what it costs | real confidence module + real Whisper |
+| `test_market.py` | market answers are real numbers, and never advice | real engine, canned payloads (NOVA_TEST_LIVE=1 for live) |
 | `test_echo_cancellation.py` | Nova's own voice is removed from the mic, his is not | real Kokoro + real speech, simulated speaker path |
 | `test_tts_chunking.py` | Nova starts speaking sooner and says the SAME words | real `_stream_response`, scripted LLM |
 | `smoke_launch.py` | the REAL process starts and answers over HTTP | real process |
@@ -270,6 +273,7 @@ small change — Nicholas asked for this explicitly and it is faster and sharper
 3. **No cloud dependencies — TWO narrow, documented exceptions.** Nova is local and private: no API keys, and the LLM/STT/TTS/memory NEVER leave the machine. The exceptions:
    - `maps_engine.py` — "how far is the nearest X" and travel times are Apple MapKit network lookups; getting a location fix sends an approximate position to Apple.
    - `spotify_search.py` — **added 2026-08-13, his explicit choice** after being shown the alternatives (hand off to Spotify's own search with no key; automate Spotify's UI). Name→URI lookup only; the words he asked for are what leaves the machine. Playback is local.
+   - `market_engine.py` — **added 2026-08-17, his explicit choice.** Market data only; he ruled out any access to his real accounts. Yahoo needs no key at all; Finnhub's free tier needs one, stored at `NOVA_DATA_DIR/finnhub_credentials.json` and never in the committed config. What leaves the machine is a ticker or a company name he said out loud. **The privacy wrinkle he was told about and accepted: weather leaks an approximate location, but a stock query leaks what he is invested in.** `finance.enabled: false` disables it.
    - `weather_engine.py` — **added 2026-08-13, Nicholas's explicit choice** after being shown WeatherKit (needs a paid developer account), weather.gov (grid lookup) and browser scraping. Open-Meteo needs **no API key and no account**, so nothing ties a request to him beyond the IP any HTTP call carries. What leaves the machine is an approximate coordinate (rounded to ~100m) or a place name he said aloud.
 
    Both are used ONLY when he asks that kind of question, touch neither the LLM nor memory, are never stored, and degrade honestly ("I can't get your location", "I couldn't reach the weather service") rather than guessing. `weather.enabled: false` disables the second entirely. **Do not widen further without asking him — this is his privacy line, and he decides where it sits.**

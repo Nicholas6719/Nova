@@ -155,7 +155,13 @@ def test_unbuilt_views(views, ws) -> None:
     print("\n3. VIEWS THAT DO NOT EXIST YET")
     from views import VIEWS
 
-    for name in ("finance", "health"):
+    # Derived from the registry, not hardcoded. This test named "finance" until
+    # finance shipped, and then failed for the right reason in the wrong place —
+    # exactly the drift the menu itself is generated to avoid.
+    planned = [v.name for v in VIEWS.values() if not v.is_live]
+    check(bool(planned), "there is at least one unbuilt view to check",
+          "if this ever fails, delete this section")
+    for name in planned:
         ws.sent.clear()
         before = ws.server._view
         spoken = views.handle(name)
@@ -170,8 +176,8 @@ def test_unbuilt_views(views, ws) -> None:
               repr(spoken))
 
     live = [v.name for v in VIEWS.values() if v.is_live]
-    check("home" in live and "menu" in live,
-          "home and menu are live in phase 1", str(live))
+    for must in ("home", "menu", "weather", "calendar", "memory", "finance"):
+        check(must in live, f"'{must}' is live", str(live))
 
 
 # ── 4. The menu is generated, not hand-written ────────────────────────────────
@@ -203,8 +209,10 @@ def test_menu_payload(views, ws) -> None:
     # An unbuilt destination must be marked, or the menu promises what it can't do.
     flat = [i for s in sections for i in s["items"]]
     unbuilt = [i for i in flat if i.get("available") is False]
-    check(len(unbuilt) >= 2, "menu marks unbuilt destinations as unavailable",
-          str(unbuilt))
+    expected_unbuilt = len([v for v in VIEWS.values() if not v.is_live])
+    check(len(unbuilt) == expected_unbuilt,
+          "menu marks exactly the unbuilt destinations as unavailable",
+          f"{len(unbuilt)} marked, {expected_unbuilt} planned")
     check(all(i.get("note") for i in unbuilt),
           "each unavailable destination explains why", str(unbuilt))
 

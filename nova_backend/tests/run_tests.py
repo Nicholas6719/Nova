@@ -118,6 +118,8 @@ SUITES = {
                 "play-by-name works and shadows no transport command", False, False),
     "views":   ("test_views.py",
                 "voice navigation reaches the right screen and fakes nothing", False, False),
+    "market":  ("test_market.py",
+                "market answers are real numbers, and never advice", False, False),
     "conf":    ("test_confidence.py",
                 "Nova acts only when sure enough for what it costs", False, False),
     "echo":    ("test_echo_cancellation.py",
@@ -167,7 +169,7 @@ def main() -> int:
         chosen = list(SUITES)
     elif args.quick:
         chosen = ["env", "routing", "loop", "wake", "cache", "rag", "tts",
-                  "weather", "music", "views", "conf", "echo"]
+                  "weather", "music", "views", "market", "conf", "echo"]
     else:
         chosen = [k for k in SUITES if getattr(args, k)]
     if not chosen:

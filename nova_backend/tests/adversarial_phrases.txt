@@ -13,6 +13,7 @@
 #   calendar    calendar or reminders handler
 #   screen      screen awareness
 #   view        navigation to a UI destination (home / menu / a named panel)
+#   market      stock quotes, indices, analyst ratings, company news
 #   memory      memory recall/store/forget
 #   fastpath    greeting / date / time / repeat
 #   unsupported an action Nova cannot perform; must be refused, never faked
@@ -162,3 +163,23 @@ let's work on this budget together tomorrow  ==>  llm
 I have to work with my team on that  ==>  llm
 he took over the project last year  ==>  llm
 I work on my mac all day  ==>  llm
+
+# ── Market data (Phase 6). Real money rides on these, so the guards below
+#    matter more than the positives. ─────────────────────────────────────────
+how is the market doing  ==>  market
+how's the stock market today  ==>  market
+how is SpaceX stock doing  ==>  market
+what is Apple stock trading at  ==>  market
+what do analysts say about Tesla  ==>  market
+what are the analyst ratings for Nvidia  ==>  market
+what's the price of Microsoft stock  ==>  market
+
+# ...and the conversation a loose finance regex would eat.
+how are you doing  ==>  llm
+how's it going  ==>  llm
+how's the weather  ==>  weather
+how's my day looking  ==>  llm
+I had apple pie for dessert  ==>  llm
+can you share that with me  ==>  llm
+the price of gas is insane  ==>  llm
+my apple watch died  ==>  llm

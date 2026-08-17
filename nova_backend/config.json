@@ -110,5 +110,16 @@
     "max_ocr_lines": 80,
     "max_tokens": 90,
     "_note": "Screen awareness reads real window titles + Vision OCR, fully on-device. Describing the screen needs Screen Recording permission for the APP BUNDLE; 'what app am I in' works without it."
+  },
+  "finance": {
+    "enabled": true,
+    "watchlist": [
+      "AAPL",
+      "NVDA",
+      "TSLA",
+      "SPCX",
+      "MSFT"
+    ],
+    "_note": "Market data. Nova is a RESEARCHER, never an advisor: every number is templated from a real payload and the LLM never phrases a price. Two sources - Yahoo for quotes and indices (no key, and Finnhub's index endpoint is paid), Finnhub for symbol search, analyst recommendations, news and fundamentals. The Finnhub key lives at NOVA_DATA_DIR/finnhub_credentials.json, NEVER here: this file is committed. Invariant 3's fourth exception - a stock query leaks what he is invested in. Set enabled false to switch it off."
   }
 }
