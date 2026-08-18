@@ -73,8 +73,13 @@ _VIEW_DEFS: tuple[tuple, ...] = (
     ("home",          "Home.",                    ("home",)),
     ("menu",          "Here's everything I can do.",
                                                   ("menu", "capabilities")),
-    ("weather",       "Weather.",                 ("weather", "forecast")),
-    ("calendar",      "Your calendar.",           ("calendar", "schedule", "agenda")),
+    # Weather and calendar are deliberately NOT navigable. They have real
+    # handlers that fetch real data and build their own panels, and navigation
+    # runs at stage 2c — three stages ahead of both. "Show me the weather" was
+    # being claimed here and answered with the word "Weather." over an empty
+    # panel, because _payload has no case for it and never did. A destination
+    # whose screen is produced by a handler should be reached THROUGH that
+    # handler, not around it.
     ("files",         "Files.",                   ("files", "file")),
     ("memory",        "Here's what I remember.",  ("memory", "memories",
                                                    "what you remember")),

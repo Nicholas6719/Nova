@@ -45,7 +45,12 @@ struct NovaApp: App {
                     locationProvider.requestLocation()
                     // After the backend, so its socket is listening before
                     // the first packet arrives.
-                    systemAudio.start()
+                    // Off with the backend's audio.system_tap.enabled. Both
+                    // halves have to be on, and the tap costs nothing when the
+                    // backend is not listening — but there is no reason to
+                    // capture the screen for audio nobody reads.
+                    // systemAudio.start()
+                    _ = systemAudio
                 }
         }
         // The SwiftUI-native way, and the one that actually works. Measured:

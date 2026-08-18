@@ -133,7 +133,10 @@ what can you do  ==>  view
 what can you show me  ==>  view
 go to finance  ==>  view
 take me to finance  ==>  view
-go to the weather  ==>  view
+# Weather is reached through its HANDLER, never as an empty panel: navigation
+# used to claim this and answer with the word "Weather." over a blank screen.
+go to the weather  ==>  weather
+show me the weather  ==>  weather
 show me the finance screen  ==>  view
 open the memory panel  ==>  view
 

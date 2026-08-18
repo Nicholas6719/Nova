@@ -79,6 +79,11 @@ def build_views():
 
 
 # ── 1. Detection ──────────────────────────────────────────────────────────────
+# Weather and calendar are NOT here on purpose: they have real handlers that
+# fetch real data and build their own panels, and navigation runs three stages
+# ahead of both. "Show me the weather" was being claimed here and answered with
+# the word "Weather." over an empty screen. A destination whose panel is
+# produced by a handler must be reached through that handler.
 NAVIGATES = {
     "go home": "home",
     "nova go home": "home",
@@ -91,12 +96,10 @@ NAVIGATES = {
     "what can you do": "menu",
     "go to finance": "finance",
     "take me to markets": "finance",
-    "go to the weather": "weather",
     "show me the finance screen": "finance",
     "open the memory panel": "memory",
     "pull up my past conversations": None,   # "my" is not navigational
     "go to conversation history": "conversations",
-    "switch to calendar": "calendar",
 }
 
 # Ordinary English that happens to contain a navigation word. Every one of these
@@ -176,7 +179,7 @@ def test_unbuilt_views(views, ws) -> None:
               repr(spoken))
 
     live = [v.name for v in VIEWS.values() if v.is_live]
-    for must in ("home", "menu", "weather", "calendar", "memory", "finance"):
+    for must in ("home", "menu", "memory", "finance"):
         check(must in live, f"'{must}' is live", str(live))
 
 

@@ -119,26 +119,20 @@ _D4, _A4, _D5, _F5, _A5, _D6 = 293.66, 440.00, 587.33, 739.99, 880.00, 1174.66
 
 
 def _make_boot():
-    """Systems coming online: five rising ticks, then the room opens up.
+    """Systems coming online: three rising ticks, and done.
 
-    The ticks are deliberately mechanical — short, evenly spaced, climbing — so
-    it reads as a sequence completing rather than a piece of music. The long
-    detuned pad underneath is what makes it feel like something powering up
-    instead of a countdown.
+    Deliberately SHORT. The long version was a 2.4s pad with a swell over it,
+    and it stuttered — not because of the synthesis but because it was still
+    playing while Kokoro opened its own output stream to warm up, and two
+    streams contending on one device is a dropout. A cue that is over before
+    the engines get busy cannot glitch. Nothing here is layered for the same
+    reason: fewer simultaneous voices, less to underrun.
     """
-    ticks = [
-        _at(0.00, _tone(_D4, 0.16, amp=0.30, decay=0.28)),
-        _at(0.34, _tone(_A4, 0.16, amp=0.32, decay=0.28)),
-        _at(0.68, _tone(_D5, 0.16, amp=0.34, decay=0.28)),
-        _at(1.02, _tone(_F5, 0.16, amp=0.34, decay=0.28)),
-        _at(1.36, _tone(_A5, 0.22, amp=0.36, decay=0.32)),
-    ]
-    # No detune, no shimmer: clean tones only. Depth comes from the octave
-    # partial inside _tone and from the pad being long and quiet, not from
-    # oscillators fighting each other.
-    pad = _at(0.00, _tone(_D4 / 2, 2.40, amp=0.13, attack=0.45, decay=0.8))
-    swell = _at(1.15, _tone(_D5, 1.20, amp=0.10, attack=0.60, decay=0.7))
-    return _normalise(_layer(pad, swell, *ticks), peak=0.50)
+    return _normalise(_layer(
+        _at(0.00, _tone(_D4, 0.13, amp=0.34, decay=0.30)),
+        _at(0.20, _tone(_A4, 0.13, amp=0.36, decay=0.30)),
+        _at(0.40, _tone(_D5, 0.24, amp=0.38, decay=0.36)),
+    ), peak=0.50)
 
 
 def _make_ready():

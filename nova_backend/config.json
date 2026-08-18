@@ -144,8 +144,8 @@
   },
   "audio": {
     "system_tap": {
-      "enabled": true,
-      "_note": "Capture the system audio mix in the Swift app (ScreenCaptureKit) and send it to the backend as the echo canceller's reference, over UDP on 127.0.0.1:8767. This is what makes 'Nova cannot hear my speakers' one rule instead of a list of special cases, and barge-in falls out of it because Nova's own voice is in that mix too. Needs Screen Recording permission; without it the tap never starts and Nova falls back exactly to her old behaviour - half duplex, music paused while she listens. Turning this on also turns echo cancellation on, because the tap is the reference it was always missing."
+      "enabled": false,
+      "_note": "OFF. The tap works and the residual suppressor removes ~19 dB of real speaker music, but ~19 dB is not enough: with it on, music stops pausing and Nova keeps listening while she speaks, and in real use that was worse than the workaround it replaced - she interrupted herself, took longer to notice he had stopped talking, and still could not hear him over music. The pause-while-listening path is what actually works today. Turn this on only alongside a measurement above ~30 dB."
     }
   }
 }
