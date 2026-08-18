@@ -81,15 +81,35 @@ class SeamlessPlayer:
         self._done.wait()
         self._close()
 
-    def stop(self) -> None:
-        self._feeding = False
-        self._done.set()
-        self._close()
+    def stop(self, immediate: bool = False) -> None:
+        """Stop playing. `immediate` throws away what is already buffered.
 
-    def _close(self) -> None:
+        The difference is the whole of barge-in feeling right. Normal
+        completion must DRAIN — cutting the buffer there would clip the last
+        syllable off every sentence Nova says. An interruption must not:
+        measured, draining took 1.33s to go quiet after the wake word, and a
+        voice that keeps talking for a second after you speak over it does not
+        read as having been interrupted at all.
+        """
+        self._feeding = False
+        if immediate:
+            # Silence the callback FIRST. Aborting the stream is not enough on
+            # its own: the callback can still be handed a block between here
+            # and the abort landing, and it would play real audio.
+            with self._lock:
+                self._buf = np.empty(0, dtype=np.float32)
+        self._done.set()
+        self._close(immediate=immediate)
+
+    def _close(self, immediate: bool = False) -> None:
         if self._stream is not None:
             try:
-                self._stream.stop()
+                # abort() discards what PortAudio has already buffered;
+                # stop() waits for it to play out. That is the 1.33s.
+                if immediate:
+                    self._stream.abort()
+                else:
+                    self._stream.stop()
                 self._stream.close()
             except Exception:
                 pass
@@ -196,6 +216,12 @@ class TTSEngine:
         self.config   = config
         self._queue   = queue.Queue()
         self._stop    = threading.Event()
+        # Raised by an interruption. The worker may be mid-Kokoro when he
+        # speaks over her — that call cannot be cancelled, but its RESULT can
+        # be thrown away instead of being handed to a fresh player, which is
+        # the difference between going quiet now and going quiet when the
+        # synthesis happens to finish.
+        self._interrupt = threading.Event()
         self._primary = None
 
         # Shared gate with the STT engine. Cleared while audio plays so the mic
@@ -261,12 +287,16 @@ class TTSEngine:
     def speak(self, text: str) -> None:
         """Queue a sentence for playback. Returns instantly.
 
+        Clears any standing interruption: he has been answered again, so the
+        last barge-in is history.
+
         Normalizes here, at the ONE choke point every response passes through.
         Only the LLM path was being cleaned, so deterministic replies reached
         Kokoro raw — including newlines, which made espeak report
         "words count mismatch on 200.0% of the lines (2/1)" and produced the
         stutter Nicholas heard on the screen-awareness and square-root replies.
         """
+        self._interrupt.clear()
         text = _normalize_for_speech(text)
         if not text:
             return
@@ -279,6 +309,11 @@ class TTSEngine:
         playback ever wedges, an unbounded wait would freeze the pipeline
         (status stuck on 'speaking'). With a timeout we give up and continue.
         """
+        # An interruption means there is nothing left worth waiting for; the
+        # queue was emptied and the player aborted. Waiting on the worker to
+        # notice added most of the delay he could hear.
+        if self._interrupt.is_set():
+            return
         if timeout is None:
             self._queue.join()
         else:
@@ -305,8 +340,9 @@ class TTSEngine:
                 self._queue.task_done()
             except queue.Empty:
                 break
+        self._interrupt.set()
         if self._player is not None:
-            self._player.stop()
+            self._player.stop(immediate=True)   # barge-in: do not drain
             self._player = None
         self._speaking = False
         self._mic_gate.set()
