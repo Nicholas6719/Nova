@@ -25,6 +25,11 @@ struct Panel {
 
     var isEmpty: Bool { blocks.isEmpty && sections.isEmpty }
 
+    /// One block on its own, for home's side cards.
+    init(single block: PanelBlock) {
+        blocks = [block]
+    }
+
     /// Decoded defensively: a malformed payload yields an empty panel and the
     /// orb keeps the screen, rather than throwing away Nova's answer.
     init(_ data: [String: Any]) {
@@ -112,16 +117,17 @@ enum PanelBlock: Identifiable {
 struct PanelView: View {
     let panel: Panel
     let tint: Color
+    /// A home CARD hugs its content; a full answer panel scrolls and fills.
+    /// Without this a one-line card stretched the whole window height.
+    var compact: Bool = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                header
-                ForEach(panel.blocks) { block(for: $0) }
-                ForEach(panel.sections) { section($0) }
+        Group {
+            if compact {
+                content.fixedSize(horizontal: false, vertical: true)
+            } else {
+                ScrollView { content }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(26)
         }
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -131,6 +137,16 @@ struct PanelView: View {
                         .stroke(Color.white.opacity(0.07), lineWidth: 1)
                 )
         )
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: compact ? 14 : 22) {
+            header
+            ForEach(panel.blocks) { block(for: $0) }
+            ForEach(panel.sections) { section($0) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(compact ? 18 : 26)
     }
 
     private var header: some View {

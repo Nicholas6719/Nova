@@ -58,23 +58,24 @@ enum NovaState: String, CaseIterable {
         }
     }
 
-    /// One hue family, walked by temperature rather than jumped between.
+    /// One hue family, and SATURATED.
     ///
-    /// He said the colours did not match: the old set mixed a cyan, a
-    /// blue-violet and a near-white that shared no common ground, so every
-    /// state change looked like a different palette. These stay on a
-    /// teal-to-blue axis and differ by DEPTH — idle is deep and desaturated,
-    /// speaking is the same hue brought forward. Only `working` and `unsure`
-    /// leave the family, because those two must be unmistakable at a glance.
+    /// Two corrections here. The original set mixed a cyan, a blue-violet and
+    /// a near-white sharing no common ground, so every state change looked
+    /// like a different scheme — these stay on a cyan-to-blue axis. And when
+    /// he said the orb was "too light" I first read that as too bright and
+    /// desaturated it, which made it milky grey; his reference is vivid
+    /// electric cyan on near-black. Pale was the problem, not bright. Only
+    /// `working` and `unsure` leave the family, because they must be obvious.
     var tint: Color {
         switch self {
-        case .idle:      return Color(red: 0.157, green: 0.404, blue: 0.478)
-        case .listening: return Color(red: 0.208, green: 0.706, blue: 0.831)
-        case .thinking:  return Color(red: 0.286, green: 0.518, blue: 0.808)
-        case .speaking:  return Color(red: 0.322, green: 0.808, blue: 0.898)
-        case .working:   return Color(red: 0.902, green: 0.643, blue: 0.310)
-        case .sleeping:  return Color(red: 0.086, green: 0.176, blue: 0.227)
-        case .unsure:    return Color(red: 0.878, green: 0.494, blue: 0.337)
+        case .idle:      return Color(red: 0.055, green: 0.616, blue: 0.780)
+        case .listening: return Color(red: 0.000, green: 0.839, blue: 1.000)
+        case .thinking:  return Color(red: 0.200, green: 0.640, blue: 1.000)
+        case .speaking:  return Color(red: 0.310, green: 0.918, blue: 1.000)
+        case .working:   return Color(red: 1.000, green: 0.694, blue: 0.251)
+        case .sleeping:  return Color(red: 0.055, green: 0.180, blue: 0.239)
+        case .unsure:    return Color(red: 1.000, green: 0.514, blue: 0.310)
         }
     }
 

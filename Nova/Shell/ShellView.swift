@@ -66,22 +66,90 @@ struct ShellView: View {
 
     private var fullShell: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 26) {
-                orbColumn
-                    // With a panel up the orb steps aside rather than dominating;
-                    // on its own it takes the whole window.
-                    .frame(maxWidth: panel.isEmpty ? .infinity : 340)
-
-                if !panel.isEmpty {
-                    PanelView(panel: panel, tint: vm.state.tint)
-                        .frame(maxWidth: .infinity)
-                        .transition(.opacity)
-                }
+            if isHome {
+                homeLayout
+            } else {
+                answerLayout
             }
             if typing { composer.padding(.top, 20) }
         }
         .padding(28)
+        .animation(.easeOut(duration: 0.24), value: vm.view)
         .animation(.easeOut(duration: 0.22), value: panel.isEmpty)
+    }
+
+    private var isHome: Bool { vm.view == "home" }
+
+    /// HOME: the orb is the centre of the screen, the greeting sits under it,
+    /// and what he wants at a glance flanks it. This is his concept, and it is
+    /// a different shape from an answer — an answer steps the orb aside, home
+    /// puts it in the middle.
+    private var homeLayout: some View {
+        HStack(alignment: .center, spacing: 24) {
+            homeCards(Array(panel.blocks.prefix(1)))
+                .frame(width: 250)
+
+            VStack(spacing: 10) {
+                Spacer(minLength: 0)
+                OrbView(state: vm.state, density: .reactor)
+                    .frame(maxWidth: 380, maxHeight: 380)
+                    .aspectRatio(1, contentMode: .fit)
+                greeting
+                readout
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity)
+
+            homeCards(Array(panel.blocks.dropFirst(1)))
+                .frame(width: 250)
+        }
+    }
+
+    /// An ANSWER: the orb steps aside and the panel gets the room.
+    private var answerLayout: some View {
+        HStack(spacing: 26) {
+            orbColumn
+                .frame(maxWidth: panel.isEmpty ? .infinity : 340)
+            if !panel.isEmpty {
+                PanelView(panel: panel, tint: vm.state.tint)
+                    .frame(maxWidth: .infinity)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    /// The greeting, under the orb, as in his concept.
+    private var greeting: some View {
+        VStack(spacing: 2) {
+            if !panel.title.isEmpty {
+                Text(panel.title.uppercased())
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .tracking(2.6)
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+            Text(userName.uppercased())
+                .font(.system(size: 30, weight: .light))
+                .tracking(6)
+                .foregroundStyle(vm.state.tint.opacity(0.95))
+        }
+    }
+
+    private var userName: String { "Nicholas" }
+
+    /// Home's blocks as cards down a side column, rather than one long panel.
+    @ViewBuilder
+    private func homeCards(_ blocks: [PanelBlock]) -> some View {
+        if blocks.isEmpty {
+            Color.clear
+        } else {
+            VStack(spacing: 14) {
+                ForEach(blocks) { b in
+                    PanelView(panel: Panel(single: b), tint: vm.state.tint,
+                              compact: true)
+                }
+                Spacer(minLength: 0)
+            }
+        }
     }
 
     private var orbColumn: some View {
