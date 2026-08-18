@@ -95,6 +95,9 @@ class STTEngine:
         # Nova's own voice before wake detection or capture sees it — which is
         # what makes being interrupted over speakers possible at all.
         self._echo = echo
+        # Barge-in: keep a wake-only ear open while Nova speaks. Needs a
+        # canceller with a real reference, so it is off unless both are.
+        self.barge_in = bool(config.get("barge_in", False)) and echo is not None
         # Wake-word settings (engine choice + OpenWakeWord tuning). Kept separate
         # from the stt block so the wake engine can be swapped without touching
         # STT. Defaults keep the legacy transcript engine if unspecified.
@@ -148,6 +151,22 @@ class STTEngine:
         self._zero_frames = 0
         self._mic_silent = False
         self._audio_q: "queue.Queue[bytes]" = queue.Queue(maxsize=_AUDIO_Q_MAXLEN)
+        # A SECOND queue, for the wake word only.
+        #
+        # This is the piece barge-in was actually missing. The first attempt
+        # simply held the gate open whenever cancellation was on, which fed
+        # Nova's own audio into the same queue the COMMAND recorder reads —
+        # and its VAD then never saw a quiet frame, so every turn ran to the
+        # 15s cap instead of ending when he stopped talking. One queue cannot
+        # serve both: the command recorder needs silence to be real, and the
+        # wake detector needs to keep listening through Nova's voice.
+        #
+        # So they are split. `_audio_q` stays exactly as it was — gated shut
+        # while Nova speaks, which is what makes end-of-speech detection work.
+        # `_wake_q` gets the echo-cancelled frames continuously, and only the
+        # wake detector reads it. Interrupting Nova becomes possible without
+        # anything else in the pipeline having to change its assumptions.
+        self._wake_q: "queue.Queue[bytes]" = queue.Queue(maxsize=_AUDIO_Q_MAXLEN)
         self._stream: Optional[sd.RawInputStream] = None
         # Rolling pre-wake buffer; on a wake hit its contents prime the command
         # recording so a single-breath "Nova, <command>" is fully captured.
@@ -211,15 +230,33 @@ class STTEngine:
         if self._stream is not None:
             return
 
+        def _feed_wake(raw: bytes) -> None:
+            """Every frame, cancelled, whether or not Nova is speaking.
+
+            Bounded and lossy on purpose: the wake detector wants the NEWEST
+            audio, and a backlog would have it firing on something he said
+            seconds ago.
+            """
+            if not self.barge_in or self._echo is None or not self._echo.enabled:
+                return
+            try:
+                self._wake_q.put_nowait(self._echo.process(raw))
+            except queue.Full:
+                try:
+                    self._wake_q.get_nowait()
+                    self._wake_q.put_nowait(raw)
+                except queue.Empty:
+                    pass
+
         def _cb(indata, frames, time_info, status):  # noqa: ANN001
             # Runs on PortAudio's thread. Drop frames while Nova is speaking so
             # its own TTS never enters the queue.
             # With echo cancellation on, frames are kept even while Nova
             # speaks — that is the point. Without it, the gate still drops
             # them, exactly as before.
+            _feed_wake(bytes(indata))
             gate_open = self._mic_gate.is_set()
-            if self._echo is not None and self._echo.enabled:
-                gate_open = True
+            # NOT forced open when cancellation is on any more — see _wake_q.
             if gate_open:
                 data = bytes(indata)
                 # Cheap: only the max magnitude, on the audio thread.
