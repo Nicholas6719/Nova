@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import sys
 import tempfile
 import time
@@ -168,6 +169,26 @@ def test_greeting_and_status():
     check(after["title"] == "", "greeting is gone after his first sentence",
           repr(after["title"]))
     check(not has_status(after), "status row leaves WITH the greeting")
+
+    # ...and the trigger is the WAKE WORD, not her reply. Measured in the
+    # running app on the old signal: the welcome was still under the orb while
+    # Nova was already listening to him.
+    import nova as nova_mod
+    src = pathlib.Path(nova_mod.__file__).read_text()
+    wake = src[src.index("wake_detected = self.stt.record_wake"):]
+    wake = wake[:wake.index("# \u2500\u2500 Mic health")]
+    check("_begin_conversation" in wake,
+          "the wake word retires the greeting, not the reply")
+    # Typing never passes the wake word, so it has to count too.
+    respond = src[src.index("def _respond(self, text: str)"):]
+    respond = respond[:respond.index("self.memory.add_turn")]
+    check("_begin_conversation" in respond, "typing retires it as well")
+
+    views.assistant._conversation_started = True
+    woke = views._home_payload()
+    check(woke["title"] == "", "greeting is gone once the conversation starts")
+    check(not has_status(woke), "and the status row goes with it")
+    views.assistant._conversation_started = False
 
     row = [b for b in launch["blocks"] if b.get("slot") == "status"]
     check(row and row[0]["kind"] == "metrics", "the row is metrics, not a card")

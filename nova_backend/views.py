@@ -295,6 +295,11 @@ def _untrack(thread: threading.Thread) -> None:
         _LIVE.discard(thread)
 
 
+# Set once a tile has gone through EventKit, so the settle below is only paid
+# by processes that actually took the risk.
+_TOUCHED_EVENTKIT = threading.Event()
+
+
 def _drain(budget: float = 6.0) -> None:
     """Let in-flight tile refreshes finish before the interpreter goes away."""
     _STOPPING.set()
@@ -304,8 +309,20 @@ def _drain(budget: float = 6.0) -> None:
             alive = [t for t in _LIVE if t.is_alive()]
         remaining = deadline - time.time()
         if not alive or remaining <= 0:
-            return
+            break
         alive[0].join(min(remaining, 1.0))
+    # Joining the threads is NOT sufficient on its own. EventKit releases the
+    # completion block on its own queue a moment AFTER the fetch returns, and
+    # that release runs PyObjC's dispose helper, which takes the GIL. If the
+    # interpreter has begun finalising by then, Foundation kills the process —
+    # SIGKILL, no traceback. Measured: 4 crashes in 20 runs of a suite that
+    # builds a NovaViews and exits within half a second.
+    #
+    # There is nothing to wait ON: the release is not ours to observe. So this
+    # is a short, bounded settle, paid only when a tile actually went through
+    # EventKit, and only at exit where a fraction of a second costs nothing.
+    if _TOUCHED_EVENTKIT.is_set():
+        time.sleep(0.4)
 
 
 atexit.register(_drain)
@@ -762,9 +779,13 @@ class NovaViews:
         """
         import panels as P
 
-        # The greeting is a welcome, not a permanent header. It goes once he
-        # has said something, and it does not come back that session.
-        spoken_yet = bool(getattr(self.assistant, "_last_response", ""))
+        # The greeting is a welcome, not a permanent header. It goes the moment
+        # he starts talking — the WAKE WORD, not her reply — and it does not
+        # come back that session. `_last_response` was the old signal and it
+        # was a beat too late: it only becomes true after Nova has finished
+        # answering, so the welcome was still on screen while she listened.
+        spoken_yet = bool(getattr(self.assistant, "_conversation_started", False)
+                          or getattr(self.assistant, "_last_response", ""))
 
         if self.home_cleared:
             # Just her. No cards, no row, and no greeting to imply otherwise.
@@ -838,6 +859,7 @@ class NovaViews:
         try:
             import calendar_reminders as cal
             today = datetime.date.today()
+            _TOUCHED_EVENTKIT.set()
             for r in cal.get_all_reminders():
                 iso = r.get("due_iso") or ""
                 if not iso:

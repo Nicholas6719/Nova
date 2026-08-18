@@ -168,7 +168,10 @@ _DEST_RE = re.compile(
 _TRAILING_FILLER = (r"(?:\s+(?:please|thanks|thank\s+you|for\s+me|now|ok|"
                     r"okay|alright|would\s+you|will\s+you))*")
 _DEST_IN_RE = re.compile(
-    r"\bin\s+(?:my\s+|the\s+|a\s+)?"
+    # "on" rides the same rule: "put the budget pdf on my desktop" is as
+    # natural as "in Downloads", and just as safe, because the folder still
+    # has to resolve and still has to end the sentence.
+    r"\b(?:in|on)\s+(?:my\s+|the\s+|a\s+)?"
     # The second word must not be a politeness, or "in Documents please"
     # captures "documents please" and then resolves to nothing.
     r"([A-Za-z][\w'-]*(?:\s+(?!please\b|thanks\b|thank\b|for\b|now\b|ok\b|"

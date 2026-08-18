@@ -277,6 +277,78 @@ search the web for how to move photos into Documents  ==>  tools
 search the web for spider-man  ==>  tools
 search for my resume  ==>  files
 
+# ── Three phrasing gaps: a real capability answered by the wrong handler ────
+# Each of these is something Nova CAN do, reaching either the model or a file
+# search instead. Found by routing 117 generated utterances through the real
+# pipeline.
+put a reminder in for 6pm  ==>  calendar
+put in a reminder for six  ==>  calendar
+stick a reminder in for tomorrow morning  ==>  calendar
+copy my receipts reminder to next Monday  ==>  calendar
+duplicate the dentist reminder  ==>  calendar
+read me the notes on my screen  ==>  screen
+read the notes on my screen  ==>  screen
+what are the errors on my screen  ==>  screen
+tell me what the code on my screen says  ==>  screen
+
+# ...and the file commands that mention a screen or a reminder and must NOT be
+#    stolen by the widened matchers above.
+move the reminder pdf to Documents  ==>  files
+put the budget pdf on my desktop  ==>  files
+find the notes file  ==>  files
+
+# ── The audit: command words that are also ordinary English ─────────────────
+# The resume/screenshot/next/search family turned out to be nine matchers, not
+# four. Found by routing 65 innocent sentences through the real pipeline; every
+# one below was claimed by a handler, several of them loudly. The positive
+# controls underneath matter just as much — the fix must not make the real
+# command unreachable.
+I need more space in my closet  ==>  llm
+we should give the team some space  ==>  llm
+that hard drive of a movie was long  ==>  llm
+my memory is terrible these days  ==>  llm
+in memory of my grandfather  ==>  llm
+do you have a good memory  ==>  llm
+refresh my memory on that  ==>  llm
+the volume of work is insane  ==>  llm
+volume two of the series was better  ==>  llm
+brighter days ahead  ==>  llm
+the loop of the rollercoaster  ==>  llm
+repeat after me  ==>  llm
+shuffle the deck of cards  ==>  llm
+hide your feelings  ==>  llm
+restore my faith in people  ==>  llm
+# These reach the honest refusal rather than the model, because "play" heads
+# _ACTION_REQUEST_RE. For "play chess with me" that is exactly right; for the
+# idioms it is a slightly stiff answer to a turn of phrase. Both beat opening a
+# Spotify search for "it cool", which is what used to happen.
+play it cool  ==>  unsupported
+play devil's advocate  ==>  unsupported
+play chess with me  ==>  unsupported
+
+# ...and the commands those fixes must not break.
+how much disk space do I have  ==>  tools
+how much space is left  ==>  tools
+check my storage  ==>  tools
+how much memory am I using  ==>  tools
+what's my memory usage  ==>  tools
+how much ram do I have  ==>  tools
+turn the volume up  ==>  tools
+set the volume to 40  ==>  tools
+what's the volume  ==>  tools
+make the screen brighter  ==>  tools
+dim the screen  ==>  tools
+set brightness to 50  ==>  tools
+shuffle  ==>  tools
+turn on shuffle  ==>  tools
+shuffle the music  ==>  tools
+turn off repeat  ==>  tools
+repeat this song  ==>  tools
+reload the page  ==>  tools
+refresh  ==>  tools
+minimize Xcode  ==>  tools
+play some jazz  ==>  tools
+
 # ── A file rename is not a reminder edit ────────────────────────────────────
 # calendar_intents has a bare "rename X to Y" rule and a file-word guard meant
 # to stop it claiming file renames — but the guard did not list "resume", so

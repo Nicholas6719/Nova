@@ -303,6 +303,13 @@ _DESCRIBE_RE = re.compile(
     r"|what\s+do\s+you\s+see"
     r"|what(?:'?s| is)\s+(?:this|that)\s+on\s+(?:my|the)\s+screen"
     r"|(?:can\s+you\s+)?see\s+(?:my|the)\s+screen"
+    # Anything he asks Nova to READ that is qualified "on my screen". Without
+    # this, "read me the notes on my screen" hit the file noun "notes" and
+    # became a file search — for a feature that works when phrased as "read my
+    # screen". The verb list is deliberately read-only: "move the file on my
+    # screen to Documents" is a file command and must stay one.
+    r"|(?:read|describe|tell\s+me|list|check|what\s+(?:are|is|does|do))"
+    r"[^.?!]{0,60}?\bon\s+(?:my|the)\s+screen"
     r")\b",
     re.I,
 )

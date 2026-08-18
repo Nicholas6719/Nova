@@ -244,6 +244,12 @@ class VoiceAssistant:
         self.is_muted         = False
         self.is_awake         = True
         self._last_response   = ""
+        # True once he has actually started talking to Nova this session — the
+        # wake word, or typing. Home's greeting and status row are the RESTING
+        # state and go the moment this flips. Kept separate from
+        # `_last_response` because that only becomes true after she ANSWERS,
+        # which is a beat too late to be a greeting.
+        self._conversation_started = False
         # A SOFT one-shot follow-up armed by a calendar read ("want to hear
         # what's coming up?"). It only fires on an affirmative reply and never
         # eats an unrelated next command.
@@ -856,6 +862,12 @@ class VoiceAssistant:
                     continue
                 just_woke = True
                 empty_turns = 0
+                # He said "Nova". The conversation has started, so the welcome
+                # and the status row go now — not when she finishes answering.
+                # Hooking this to the reply meant "Good morning, NICHOLAS" was
+                # still sitting under the orb while she was already listening
+                # to him, which is the opposite of what a greeting is for.
+                self._begin_conversation()
                 # Duck for the WHOLE conversation, not per turn: restoring
                 # between turns would pump the volume up and down every time
                 # Nova answered. It stays down until we are back up top.
@@ -1328,12 +1340,31 @@ class VoiceAssistant:
         self.set_state("idle")
 
     # ── Respond helper ────────────────────────────────────────────────────────────
+    def _begin_conversation(self) -> None:
+        """The welcome is over: he is talking to her now.
+
+        The greeting and the status row are a RESTING state — what home looks
+        like when nobody has said anything yet. The wake word is exactly the
+        moment that stops being true, so this fires there rather than on her
+        reply: waiting for the answer left "Good morning, NICHOLAS" under the
+        orb while she was already listening to him.
+
+        Typing counts too (see _respond), because Cmd-T is a conversation that
+        never passes the wake word.
+        """
+        self._conversation_started = True
+        try:
+            self.views.refresh_home()
+        except Exception as exc:
+            log.warning(f"could not retire the greeting: {exc}")
+
     def _respond(self, text: str) -> None:
         """Canonical response path: log → store → broadcast → speak."""
         text = text.strip()
         if not text:
             return
         self._last_response = text
+        self._begin_conversation()
         self.memory.add_turn("assistant", text)
         # Deliberately NOT added to _session_turns. This is the deterministic
         # command path; only real conversation is worth learning from. Feeding
@@ -1681,6 +1712,7 @@ class VoiceAssistant:
         self.tts.wait_until_done(timeout=60)
 
         self._last_response = full_response
+        self._begin_conversation()
         self.memory.add_turn("assistant", full_response)
         self._session_turns.append({"role": "assistant", "content": full_response})
         self.ws.send_message("assistant", full_response)

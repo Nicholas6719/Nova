@@ -67,18 +67,32 @@ struct ShellView: View {
         )
     }
 
+    /// The window chrome: a rail down the left, a strip across the top, and
+    /// whichever layout the current view calls for.
+    ///
+    /// Both pieces are deliberately NOT controls. Nova is navigated by voice —
+    /// there is nothing to click anywhere in this app — so the rail's job is to
+    /// say what exists and where you are, and the strip's is to say she is
+    /// listening and what day it is. Without them the date in every payload had
+    /// nowhere to render at all.
     private var fullShell: some View {
-        VStack(spacing: 0) {
-            if isWorking {
-                workLayout
-            } else if isHome {
-                homeLayout
-            } else {
-                answerLayout
+        HStack(spacing: 0) {
+            iconRail
+            VStack(spacing: 0) {
+                statusStrip
+                VStack(spacing: 0) {
+                    if isWorking {
+                        workLayout
+                    } else if isHome {
+                        homeLayout
+                    } else {
+                        answerLayout
+                    }
+                    if typing { composer.padding(.top, 20) }
+                }
+                .padding(24)
             }
-            if typing { composer.padding(.top, 20) }
         }
-        .padding(28)
         .animation(.easeOut(duration: 0.24), value: vm.view)
         .animation(.easeOut(duration: 0.30), value: panel.title)
         .animation(.easeOut(duration: 0.22), value: panel.isEmpty)
@@ -88,6 +102,87 @@ struct ShellView: View {
         // being able to move one.
         .animation(.spring(response: 0.46, dampingFraction: 0.84),
                    value: slotSignature)
+    }
+
+    /// The five destinations, and which one you are looking at.
+    ///
+    /// Indicative, not clickable: speech is the navigation. "health" is dimmed
+    /// further because its screen does not exist yet — the same honesty the
+    /// menu applies, carried into the chrome.
+    private var iconRail: some View {
+        VStack(spacing: 13) {
+            ForEach(Self.railItems, id: \.view) { item in
+                railIcon(item)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 14)
+        .frame(width: 52)
+        .background(
+            ZStack(alignment: .trailing) {
+                Color.white.opacity(0.02)
+                Rectangle().fill(Color.white.opacity(0.06)).frame(width: 1)
+            }
+        )
+    }
+
+    private static let railItems: [(view: String, glyph: String, built: Bool)] = [
+        ("home",     "house",              true),
+        ("menu",     "square.grid.2x2",    true),
+        ("calendar", "calendar",           true),
+        ("finance",  "chart.line.uptrend.xyaxis", true),
+        ("health",   "heart",              false),
+    ]
+
+    private func railIcon(_ item: (view: String, glyph: String, built: Bool)) -> some View {
+        let active = vm.view == item.view
+        return Image(systemName: item.glyph)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(active ? vm.state.tint
+                             : .white.opacity(item.built ? 0.28 : 0.13))
+            .frame(width: 24, height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(active ? vm.state.tint.opacity(0.12) : .clear)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(active ? vm.state.tint.opacity(0.55)
+                                    : Color.white.opacity(0.07), lineWidth: 1)
+                    )
+            )
+            .animation(.easeOut(duration: 0.25), value: active)
+            .accessibilityLabel(item.view)
+    }
+
+    /// One line across the top: that Nova is awake, and what day it is.
+    private var statusStrip: some View {
+        HStack {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(vm.state == .sleeping ? Color.white.opacity(0.2)
+                                                : vm.state.tint)
+                    .frame(width: 5, height: 5)
+                Text(vm.state == .sleeping ? "NOVA IS ASLEEP" : "NOVA IS ACTIVE")
+                    .foregroundStyle(vm.state == .sleeping ? .white.opacity(0.22)
+                                                           : vm.state.tint.opacity(0.75))
+            }
+            Spacer()
+            // The date the backend already put in every payload, which until
+            // now had nowhere on screen to go.
+            Text(panel.subtitle.isEmpty ? "" : panel.subtitle.uppercased())
+                .foregroundStyle(.white.opacity(0.28))
+        }
+        .font(.system(size: 9, weight: .medium, design: .monospaced))
+        .tracking(1.6)
+        .padding(.horizontal, 16)
+        .frame(height: 32)
+        .background(
+            ZStack(alignment: .bottom) {
+                Color.white.opacity(0.02)
+                Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
+            }
+        )
+        .animation(.easeInOut(duration: 0.35), value: vm.state)
     }
 
     private var isHome: Bool { vm.view == "home" }

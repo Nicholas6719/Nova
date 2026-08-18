@@ -86,6 +86,16 @@ _FILE_WORD_RE = re.compile(
     r"screenshot|screenshots|photo|photos|image|images)\b"
     r"|\.(?:pdf|docx?|txt|md|png|jpe?g|csv|xlsx?|pptx?)\b"
 )
+# A calendar word directly modifying a file noun — "the reminder pdf", "my
+# calendar spreadsheet". The thing is a file; the calendar word only names it.
+_CAL_ADJECTIVE_RE = re.compile(
+    r"\b(?:calendar|schedule|reminder|reminders|event|events|meeting|"
+    r"meetings|appointment|appointments|agenda)\s+"
+    r"(?:file|files|pdf|pdfs|doc|docs|document|documents|spreadsheet|"
+    r"screenshot|screenshots|note|notes|photo|photos|image|images)\b"
+)
+_FILE_EXT_RE = re.compile(r"\.(?:pdf|docx?|txt|md|png|jpe?g|csv|xlsx?|pptx?)\b")
+
 _CALENDAR_WORD_RE = re.compile(
     r"\b(?:calendar|schedule|scheduled|reminder|reminders|remind|event|events|"
     r"appointment|appointments|meeting|meetings|agenda|shift|shifts)\b"
@@ -197,6 +207,13 @@ class NovaCalendar:
         # keeps both words, so it still lands here.
         if _FILE_WORD_RE.search(t) and not _CALENDAR_WORD_RE.search(t):
             return None
+        # ...and "both words present" is not enough on its own. In "move the
+        # reminder pdf to Documents" the calendar word is an ADJECTIVE naming
+        # a file, and the update-reminder rule below claimed it — so a file
+        # move was answered by the reminder editor. A file extension is
+        # decisive for the same reason.
+        if _CAL_ADJECTIVE_RE.search(t) or _FILE_EXT_RE.search(t):
+            return None
 
         # ── Read reminders ───────────────────────────────────────────────
         # Broad READ phrasings only (kept clear of the delete/complete/update
@@ -243,9 +260,22 @@ class NovaCalendar:
         # five to call mom" was missed when we required "set a reminder TO").
         # For the bare "remind me" verb we still require "to" so "remind me IN
         # five minutes" (a timer) doesn't route here.
-        if re.search(r"\b(?:set|create|add|make|new)\s+(?:a\s+|an\s+|another\s+)?reminder\b", t) or \
+        # put/stick/throw join set/create/add: "put a reminder in for 6pm" is
+        # ordinary phrasing and reached nobody, so a supported action was
+        # answered by the model as though Nova could not do it.
+        if re.search(r"\b(?:set|create|add|make|new|put|stick|throw)\s+"
+                     r"(?:a\s+|an\s+|another\s+)?reminder\b", t) or \
+           re.search(r"\b(?:put|stick|throw)\s+in\s+(?:a\s+|an\s+)?reminder\b", t) or \
            re.search(r"\bremind\s+me\s+to\b", t):
             return "create_reminder"
+
+        # ── Copy a reminder: honestly, no ────────────────────────────────
+        # Claimed here rather than left to fall through, because falling
+        # through meant a file search for the reminder's name. Nova can move a
+        # reminder; she cannot duplicate one, and saying so is the answer.
+        if re.search(r"\b(?:copy|duplicate|clone)\b[^.?!]*?\breminder\b", t) or \
+           re.search(r"\breminder\b[^.?!]*?\b(?:copy|duplicate|clone)\b", t):
+            return "copy_reminder"
 
         # ── Complete a reminder (before delete: distinct verb) ───────────
         if re.search(r"\b(?:complete|finish|check\s+off|mark\s+(?:as\s+)?(?:done|complete|completed|finished))\b[^.?!]*\breminder\b", t) or \
@@ -337,6 +367,12 @@ class NovaCalendar:
                 return self._create_event(text)
             if intent == "create_reminder":
                 return self._create_reminder(text)
+            if intent == "copy_reminder":
+                # Deterministic and honest. EventKit can create and it can
+                # update; there is no duplicate, and guessing which he meant
+                # would either lose the original or make one he did not ask for.
+                return ("I can move a reminder to a new time, but I can't make "
+                        "a copy of one. Want me to move it instead?")
             if intent == "complete_reminder":
                 return self._complete_reminder(text)
             if intent == "delete_reminder":

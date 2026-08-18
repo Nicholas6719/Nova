@@ -190,7 +190,13 @@ class NovaTools:
                     "the menu bar.")
 
         # ── 5. Brightness ───────────────────────────────────────────────────
-        if "brightness" in low or re.search(r"\b(brighter|dimmer|dim\s+the\s+screen)\b", low):
+        # "brighter days ahead" is not a request to change the display. The
+        # comparative words only count when something on the Mac is named.
+        if "brightness" in low or re.search(
+                r"\b(?:brighter|dimmer|brighten|dim)\b[^.?!]{0,20}"
+                r"\b(?:screen|display|monitor|it)\b", low) or re.search(
+                r"\b(?:screen|display|monitor)\b[^.?!]{0,20}"
+                r"\b(?:brighter|dimmer|brighten|dim)\b", low):
             m = re.search(r"brightness\s+(?:to\s+)?(\d{1,3})\b", low) \
                 or re.search(r"\bset\s+(?:the\s+)?brightness\s+(\d{1,3})\b", low)
             if m:
@@ -210,7 +216,12 @@ class NovaTools:
             return self._mute_audio(mute=not bool(m.group(1)))
         # "music volume" / "Spotify volume" means the PLAYER's own volume — let
         # it fall through to the music section rather than moving system audio.
-        if "volume" in low and not re.search(r"\b(music|spotify|song|track)\b", low):
+        # "the volume of work is insane" is not a request. The word has to be
+        # paired with something to DO to it, or a question about it.
+        if "volume" in low and not re.search(r"\b(music|spotify|song|track)\b", low) \
+           and re.search(r"\b(?:up|down|louder|quieter|softer|increase|raise|"
+                         r"decrease|lower|max|full|mute|off|silent|set|what|"
+                         r"how\s+loud|current|check|\d{1,3})\b", low):
             m = re.search(r"volume\s*(?:to|at)?\s*(\d{1,3})\b", low)
             if m:
                 return self._volume_set(int(m.group(1)))
@@ -231,11 +242,15 @@ class NovaTools:
             return self._battery_status()
 
         # ── 8. System stats ─────────────────────────────────────────────────
-        if re.search(r"\b(ram|memory)\b", low) and not re.search(r"\bremember\b", low):
+        # These three are about the MACHINE. Bare words claimed "my memory is
+        # terrible these days", "in memory of my grandfather", "I need more
+        # space in my closet" and "we should give the team some space" — all
+        # answered with a system stat.
+        if self._MEMORY_STAT_RE.search(low) and not re.search(r"\bremember\b", low):
             return self._memory_status()
         if re.search(r"\bcpu\b|\bprocessor\s+usage\b", low):
             return self._cpu_status()
-        if re.search(r"\b(disk|storage|hard\s+drive|space)\b", low):
+        if self._DISK_STAT_RE.search(low):
             return self._disk_status()
         if re.search(r"\bsystem\s+stats?\b|\bhow.*\b(mac|computer)\b.*\bdoing\b", low):
             return self._all_stats()
@@ -281,10 +296,10 @@ class NovaTools:
 
         # ── 12. Minimize / restore windows ──────────────────────────────────
         m = re.search(r"\b(?:minimi[sz]e|hide)\s+(?:the\s+|my\s+)?(.*)", low)
-        if m:
+        if m and not self._NOT_AN_APP_RE.search(m.group(1).strip()):
             return self._minimize(m.group(1).strip().rstrip("."), minimize=True)
         m = re.search(r"\b(?:unminimi[sz]e|restore|bring\s+back|un-?hide)\s+(?:the\s+|my\s+)?(.*)", low)
-        if m:
+        if m and not self._NOT_AN_APP_RE.search(m.group(1).strip()):
             return self._minimize(m.group(1).strip().rstrip("."), minimize=False)
 
         # ── 13. Finder folders (BEFORE app launch: "open downloads" is a
@@ -321,7 +336,7 @@ class NovaTools:
         m = re.match(r"\s*(?:hey\s+|please\s+)?"
                      r"(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?"
                      r"(?:open|launch|start|run|fire\s+up|pull\s+up)\s+(.+)", low)
-        if m:
+        if m and not self._NOT_AN_APP_RE.search(m.group(1).strip()):
             resp = self._open_app(m.group(1).strip().rstrip("."))
             if resp is not None:   # None => not a real app; keep routing
                 return resp
@@ -1052,7 +1067,12 @@ class NovaTools:
             return bc.navigate_history("back")
         if re.search(r"\bgo\s+forward\b", low):
             return bc.navigate_history("forward")
-        if re.search(r"\b(reload|refresh)\s+(?:the\s+)?(?:page|tab|site)?\b", low):
+        # The object was OPTIONAL, so a bare "refresh" anywhere reloaded his
+        # browser — "refresh my memory on that" did it.
+        if re.search(r"\b(?:reload|refresh)\s+(?:the\s+|this\s+)?"
+                     r"(?:page|tab|site|website|browser)\b", low) \
+           or re.fullmatch(r"\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+                           r"(?:reload|refresh)\s*[.?!]*\s*", low):
             return bc.reload_page()
 
         # ── scrolling ───────────────────────────────────────────────────
@@ -1465,7 +1485,9 @@ class NovaTools:
             return f"{'Skipped ahead' if amt > 0 else 'Went back'} {self._mmss(abs(amt))}."
 
         # ── shuffle / repeat ────────────────────────────────────────────
-        m = re.search(r"\b(shuffle|repeat|loop)\b", low)
+        # "repeat after me", "shuffle the deck of cards" and "the loop of the
+        # rollercoaster" all changed his playback mode.
+        m = self._SHUFFLE_RE.search(low)
         if m:
             app = self._running_player()
             if not app:
@@ -1591,6 +1613,45 @@ class NovaTools:
         r"(?:me\s+)?(?:(?:some|a|an|the)\s+)?(.+?)\s*[.?!]*\s*$",
         re.IGNORECASE,
     )
+    # An app name is a NAME. "your feelings", "faith in people", "to new ideas"
+    # are phrases, and treating them as app names produced "I couldn't find an
+    # app called your feelings" in the middle of a conversation. A leading
+    # function word or an embedded preposition is the tell.
+    _NOT_AN_APP_RE = re.compile(
+        r"^(?:to|of|for|with|from|about|your|his|her|their|our|out|up|down|"
+        r"in|on|at|into|onto|off|away|back|it|me|us|them|this|that)\b"
+        r"|\s+(?:in|of|for|with|from|about|into|onto)\s+",
+        re.IGNORECASE,
+    )
+
+    # System stats, asked about the MACHINE rather than mentioned in passing.
+    _MEMORY_STAT_RE = re.compile(
+        r"\bram\b"
+        r"|\bmemory\s+(?:usage|use|used|free|available|pressure|left)\b"
+        r"|\b(?:how\s+much|check|show|what(?:'?s| is))\b[^.?!]{0,24}\bmemory\b"
+        r"|\bmemory\s+(?:am\s+i|is)\s+(?:i\s+)?using\b",
+        re.IGNORECASE,
+    )
+    _DISK_STAT_RE = re.compile(
+        r"\bdisk\b|\bstorage\b|\bhard\s+drive\s+space\b"
+        r"|\b(?:free|disk|drive)\s+space\b"
+        r"|\bspace\s+(?:left|free|remaining|available|do\s+i\s+have)\b"
+        r"|\b(?:how\s+much)\b[^.?!]{0,20}\bspace\b",
+        re.IGNORECASE,
+    )
+    # Playback mode, as a command rather than a word in a sentence.
+    _SHUFFLE_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:turn|switch)\s+(?:on|off)\s+)?"
+        r"(shuffle|repeat|loop)\b"
+        r"(?:\s+(?:mode|on|off|this|it|the\s+(?:song|track|album|playlist)))?"
+        r"\s*[.?!]*\s*$"
+        r"|\b(?:turn|switch)\s+(?:on|off)\s+(shuffle|repeat|loop)\b"
+        r"|\b(shuffle|repeat|loop)\s+(?:this\s+|that\s+|the\s+|it\s+)?"
+        r"(?:music|song|songs|track|tracks|album|playlist|playback)\b"
+        r"|\b(?:music|playlist|album)\b[^.?!]{0,20}\b(shuffle|repeat|loop)\b",
+        re.IGNORECASE,
+    )
     # A request to skip a track, as opposed to any sentence containing "next".
     _SKIP_RE = re.compile(
         r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
@@ -1648,6 +1709,20 @@ class NovaTools:
     # refusal instead of quietly searching Spotify for a film. This phrase is in
     # the adversarial corpus, and adding named playback broke it — which is what
     # that corpus is for.
+    # "Play" heads a great many English idioms, and each one was becoming a
+    # Spotify search: "play it cool" opened a search for "it cool".
+    _PLAY_IDIOM_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?play\s+"
+        r"(?:it\s+(?:cool|safe|by\s+ear|down|again\s+sam)"
+        r"|devil'?s?\s+advocate|along|dumb|hardball|ball|dead|nice|house|"
+        r"hooky|catch(?:\s*-?\s*up)?|favou?rites|games|the\s+(?:field|victim|"
+        r"fool|part|role|odds|long\s+game)|both\s+sides|with\s+fire|"
+        r"a\s+(?:part|role|joke)|second\s+fiddle|hard\s+to\s+get"
+        # ...and actual games, which Nova cannot play either.
+        r"|chess|cards|poker|golf|tennis|soccer|football|basketball|"
+        r"a\s+game|the\s+game)\b",
+        re.IGNORECASE,
+    )
     _NOT_MUSIC_TARGET = re.compile(
         r"\b(netflix|hulu|disney|prime\s+video|max|peacock|youtube|tv|"
         r"television|movie|film|show|episode|series|trailer|game)\b",
@@ -1657,7 +1732,7 @@ class NovaTools:
     def _named_request(self, low: str):
         """(query, prefer) for "play X", or None. `prefer` is a Spotify search
         type when he said which kind of thing he wanted."""
-        if self._NOT_MUSIC_TARGET.search(low):
+        if self._NOT_MUSIC_TARGET.search(low) or self._PLAY_IDIOM_RE.match(low):
             return None
         m = self._NAMED_PLAY_RE.match(low)
         if not m:
