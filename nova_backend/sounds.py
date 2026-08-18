@@ -32,7 +32,11 @@ from typing import Optional
 
 log = logging.getLogger("nova.sounds")
 
-SAMPLE_RATE = 24_000
+# 48 kHz, the rate the output device actually runs at. At 24 kHz CoreAudio
+# resamples every cue on the fly, and during startup — where the boot sequence
+# overlaps Kokoro opening its OWN output stream to warm up — that came out
+# audibly staticky. Matching the hardware removes the resampler from the path.
+SAMPLE_RATE = 48_000
 
 try:
     import numpy as np
@@ -96,7 +100,16 @@ def _normalise(wave, peak: float = 0.72):
     hi = float(np.max(np.abs(wave))) if len(wave) else 0.0
     if hi <= 0:
         return wave
-    return (wave * (peak / hi)).astype("float32")
+    out = (wave * (peak / hi)).astype("float32")
+    # Fade both edges. A cue that stops mid-cycle is a step change, and a step
+    # change through a speaker is a click.
+    edge = min(len(out) // 8, int(SAMPLE_RATE * 0.008))
+    if edge > 1:
+        out[:edge] *= np.linspace(0.0, 1.0, edge)
+        out[-edge:] *= np.linspace(1.0, 0.0, edge)
+    # A little silence after it, so playback never ends exactly on the last
+    # sample of a decaying tone.
+    return np.concatenate([out, _silence(0.02)]).astype("float32")
 
 
 # ── The four cues ─────────────────────────────────────────────────────────────
@@ -120,11 +133,12 @@ def _make_boot():
         _at(1.02, _tone(_F5, 0.16, amp=0.34, decay=0.28)),
         _at(1.36, _tone(_A5, 0.22, amp=0.36, decay=0.32)),
     ]
-    pad = _at(0.00, _tone(_D4 / 2, 2.30, amp=0.16, attack=0.30,
-                          decay=0.75, detune=0.004, shimmer=0.05))
-    swell = _at(1.20, _tone(_D5, 1.10, amp=0.13, attack=0.55,
-                            decay=0.6, detune=0.006))
-    return _normalise(_layer(pad, swell, *ticks), peak=0.55)
+    # No detune, no shimmer: clean tones only. Depth comes from the octave
+    # partial inside _tone and from the pad being long and quiet, not from
+    # oscillators fighting each other.
+    pad = _at(0.00, _tone(_D4 / 2, 2.40, amp=0.13, attack=0.45, decay=0.8))
+    swell = _at(1.15, _tone(_D5, 1.20, amp=0.10, attack=0.60, decay=0.7))
+    return _normalise(_layer(pad, swell, *ticks), peak=0.50)
 
 
 def _make_ready():
@@ -218,7 +232,8 @@ class NovaSounds:
             # Serialised: two cues at once is never intentional, and overlapping
             # streams on the same device is how you get a click.
             with self._lock:
-                sd.play(wave, SAMPLE_RATE, blocking=True)
+                sd.play(wave.astype("float32"), SAMPLE_RATE,
+                        blocking=True, latency="high")
         except Exception as exc:
             # A cue is the least important thing Nova does.
             log.debug(f"sound cue {name} failed: {exc}")

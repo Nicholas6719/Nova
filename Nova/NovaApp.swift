@@ -43,20 +43,9 @@ struct NovaApp: App {
                     // Nicholas is actually at the keyboard, and so NovaOS shows
                     // up under Privacy & Security > Location Services.
                     locationProvider.requestLocation()
-                    // NOT STARTED YET, deliberately. The tap is written and
-                    // builds, but starting it crashed the app: an uncaught
-                    // Objective-C exception out of ScreenCaptureKit, which
-                    // Swift cannot catch, so it takes the whole process down
-                    // rather than degrading. Two likely causes are already
-                    // fixed (an absurd 2x2 capture size, and a hand-rolled
-                    // audio buffer copy) and it still crashes, so the cause is
-                    // not yet understood — and an unexplained crash on the
-                    // launch path is not something to leave switched on.
-                    //
-                    // Re-enable by uncommenting, with `audio.system_tap.enabled`
-                    // true in config.json. Both halves have to be on.
-                    // systemAudio.start()
-                    _ = systemAudio
+                    // After the backend, so its socket is listening before
+                    // the first packet arrives.
+                    systemAudio.start()
                 }
         }
         // The SwiftUI-native way, and the one that actually works. Measured:

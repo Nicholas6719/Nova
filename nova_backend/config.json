@@ -26,7 +26,7 @@
     "min_speech_duration_s": 0.5,
     "command_max_duration_s": 15.0,
     "echo_cancellation": false,
-    "echo_stream_delay_ms": 35,
+    "echo_stream_delay_ms": 120,
     "_aec_note": "OFF. Turning it on keeps mic frames during playback so she can be interrupted \u2014 and in his REAL room that made her hear herself, transcribe it, and answer herself in a loop. The 27-36 dB measurement was against a SIMULATED speaker path; his room is the test that matters and it failed. The canceller and the self-hearing guard both stay; this flag is what needs his ears before it goes back on.",
     "confidence_gate": true,
     "_confidence_note": "Gate action on how sure Whisper was. Nova has no transcript on screen any more, so a mishear is otherwise silent. Measured over 270 clips (18 commands x 3 voices x 5 noise levels): a -0.50 floor catches 75% of mishears while asking again unnecessarily only 5% of the time. The bar rises with consequence - chat is cheap to get wrong, sending a message is not, and anything outbound is read back regardless of confidence. Set false to act on every transcript as Nova did before."
@@ -144,7 +144,7 @@
   },
   "audio": {
     "system_tap": {
-      "enabled": false,
+      "enabled": true,
       "_note": "Capture the system audio mix in the Swift app (ScreenCaptureKit) and send it to the backend as the echo canceller's reference, over UDP on 127.0.0.1:8767. This is what makes 'Nova cannot hear my speakers' one rule instead of a list of special cases, and barge-in falls out of it because Nova's own voice is in that mix too. Needs Screen Recording permission; without it the tap never starts and Nova falls back exactly to her old behaviour - half duplex, music paused while she listens. Turning this on also turns echo cancellation on, because the tap is the reference it was always missing."
     }
   }

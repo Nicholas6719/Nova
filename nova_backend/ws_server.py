@@ -94,8 +94,13 @@ class NovaWSServer:
             return {"system_tap": "off"}
         try:
             st = rx.stats
-            return {"system_tap": "live" if st.get("live") else "silent",
-                    "packets": st.get("packets"), "age_s": st.get("age_s")}
+            out = {"system_tap": "live" if st.get("live") else "silent",
+                   "packets": st.get("packets"), "age_s": st.get("age_s")}
+            ec = getattr(rx, "_echo", None)
+            db = getattr(ec, "attenuation_db", None) if ec is not None else None
+            if db is not None:
+                out["removed_db"] = db
+            return out
         except Exception:
             return {"system_tap": "unknown"}
 

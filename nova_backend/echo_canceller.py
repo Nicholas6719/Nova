@@ -70,6 +70,11 @@ class EchoCanceller:
         self._far_len = 0
         self._max_far = int(_MAX_FAR_SECONDS * SAMPLE_RATE)
         self._stream_delay_ms = stream_delay_ms
+        # Rolling attenuation, so "is this actually working" is answerable at
+        # runtime instead of only in a test. Cheap: two RMS values per frame.
+        self._erle_raw = 0.0
+        self._erle_out = 0.0
+        self._erle_n = 0
 
         try:
             import pywebrtc_audio as pw
@@ -150,10 +155,38 @@ class EchoCanceller:
                                         far[i:i + APM_FRAME])
                 out[i:i + APM_FRAME] = np.asarray(
                     res, dtype=np.int16).reshape(-1)[:APM_FRAME]
-            return out.tobytes()
+            cleaned = out.tobytes()
+            self._note_attenuation(mic_frame, cleaned)
+            return cleaned
         except Exception as exc:
             log.warning(f"echo cancellation failed on a frame: {exc}")
             return mic_frame
+
+    def _note_attenuation(self, raw: bytes, clean: bytes) -> None:
+        try:
+            a = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+            b = np.frombuffer(clean, dtype=np.int16).astype(np.float32)
+            if a.size and b.size:
+                self._erle_raw += float(np.sqrt((a * a).mean()))
+                self._erle_out += float(np.sqrt((b * b).mean()))
+                self._erle_n += 1
+        except Exception:
+            pass
+
+    @property
+    def attenuation_db(self) -> Optional[float]:
+        """How much of the speaker mix is being removed, averaged since the
+        last read. None when nothing has been cancelled yet."""
+        if self._erle_n == 0:
+            return None
+        raw = self._erle_raw / self._erle_n
+        out = self._erle_out / self._erle_n
+        self._erle_raw = self._erle_out = 0.0
+        self._erle_n = 0
+        if out <= 1e-6 or raw <= 1e-6:
+            return None
+        import math
+        return round(20 * math.log10(raw / out), 1)
 
     def _take_far(self, n: int) -> Optional[np.ndarray]:
         """Pull exactly n reference samples, consuming the queue in step with

@@ -146,10 +146,20 @@ final class SystemAudioTap: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// CMSampleBuffer -> AVAudioPCMBuffer, without copying more than necessary.
     private func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
-        guard let fmtDesc = sampleBuffer.formatDescription,
-              let asbd = fmtDesc.audioStreamBasicDescription,
-              let format = AVAudioFormat(streamDescription: [asbd].withUnsafeBufferPointer { $0.baseAddress! })
-        else { return nil }
+        // THE CRASH LIVED HERE. The previous version built an
+        // AudioStreamBasicDescription, wrapped it in an array, and took
+        // `withUnsafeBufferPointer { $0.baseAddress! }` — a pointer into a
+        // temporary that is already invalid by the time AVAudioFormat reads it.
+        // The resulting format was garbage, AVAudioPCMBuffer's initialiser
+        // raised an Objective-C exception on it, and Swift cannot catch those:
+        // the app aborted instead of degrading (EXC_CRASH, _objc_terminate).
+        //
+        // `AVAudioFormat(cmAudioFormatDescription:)` is the supported path and
+        // takes the CMFormatDescription directly, so there is no pointer to
+        // outlive.
+        guard let fmtDesc = sampleBuffer.formatDescription else { return nil }
+        let format = AVAudioFormat(cmAudioFormatDescription: fmtDesc)
+        guard format.channelCount > 0, format.sampleRate > 0 else { return nil }
 
         let frames = AVAudioFrameCount(sampleBuffer.numSamples)
         guard frames > 0,
