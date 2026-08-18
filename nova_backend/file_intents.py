@@ -96,10 +96,33 @@ _CALENDAR_COMMAND_RE = re.compile(
     r"|\bschedule\s+(?:a|an|my|the)\b"
 )
 
+# Remembering something ABOUT a folder is not a request to move anything.
+# "remember that I put my tax documents in Documents every April" is a fact to
+# store; widening the destination preposition to "in" made it a file move, so
+# the fact was silently dropped AND he got a file-search failure. Declined here
+# for the same reason calendar commands are: neither module should depend on
+# the other's position in the pipeline to behave correctly.
+_MEMORY_COMMAND_RE = re.compile(
+    r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+    r"(?:remember|forget|don'?t\s+forget|keep\s+in\s+mind|make\s+a\s+note)\b"
+)
+
+_WEB_SEARCH_COMMAND_RE = re.compile(
+    r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+    r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+    r"(?:google\b|search\s+(?:the\s+web|online|the\s+internet)\b|"
+    r"look\s+(?:it\s+)?up\s+online\b)"
+)
+
 _MOVE_VERB_RE = re.compile(
     r"\b(?:move[sd]?|moving|put(?:s|ting)?|transfer(?:s|red|ring)?|"
     r"send(?:s|ing)?|sent|drop(?:s|ped|ping)?|relocate[sd]?|relocating|"
-    r"stick(?:s|ing)?|stuck)\b"
+    r"stick(?:s|ing)?|stuck|drag(?:s|ged|ging)?|shove[sd]?|shoving|"
+    # "file" only as a VERB. A bare \bfile\b would match the noun in "find
+    # the file in Downloads" and turn every mention of a file into a move.
+    r"file[sd]?\s+(?:this|that|these|those|it|them|the|my|a|an)\b|"
+    r"filing\s+(?:this|that|these|those|it|them|the|my|a|an)\b)"
+    r"|\bfile\s+(?:it|them|this|that)\s+away\b"
 )
 _COPY_VERB_RE = re.compile(
     r"\b(?:copy|copies|copied|copying|duplicate[sd]?|duplicating|"
@@ -121,13 +144,40 @@ _FIND_RE = re.compile(
 )
 _OPEN_RE = re.compile(r"\b(?:open|pull\s+up|bring\s+up|show\s+me|launch)\b")
 
-# Destination: the folder named after to/into/onto. "from <somewhere>" spans are
-# stripped first so "from my downloads to documents" can only match documents.
+# Destination: the folder named after to/into/onto, anywhere in the sentence.
 _DEST_RE = re.compile(
     r"\b(?:to|into|onto)\s+(?:my\s+|the\s+|a\s+)?"
     r"([A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*)?)"
     r"(?:\s+(?:folder|directory))?\b"
 )
+
+# ...and "in", which needs its own rule because it is a far looser word.
+#
+# "put the invoice in Documents" is simply how he says it, and it used to fall
+# through to the model. But "in the X" introduces a destination only about half
+# the time — the other half it describes the thing being talked about ("a
+# caption in the photos from the party", "a warning in the docs for the new
+# API", "my notes in the desktop version of the app"). The first version of
+# this widening claimed all of those as file moves.
+#
+# The discriminator is position, and it is remarkably clean: WHEN SOMEBODY
+# NAMES A PLACE TO PUT A THING, THEY STOP TALKING. When "in the X" describes
+# the thing, the sentence carries on — "from the party", "for the new API",
+# "Jake is editing". So an "in" destination must END the utterance, give or
+# take a politeness.
+_TRAILING_FILLER = (r"(?:\s+(?:please|thanks|thank\s+you|for\s+me|now|ok|"
+                    r"okay|alright|would\s+you|will\s+you))*")
+_DEST_IN_RE = re.compile(
+    r"\bin\s+(?:my\s+|the\s+|a\s+)?"
+    # The second word must not be a politeness, or "in Documents please"
+    # captures "documents please" and then resolves to nothing.
+    r"([A-Za-z][\w'-]*(?:\s+(?!please\b|thanks\b|thank\b|for\b|now\b|ok\b|"
+    r"okay\b|alright\b|would\b|will\b)[A-Za-z][\w'-]*)?)"
+    r"(?:\s+(?:folder|directory))?"
+    + _TRAILING_FILLER + r"\s*[.?!]*\s*$",
+    re.IGNORECASE,
+)
+
 _FROM_RE = re.compile(r"\bfrom\s+(?:my\s+|the\s+)?[\w'-]+(?:\s+(?:folder|directory))?\b")
 # Only these bare words are taken as a destination without the word "folder";
 # anything else must be said as "... folder" so "send it to Mom" is not read
@@ -229,6 +279,15 @@ class NovaFiles:
         # other's position to behave correctly.
         if _CALENDAR_COMMAND_RE.search(t):
             return None
+        if _MEMORY_COMMAND_RE.match(t):
+            return None
+        # A WEB search is not a file search. "search for my resume" genuinely is
+        # a file find, so only the unambiguous web forms are declined here —
+        # otherwise "search the web for how to move photos into Documents"
+        # became a file move and answered a search request with "I couldn't
+        # find anything matching that."
+        if _WEB_SEARCH_COMMAND_RE.match(t):
+            return None
 
         has_noun = bool(_FILE_NOUN_RE.search(t))
         has_ext = bool(_FILE_EXT_RE.search(t))
@@ -250,9 +309,18 @@ class NovaFiles:
         intent: Optional[str] = None
         if _RENAME_VERB_RE.search(t):
             intent = "file_rename"
-        elif _COPY_VERB_RE.search(t) and re.search(r"\b(?:to|into|onto)\b", t):
+        # A move or copy needs somewhere to go. The to/into/onto test stays as
+        # the fast path so nothing that worked before can behave differently;
+        # the second half admits "in", but ONLY when it names a folder that
+        # actually resolves. That asymmetry is deliberate: widening the
+        # preposition alone would have claimed "send the report in an email"
+        # and answered it with "name the folder", which is worse than the
+        # model's answer, not better.
+        elif _COPY_VERB_RE.search(t) and (re.search(r"\b(?:to|into|onto)\b", t)
+                                          or self._extract_destination(t)):
             intent = "file_copy"
-        elif _MOVE_VERB_RE.search(t) and re.search(r"\b(?:to|into|onto)\b", t):
+        elif _MOVE_VERB_RE.search(t) and (re.search(r"\b(?:to|into|onto)\b", t)
+                                          or self._extract_destination(t)):
             intent = "file_move"
         elif _DESCRIBE_RE.search(t):
             intent = "file_describe"
@@ -631,16 +699,51 @@ class NovaFiles:
             # to my projects folder" searched for a file matching budget AND
             # projects, and found nothing.
             source = _FROM_RE.sub(" ", source)
+            cut = None
             dests = list(_DEST_RE.finditer(source))
             if dests:
-                source = source[:dests[-1].start()]
+                cut = dests[-1].start()
+            in_dest = _DEST_IN_RE.search(t)
+            if in_dest and (cut is None or in_dest.start() > cut):
+                cut = in_dest.start()
+            if cut is not None:
+                source = source[:cut]
+            # And the verb is not part of the filename either. tokenize_query
+            # keeps a stopword list, but it lives in file_manager and cannot
+            # know THIS module's verb set — it has "move" and "put" and not
+            # "stick", "drop" or "relocate", so "stick that report in the
+            # desktop folder" searched for a file matching stick AND report.
+            # Subtracting the regexes that define the verbs cannot drift out
+            # of sync the way a second hand-written list would.
+            source = _COPY_VERB_RE.sub(" ", _MOVE_VERB_RE.sub(" ", source))
         return fm.tokenize_query(source)
 
     def _extract_destination(self, t: str) -> Optional[str]:
         """The folder named after the FINAL to/into/onto, ignoring any
-        'from <somewhere>' source phrase."""
+        'from <somewhere>' source phrase. Falls back to an end-anchored "in"."""
         cleaned = _FROM_RE.sub(" ", t)
-        matches = _DEST_RE.findall(cleaned)
+        found = self._resolve_dest(_DEST_RE.findall(cleaned), cleaned, strict=False)
+        if found:
+            return found
+        # "in" only, and only at the end. Strict: the capture must BE a folder,
+        # not merely start with one. Without that, "put Sarah in the picture
+        # too" captures "picture too", the lenient head-word rule reads
+        # "picture" as ~/Pictures, and a remark about a photograph becomes an
+        # offer to move a file.
+        #
+        # Matched against the ORIGINAL text, not the from-stripped copy. That
+        # strip exists to hide a SOURCE phrase from the to/into/onto path, but
+        # it also deletes ordinary descriptive tails — removing "from the
+        # party" left "put a caption in the photos", which then looks
+        # end-anchored and claims ~/Pictures. The anchor is only meaningful
+        # against what he actually said.
+        m = _DEST_IN_RE.search(t)
+        if not m:
+            return None
+        return self._resolve_dest([m.group(1)], cleaned, strict=True)
+
+    def _resolve_dest(self, matches: list, cleaned: str,
+                      strict: bool) -> Optional[str]:
         if not matches:
             return None
         for raw in reversed(matches):
@@ -652,10 +755,16 @@ class NovaFiles:
                 cand = named_folder.group(1).strip()
             if not cand:
                 continue
-            head = cand.split()[0]
             # A bare word is only a destination if it's a standard folder;
             # otherwise the user had to say "folder" for us to treat it as one,
             # so that "send this to Mom" is never read as a filesystem move.
+            if strict:
+                if named_folder:
+                    return cand
+                if cand in _KNOWN_DEST_WORDS:
+                    return cand
+                continue
+            head = cand.split()[0]
             if head in _KNOWN_DEST_WORDS:
                 return head
             if named_folder:

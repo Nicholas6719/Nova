@@ -250,7 +250,12 @@ class NovaTools:
             return self._running_apps()
 
         # ── 10. Screenshot ──────────────────────────────────────────────────
-        if any(p in low for p in ("take a screenshot", "screenshot", "capture the screen", "grab the screen")):
+        # Shaped like a request, not a substring. This matched a bare
+        # "screenshot" ANYWHERE, so "shove the old screenshots in the archive
+        # folder" took a fresh capture, dropped a PNG on his Desktop and
+        # reported success — a loud, file-creating side effect for a sentence
+        # that was asking Nova to tidy up.
+        if self._SCREENSHOT_RE.search(low):
             return self._screenshot()
 
         # ── 11. System info ─────────────────────────────────────────────────
@@ -1085,7 +1090,10 @@ class NovaTools:
                 return f"Searching {label} for {query}."
 
         # ── search the web ──────────────────────────────────────────────
-        m = re.search(r"\b(?:search|google|look\s+up)\s+(?:the\s+web\s+)?(?:for\s+)?(.+)", low)
+        # Anchored at the head of the utterance. As a bare search it grabbed
+        # the "search" inside "job search", so "I'm resuming my job search next
+        # month" ACTIVATED the browser and searched for "next month".
+        m = self._WEB_SEARCH_RE.match(low)
         if m:
             q = re.sub(r"[?.!,]+$", "", m.group(1).strip())
             if q and q not in _FOLDERS:
@@ -1394,7 +1402,12 @@ class NovaTools:
             return f"{self._mmss(dur - pos)} left of {self._mmss(dur)}."
 
         # ── transport: next / previous / restart ────────────────────────
-        if re.search(r"\b(next|skip)\b(\s+(the\s+)?(song|track))?\b", low) \
+        # Shaped like a command. A bare \b(next|skip)\b matched "next month",
+        # "next week", "what's next" and "skip the meeting" — every one of them
+        # skipped his music. Third instance of this exact bug in this file,
+        # after "resume" and "screenshot": a transport word that is also an
+        # ordinary English word needs the utterance to be ABOUT it.
+        if self._SKIP_RE.search(low) \
            and not re.search(r"\bskip\s+(?:ahead|forward|back)\b", low):
             app = self._running_player()
             if not app:
@@ -1523,7 +1536,7 @@ class NovaTools:
         # these phrasings used to fall through to "I can't do that one yet",
         # which is the opposite of true.
         _ANY_MUSIC = r"(?:music|songs?|tunes?|something|anything|playback)"
-        if re.search(r"\b(resume|unpause|keep\s+playing)\b", low) \
+        if self._RESUME_RE.search(low) \
            or re.search(r"\b(play|start)\b.*" + MUSIC, low) \
            or re.fullmatch(r"\s*play\s*\.?\s*", low) \
            or re.search(r"\b(?:put|throw)\s+on\b.*" + _ANY_MUSIC, low) \
@@ -1576,6 +1589,51 @@ class NovaTools:
         # word: "play something" parsed as a request for "thing", and
         # "play anything" as "nything".
         r"(?:me\s+)?(?:(?:some|a|an|the)\s+)?(.+?)\s*[.?!]*\s*$",
+        re.IGNORECASE,
+    )
+    # A request to skip a track, as opposed to any sentence containing "next".
+    _SKIP_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+        r"(?:next|skip)(?:\s+(?:this|that|it))?"
+        r"(?:\s+(?:the\s+)?(?:song|track|one))?\s*[.?!]*\s*$"
+        r"|\b(?:next|skip)\s+(?:the\s+|this\s+|that\s+)?(?:song|track)\b"
+        r"|\bskip\s+(?:this|that|it)\b",
+        re.IGNORECASE,
+    )
+    # A request to TAKE a screenshot, as opposed to any sentence containing the
+    # word. See the call site for what the substring version did.
+    _SCREENSHOT_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+        r"(?:take|grab|get|capture|snap|make)\s+(?:me\s+)?"
+        r"(?:a|an|the)?\s*(?:screen\s?shot|screen\s+capture|"
+        r"(?:picture|shot)\s+of\s+(?:my\s+|the\s+)?screen)\b"
+        r"|^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?screen\s?shot"
+        r"(?:\s+(?:this|that|it|my\s+screen|the\s+screen))?\s*[.?!]*\s*$"
+        r"|\bcapture\s+(?:my|the)\s+screen\b|\bgrab\s+(?:my|the)\s+screen\b",
+        re.IGNORECASE,
+    )
+    # A request to SEARCH, as opposed to any sentence containing the word.
+    _WEB_SEARCH_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+        r"(?:search|google|look\s+up)\s+(?:the\s+web\s+)?(?:for\s+)?(.+)",
+        re.IGNORECASE,
+    )
+    # "Resume" is a TRANSPORT verb and also, far more often in this house, a
+    # noun: his resume is the worked example in the briefing. A bare
+    # \bresume\b meant every sentence containing the word started playing
+    # music — "is my resume up to date" launched Spotify and played AC/DC.
+    # So it has to be shaped like a command: the head of the utterance, or
+    # followed by the thing being resumed.
+    _RESUME_RE = re.compile(
+        r"\b(?:unpause|keep\s+playing)\b"
+        r"|^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+        r"resume\b(?:\s+(?:the\s+)?(?:music|song|track|playback|playing|it))?"
+        r"\s*[.?!]*\s*$"
+        r"|\bresume\s+(?:the\s+)?(?:music|song|track|playback|playing)\b",
         re.IGNORECASE,
     )
     # Phrases that are transport or state, never a thing to search for. If the

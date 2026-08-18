@@ -161,14 +161,129 @@ move my resume to Downloads  ==>  files
 move the report to Documents  ==>  files
 clear my calendar  ==>  llm
 clear the table  ==>  llm
-#    These three reach neither the home grid nor a file move. Recorded as they
-#    actually behave rather than as they ought to: "that file" has no
-#    searchable token so file_intents declines it on purpose, and the other two
-#    are a PRE-EXISTING gap in file phrasing, not something the home grid
-#    introduced. Verified: views.detect_intent returns None for all three.
+#    "that file" has no searchable token, so file_intents declines it on
+#    purpose and the refusal is the right answer. "move over" is conversation.
 move that file to the desktop  ==>  unsupported
-put the invoice in Documents  ==>  llm
 move over  ==>  unsupported
+
+# ── "put X in Y" is a file move too ─────────────────────────────────────────
+# The destination preposition was to/into/onto only, so the single most
+# natural way to say this fell through to the model. Every one of these names
+# a REAL folder, which is what separates them from the block below.
+put the invoice in Documents  ==>  files
+put my resume in Downloads  ==>  files
+put the budget spreadsheet in Documents  ==>  files
+stick that report in the desktop folder  ==>  files
+drop the receipt in Downloads  ==>  files
+
+# ...and the sentences that share the shape but name no folder at all. None of
+#    them may become a file move. "send the report in an email" reaches the
+#    honest refusal rather than the model, which is BETTER than either: Nova
+#    cannot send email, and that guard exists precisely so the 3B never claims
+#    she did.
+send the report in an email  ==>  unsupported
+put that in an email to Mom  ==>  llm
+put the invoice in the mail  ==>  llm
+
+# ── "resume" is a noun in this house ────────────────────────────────────────
+# A bare \bresume\b in the music transport matcher meant every sentence
+# containing the word started playing. Verified before the fix: "put my resume
+# in Downloads" launched Spotify and played AC/DC.
+is my resume up to date  ==>  llm
+I need to resume work on that  ==>  llm
+resume  ==>  tools
+nova resume  ==>  tools
+resume the music  ==>  tools
+unpause  ==>  tools
+
+# ── Widening the file-move destination: the collateral it must NOT claim ────
+# "in <folder>" is a destination only when the folder ENDS the sentence. When
+# somebody names a place to put a thing, they stop talking. When "in the X"
+# describes the thing itself, more words follow — and every one of these was
+# claimed as a file move by the first version of that widening.
+put a warning in the docs for the new API  ==>  llm
+put Sarah in the picture too  ==>  llm
+put a caption in the photos from the party  ==>  llm
+drop a footnote in the document Chris shared with me  ==>  llm
+put my notes in the desktop version of the app  ==>  llm
+put my old band photos in the music video Jake is editing  ==>  llm
+put my name in the document I'm looking at  ==>  llm
+
+# ...and remembering something ABOUT a folder is not a request to move
+#    anything. This one is a real regression the widening caused: it routed to
+#    memory before and to files after, so the fact was silently never stored.
+remember that I put my tax documents in Documents every April  ==>  memory
+remember I put the budget spreadsheet in Downloads  ==>  memory
+forget that I put my resume in Downloads  ==>  memory
+
+# ── Move verbs that were simply missing ─────────────────────────────────────
+# Each of these names a real folder in the form the guard already accepts; only
+# the verb was absent from _MOVE_VERB_RE.
+file this receipt in the taxes folder  ==>  files
+drag the upcoming events doc into my Documents folder  ==>  files
+shove the old screenshots in the archive folder  ==>  files
+
+# ── "screenshot" is a NOUN as often as a command ────────────────────────────
+# tools matched the bare substring anywhere in the utterance, so asking Nova to
+# FILE existing screenshots took a fresh one and dropped a PNG on his Desktop,
+# then reported success. Verified before the fix.
+#    These two reach the model rather than the honest refusal, because "stick"
+#    is not in _ACTION_REQUEST_RE and "screenshots" is too generic a noun to
+#    survive the file token guard. Recorded as they behave. The point of these
+#    lines is that NO SCREENSHOT IS TAKEN, which is what used to happen.
+stick the screenshot in Slack for the team  ==>  llm
+where are my screenshots  ==>  llm
+find the screenshot from yesterday  ==>  files
+take a screenshot  ==>  tools
+grab a screenshot of this  ==>  tools
+
+# ── "search" inside a noun phrase is not a web search ───────────────────────
+# The matcher took \bsearch\b anywhere and grabbed everything after it, so
+# "I'm resuming my job search next month" ACTIVATED the browser and searched
+# for "next month". Verified before the fix.
+I'm resuming my job search next month  ==>  llm
+my job search is going well  ==>  llm
+the search committee got back to me  ==>  llm
+search for the best laptop stand  ==>  tools
+google the weather in Denver  ==>  tools
+look up who won the game  ==>  tools
+
+# ── "next" and "skip" are ordinary words ────────────────────────────────────
+# A bare \b(next|skip)\b in the transport matcher meant every one of these
+# skipped his music. Third instance of the same bug family in tools.py, after
+# "resume" and "screenshot".
+next month  ==>  llm
+what's next  ==>  llm
+# (an imperative Nova cannot perform, so the honest refusal is the right answer)
+skip the meeting  ==>  unsupported
+my next meeting is at three  ==>  llm
+next  ==>  tools
+next song  ==>  tools
+skip this song  ==>  tools
+
+# ── weather runs one stage ahead of files ───────────────────────────────────
+# A file command that merely mentions weather was answered with the current
+# temperature while the file sat where it was.
+put my weather report in Documents  ==>  files
+copy the weather forecast spreadsheet to Documents  ==>  files
+move the weather notes to the desktop  ==>  files
+what's the weather  ==>  weather
+weather in Boston  ==>  weather
+
+# ── a web search is not a file search ───────────────────────────────────────
+# "search for X" IS a file find, so only the unambiguous web forms are
+# declined by file_intents. Both readings have to keep working.
+search the web for how to move photos into Documents  ==>  tools
+search the web for spider-man  ==>  tools
+search for my resume  ==>  files
+
+# ── A file rename is not a reminder edit ────────────────────────────────────
+# calendar_intents has a bare "rename X to Y" rule and a file-word guard meant
+# to stop it claiming file renames — but the guard did not list "resume", so
+# "rename my resume" silently RETITLED a real reminder, with no confirmation.
+rename my resume to resume final draft  ==>  files
+rename my resume file  ==>  files
+rename the budget spreadsheet to budget final  ==>  files
 
 # ── ...and the collisions a loose navigation regex would cause. Every one of
 #    these contains a navigation word and must NOT be stolen. This is the same

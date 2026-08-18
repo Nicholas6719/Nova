@@ -31,8 +31,17 @@ _WEATHER_RE = re.compile(
     re.IGNORECASE,
 )
 # ...but not when he is asking Nova to *do* something with a file or app.
+# An action verb means this is a command about a FILE or an app that happens to
+# mention weather, not a question about the sky. "move" and "rename" were here
+# from the start; the rest joined after "put my weather report in Documents"
+# and "copy the weather forecast spreadsheet to Documents" were answered with
+# the current temperature while the file sat where it was. Weather runs at
+# stage 4b, one ahead of files, so this list is the only thing standing between
+# a file command and a forecast.
 _NOT_WEATHER_RE = re.compile(
-    r"\b(open|play|search for|google|remind|schedule|delete|move|rename)\b",
+    r"\b(open|play|search for|google|remind|schedule|delete|move|moves|moved|"
+    r"rename|renamed|copy|copies|copied|put|puts|send|sends|stick|drop|"
+    r"transfer|drag|shove|relocate)\b",
     re.IGNORECASE,
 )
 

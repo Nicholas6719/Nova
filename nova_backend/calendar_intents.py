@@ -75,7 +75,15 @@ def build_events_panel(events: list, subtitle: str) -> dict:
 # authoritative file vocabulary lives in file_intents.py.
 _FILE_WORD_RE = re.compile(
     r"\b(?:file|files|folder|document|documents|doc|docs|pdf|pdfs|"
-    r"spreadsheet|screenshot|screenshots)\b"
+    # "resume" and "cv" are documents, and their absence here was destructive:
+    # calendar has a bare "rename X to Y" rule with no calendar word of its
+    # own, so "rename my resume to resume final draft" reached the reminder
+    # editor. Fuzzy matching then dropped words of two characters or fewer, so
+    # "my resume" reduced to "resume" and ANY open reminder containing that
+    # word was silently retitled — no confirmation, and the file never renamed.
+    r"resume|resumes|cv|"
+    r"spreadsheet|spreadsheets|presentation|slides|note|notes|"
+    r"screenshot|screenshots|photo|photos|image|images)\b"
     r"|\.(?:pdf|docx?|txt|md|png|jpe?g|csv|xlsx?|pptx?)\b"
 )
 _CALENDAR_WORD_RE = re.compile(
