@@ -134,15 +134,34 @@ def rms(x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(x.astype(np.float64) ** 2)) + 1e-12)
 
 
-def cancel(near: np.ndarray, far: np.ndarray, delay_ms: int = 35) -> np.ndarray:
-    import pywebrtc_audio as pw
-    aec = pw.EchoCanceller(SR, 1, delay_ms)
+def cancel(near: np.ndarray, far: np.ndarray, delay_ms: int = 35,
+           residual: bool = False) -> np.ndarray:
+    """Cancel using NOVA'S canceller, exactly as she runs it.
+
+    This used to drive `pywebrtc_audio.EchoCanceller` directly, handing it the
+    far frame that lines up with the near frame — perfectly aligned, by
+    construction, every time. That measures the LIBRARY. Nova does not get
+    perfect alignment: she queues the reference through `feed_far` as Kokoro
+    produces it and pulls it back out inside `process`, and how well those two
+    line up is the single biggest thing standing between her and barge-in.
+
+    The old version reported 27-36 dB. The shipping path, against the same
+    delayed speaker, manages single digits — and that gap is why a wake word
+    could never be heard over her voice, and why three real bug fixes in a row
+    failed to make barge-in work. A test that bypasses the code it is named
+    after is worse than no test, because it is trusted.
+    """
+    from echo_canceller import EchoCanceller
+    ec = EchoCanceller(stream_delay_ms=delay_ms)
+    if not ec.enabled:
+        return near.copy()
     n = (min(near.size, far.size) // FRAME) * FRAME
     out = np.zeros(n, dtype=np.int16)
     for i in range(0, n, FRAME):
-        out[i:i + FRAME] = np.asarray(
-            aec.process(near[i:i + FRAME], far[i:i + FRAME]),
-            dtype=np.int16).reshape(-1)[:FRAME]
+        # Fed the way Kokoro feeds it: ahead of playback, in its own chunks.
+        ec.feed_far(far[i:i + FRAME].astype(np.float32) / 32768.0, SR)
+        cleaned = ec.process(near[i:i + FRAME].tobytes(), residual=residual)
+        out[i:i + FRAME] = np.frombuffer(cleaned, dtype=np.int16)[:FRAME]
     return out
 
 
