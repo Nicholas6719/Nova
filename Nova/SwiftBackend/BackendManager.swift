@@ -186,7 +186,9 @@ final class BackendManager: ObservableObject {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
         }
         let handle = try? FileHandle(forWritingTo: logURL)
-        try? handle?.seekToEnd()
+        // Discarded on purpose: the offset is not interesting, and a log we
+        // cannot seek is still a log we can append to.
+        _ = try? handle?.seekToEnd()
 
         let out = Pipe()
         let err = Pipe()

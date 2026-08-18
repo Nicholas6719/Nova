@@ -1277,50 +1277,85 @@ class NovaTools:
     _PLAYERS = ("Spotify", "Music")     # preference order
 
     def any_player_running(self) -> bool:
-        """Cheap pre-check for the now-playing poller.
+        """Cheap pre-check for the home screen's now-playing tile.
 
-        `_running_player` costs one subprocess per player per call, and the
-        poller runs forever while the answer is almost always no. NSWorkspace
-        answers from memory, and — unlike `tell application "Spotify"` — it
-        cannot start anything by asking.
+        Asks the KERNEL, via pgrep. That detail is the whole point.
 
-        Returns True when it genuinely cannot tell, so the real check still
-        gets its say and a missing PyObjC can never make Now Playing vanish.
+        This was NSWorkspace.runningApplications() first, because it is a
+        memory read and costs nothing. It is also WRONG here, and wrong in the
+        worst way — it worked in every test and failed in use. That list is a
+        snapshot maintained by run-loop notifications, and the backend is
+        headless Python with no run loop to service them, so it only ever
+        knows what was running when the process started. Measured: with
+        Spotify launched by Nova mid-session, NSWorkspace said False while
+        AppleScript in the same process said "War Pigs, playing". Now Playing
+        therefore never appeared for any music Nova herself started, which is
+        exactly how Nicholas hit it.
+
+        Same family as the MapKit trap in maps_engine: a Cocoa API whose
+        answers arrive on a loop nobody is running.
+
+        pgrep is 13ms against 145ms for the AppleScript equivalent, needs no
+        run loop, and — unlike `tell application "Spotify"` — cannot start
+        anything by asking. On any doubt it returns True so the real check
+        still gets its say.
         """
-        try:
-            from AppKit import NSWorkspace
-            names = {a.localizedName() for a
-                     in NSWorkspace.sharedWorkspace().runningApplications()}
-            return any(p in names for p in self._PLAYERS)
-        except Exception:
-            return True
+        for app in self._PLAYERS:
+            try:
+                r = subprocess.run(["pgrep", "-x", app],
+                                   capture_output=True, timeout=4)
+            except Exception:
+                return True                 # cannot tell → let the real check run
+            if r.returncode == 0:
+                return True
+        return False
 
     def _running_player(self, launch_if_none: bool = False) -> Optional[str]:
         """Which music app is running (Spotify preferred). Never auto-launches
         unless asked — `tell application "X"` would otherwise silently start it."""
         for app in self._PLAYERS:
-            r = subprocess.run(
-                ["osascript", "-e",
-                 f'tell application "System Events" to (name of processes) contains "{app}"'],
-                capture_output=True, text=True)
+            try:
+                r = subprocess.run(
+                    ["osascript", "-e",
+                     f'tell application "System Events" to (name of processes) contains "{app}"'],
+                    capture_output=True, text=True, timeout=10)
+            except Exception:
+                continue
             if r.stdout.strip() == "true":
                 return app
         if launch_if_none:
             subprocess.run(["open", "-a", "Spotify"], capture_output=True)
             for _ in range(20):             # wait for it to accept AppleScript
                 time.sleep(0.5)
-                r = subprocess.run(
-                    ["osascript", "-e",
-                     'tell application "System Events" to (name of processes) contains "Spotify"'],
-                    capture_output=True, text=True)
+                try:
+                    r = subprocess.run(
+                        ["osascript", "-e",
+                         'tell application "System Events" to (name of processes) contains "Spotify"'],
+                        capture_output=True, text=True, timeout=10)
+                except Exception:
+                    continue
                 if r.stdout.strip() == "true":
                     time.sleep(1.0)
                     return "Spotify"
         return None
 
     @staticmethod
-    def _osa(script: str) -> tuple[bool, str]:
-        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    def _osa(script: str, timeout: float = 10.0) -> tuple[bool, str]:
+        """Run one AppleScript. ALWAYS bounded.
+
+        Without a timeout a wedged player hangs the caller forever, and the
+        home tiles run these on background threads that never come back — the
+        card simply stops updating for the life of the process, silently.
+        """
+        try:
+            r = subprocess.run(["osascript", "-e", script],
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log.warning("AppleScript timed out")
+            return False, ""
+        except Exception as exc:
+            log.warning(f"AppleScript failed: {exc}")
+            return False, ""
         return r.returncode == 0, (r.stdout or "").strip()
 
     def _player_get(self, app: str, prop: str) -> Optional[str]:

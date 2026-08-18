@@ -253,6 +253,26 @@ def test_now_playing():
         check(item["title"] == "Midnight City" and item["detail"] == "M83",
               "title and artist are the real ones", str(item))
 
+    # The detection underneath must not go stale. NSWorkspace's running-app
+    # list is maintained by run-loop notifications, and the backend has no run
+    # loop — so it only ever knows what was running at startup, and Now Playing
+    # never appeared for music NOVA started. It looked right in every test.
+    import tools as tools_mod
+    tsrc = pathlib.Path(tools_mod.__file__).read_text()
+    detect = tsrc[tsrc.index("def any_player_running"):]
+    detect = detect[:detect.index("\n    def ")]
+    # The docstring NAMES NSWorkspace to explain why it is not used, so check
+    # the code rather than the prose.
+    body = detect.split('"""')[-1]
+    check("NSWorkspace" not in body,
+          "player detection asks the kernel, not a run-loop snapshot")
+    check("pgrep" in body, "...specifically pgrep")
+    # And every AppleScript is bounded: an unbounded one wedges the tile thread
+    # forever and that card silently stops updating for the life of the process.
+    osa = tsrc[tsrc.index("def _osa("):]
+    osa = osa[:osa.index("\n    def ")]
+    check("timeout" in osa, "AppleScript calls are bounded")
+
     tools.track = None
     views._tiles["playing"]._at = 0
     deadline = time.time() + 5

@@ -26,17 +26,17 @@ struct Panel {
     var isEmpty: Bool { blocks.isEmpty && sections.isEmpty }
 
     /// One block on its own, for home's side cards.
-    init(single block: PanelBlock) {
+    nonisolated init(single block: PanelBlock) {
         blocks = [block]
     }
 
     /// The card in a named home slot, if anything is there.
-    func block(inSlot slot: String) -> PanelBlock? {
+    nonisolated func block(inSlot slot: String) -> PanelBlock? {
         blocks.first { $0.slot == slot }
     }
 
     /// The bottom-left instrumentation row, if Nova is showing it.
-    var statusReadings: [PanelMetric] {
+    nonisolated var statusReadings: [PanelMetric] {
         for b in blocks {
             if case let .metrics(_, readings) = b.content, b.slot == "status" {
                 return readings
@@ -47,7 +47,13 @@ struct Panel {
 
     /// Decoded defensively: a malformed payload yields an empty panel and the
     /// orb keeps the screen, rather than throwing away Nova's answer.
-    init(_ data: [String: Any]) {
+    ///
+    /// `nonisolated` throughout this file: the target builds with
+    /// SWIFT_DEFAULT_ACTOR_ISOLATION=MainActor, which makes even these pure
+    /// data types actor-isolated, and decoding a payload is not main-actor
+    /// work. Fixed on the types rather than by relaxing the build setting —
+    /// that default is load-bearing everywhere else in the app.
+    nonisolated init(_ data: [String: Any]) {
         title = data["title"] as? String ?? ""
         subtitle = data["subtitle"] as? String ?? ""
         blocks = (data["blocks"] as? [[String: Any]] ?? []).compactMap(PanelBlock.init)
@@ -60,7 +66,7 @@ struct PanelSection: Identifiable {
     let title: String
     let items: [PanelItem]
 
-    init(_ d: [String: Any]) {
+    nonisolated init(_ d: [String: Any]) {
         title = d["title"] as? String ?? ""
         items = (d["items"] as? [[String: Any]] ?? []).map(PanelItem.init)
     }
@@ -80,7 +86,7 @@ struct PanelItem: Identifiable {
     /// tellable apart without needing two cards.
     var accent = ""
 
-    init(_ d: [String: Any]) {
+    nonisolated init(_ d: [String: Any]) {
         title = d["title"] as? String ?? d["name"] as? String ?? ""
         detail = d["detail"] as? String ?? d["say"] as? String ?? ""
         meta = d["meta"] as? String ?? ""
@@ -100,7 +106,7 @@ struct PanelMetric: Identifiable {
     var flag = ""
     var alert = false
 
-    init(_ d: [String: Any]) {
+    nonisolated init(_ d: [String: Any]) {
         label = d["label"] as? String ?? ""
         value = d["value"] as? String ?? ""
         pct = d["pct"] as? Double
@@ -116,7 +122,7 @@ struct PanelStep: Identifiable {
     var state = "pending"      // done | running | pending | failed
     var meta = ""
 
-    init(_ d: [String: Any]) {
+    nonisolated init(_ d: [String: Any]) {
         label = d["label"] as? String ?? ""
         state = d["state"] as? String ?? "pending"
         meta = d["meta"] as? String ?? ""
@@ -138,7 +144,7 @@ struct PanelBlock: Identifiable {
     /// place and into another.
     let card: String
 
-    init?(_ d: [String: Any]) {
+    nonisolated init?(_ d: [String: Any]) {
         guard let content = PanelContent(d) else { return nil }
         self.content = content
         self.slot = d["slot"] as? String ?? ""
@@ -155,7 +161,7 @@ enum PanelContent {
     case metrics(title: String, readings: [PanelMetric])
     case steps(title: String, detail: String, entries: [PanelStep])
 
-    init?(_ d: [String: Any]) {
+    nonisolated init?(_ d: [String: Any]) {
         switch d["kind"] as? String {
         case "stat":
             self = .stat(value: d["value"] as? String ?? "",
