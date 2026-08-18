@@ -253,7 +253,7 @@ class EchoCanceller:
             return self._far_len > 0
 
     # ── The live path ─────────────────────────────────────────────────────────
-    def process(self, mic_frame: bytes) -> bytes:
+    def process(self, mic_frame: bytes, residual: bool = True) -> bytes:
         """Clean one 30ms microphone frame.
 
         Returns the frame unchanged when cancellation is off, when there is
@@ -285,8 +285,24 @@ class EchoCanceller:
             # Second stage: whatever the linear filter could not subtract.
             # Feeding it the AEC OUTPUT rather than the raw mic means it only
             # ever has to deal with the residue.
-            res = self._residual.process(out.astype(np.float32),
-                                         far.astype(np.float32))
+            # `residual=False` for the WAKE path, and this is the whole of
+            # barge-in working or not.
+            #
+            # The suppressor was built for MUSIC, where the far end plays
+            # continuously and his voice is the exception. It attenuates
+            # whichever frequency bins the reference explains — and while Nova
+            # is talking that is most of the bins a wake word lives in, so it
+            # was removing HIM along with her. Confirmed by the two facts that
+            # narrowed it: the wake word fires reliably in a quiet room, and he
+            # can hear himself over her, so neither the detector nor his volume
+            # was ever the problem.
+            #
+            # The linear canceller alone is measured safe for his voice: 27-36
+            # dB off Nova against 1.5-3.9 dB off him. That is ample for a wake
+            # word, and it is all the wake path gets.
+            res = (self._residual.process(out.astype(np.float32),
+                                          far.astype(np.float32))
+                   if residual else None)
             if res is not None:
                 out = np.clip(res, -32768, 32767).astype(np.int16)
             cleaned = out.tobytes()

@@ -363,7 +363,9 @@ class STTEngine:
             if not self.barge_in or self._echo is None or not self._echo.enabled:
                 return
             try:
-                self._wake_q.put_nowait(self._echo.process(raw))
+                # Linear cancellation only — the residual suppressor removes
+                # his voice along with hers. See EchoCanceller.process.
+                self._wake_q.put_nowait(self._echo.process(raw, residual=False))
             except queue.Full:
                 try:
                     self._wake_q.get_nowait()
