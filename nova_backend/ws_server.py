@@ -100,6 +100,9 @@ class NovaWSServer:
             db = getattr(ec, "attenuation_db", None) if ec is not None else None
             if db is not None:
                 out["removed_db"] = db
+            d = getattr(ec, "delay_ms", None) if ec is not None else None
+            if d is not None:
+                out["delay_ms"] = d
             return out
         except Exception:
             return {"system_tap": "unknown"}

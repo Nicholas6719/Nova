@@ -53,6 +53,12 @@ MIC_FRAME = 480          # 30ms — what the mic stream delivers
 # reference is too old to describe what the microphone is hearing, and stale
 # reference is worse than none: it makes the filter adapt to the wrong thing.
 _MAX_FAR_SECONDS = 1.5
+_RING_SECONDS = 3.0        # reference history to search within
+_ENV_SECONDS = 1.5         # envelope history used for the correlation
+_MAX_LAG_MS = 400          # how far behind the mic can plausibly be
+_ESTIMATE_EVERY = 8        # mic frames between lag estimates (~240ms)
+_MIN_CONFIDENCE = 0.50     # below this the estimate is noise; keep the old lag
+_LAG_VOTES = 9             # estimates kept; the MEDIAN of them is the lag
 
 
 class EchoCanceller:
@@ -66,9 +72,28 @@ class EchoCanceller:
         self.enabled = False
         self._aec = None
         self._lock = threading.Lock()
-        self._far = deque()              # queued reference samples (int16)
-        self._far_len = 0
-        self._max_far = int(_MAX_FAR_SECONDS * SAMPLE_RATE)
+        # A RING, not a queue. A FIFO forced the alignment to be whatever the
+        # queue depth happened to be, and that drifts: the reference arrives at
+        # render time while the microphone hears it later, so the two run at the
+        # same rate but a shifting offset. Cancellation collapsed from 27-36 dB
+        # (Nova's own voice, handed over microseconds before playback) to 2-8 dB
+        # (the speaker mix, arriving through ScreenCaptureKit) for exactly this
+        # reason. With a ring we can read at a MEASURED offset instead.
+        self._ring_n = int(_RING_SECONDS * SAMPLE_RATE)
+        self._far_ring = np.zeros(self._ring_n, dtype=np.int16)
+        self._far_w = 0                  # monotonic samples ever written
+        self._far_len = 0                # samples available (for has_reference)
+        # Decimated |amplitude| histories, one bin per millisecond. The lag is
+        # found by correlating ENVELOPES rather than waveforms: it is ~16x less
+        # arithmetic, and it locks onto the shape of speech and music instead of
+        # their phase, which is what survives a speaker and a room.
+        self._env_bins = int(_ENV_SECONDS * 1000)
+        self._far_env = np.zeros(self._env_bins, dtype=np.float32)
+        self._mic_env = np.zeros(self._env_bins, dtype=np.float32)
+        self._lag_ms: Optional[float] = None
+        self._lag_votes = deque(maxlen=_LAG_VOTES)
+        self._lag_conf = 0.0
+        self._since_estimate = 0
         self._stream_delay_ms = stream_delay_ms
         # Rolling attenuation, so "is this actually working" is answerable at
         # runtime instead of only in a test. Cheap: two RMS values per frame.
@@ -101,13 +126,8 @@ class EchoCanceller:
                 mono = _resample(mono, rate, SAMPLE_RATE)
             pcm = np.clip(mono * 32767, -32768, 32767).astype(np.int16)
             with self._lock:
-                self._far.append(pcm)
-                self._far_len += pcm.size
-                # Drop the OLDEST reference when overfull. Keeping the newest
-                # matters: the mic is always behind, and a reference from two
-                # seconds ago describes nothing it is hearing now.
-                while self._far_len > self._max_far and self._far:
-                    self._far_len -= self._far.popleft().size
+                self._write_ring(pcm)
+                self._push_env(self._far_env, pcm)
         except Exception as exc:
             log.warning(f"could not queue reference audio: {exc}")
 
@@ -117,8 +137,14 @@ class EchoCanceller:
         if not self.enabled:
             return
         with self._lock:
-            self._far.clear()
+            self._far_ring[:] = 0
+            self._far_w = 0
             self._far_len = 0
+            self._far_env[:] = 0
+            self._mic_env[:] = 0
+            # The lag is a property of the PATH, not of an utterance, so it
+            # survives a reset. Re-measuring from scratch every time Nova stops
+            # speaking would throw away the alignment on every turn.
         try:
             self._aec.reset()
         except Exception:
@@ -145,6 +171,12 @@ class EchoCanceller:
             if near.size != MIC_FRAME:
                 return mic_frame
 
+            with self._lock:
+                self._push_env(self._mic_env, near)
+                self._since_estimate += 1
+                if self._since_estimate >= _ESTIMATE_EVERY:
+                    self._since_estimate = 0
+                    self._estimate_lag()
             far = self._take_far(near.size)
             if far is None:
                 return mic_frame        # nothing playing: leave the mic alone
@@ -188,25 +220,130 @@ class EchoCanceller:
         import math
         return round(20 * math.log10(raw / out), 1)
 
+    # ── Ring + envelope plumbing ──────────────────────────────────────────────
+    def _write_ring(self, pcm: np.ndarray) -> None:
+        """Append to the reference ring, wrapping. Caller holds the lock."""
+        n = pcm.size
+        if n >= self._ring_n:                       # absurdly large chunk
+            self._far_ring[:] = pcm[-self._ring_n:]
+            self._far_w += n
+            self._far_len = self._ring_n
+            return
+        start = self._far_w % self._ring_n
+        end = start + n
+        if end <= self._ring_n:
+            self._far_ring[start:end] = pcm
+        else:
+            split = self._ring_n - start
+            self._far_ring[start:] = pcm[:split]
+            self._far_ring[:end - self._ring_n] = pcm[split:]
+        self._far_w += n
+        self._far_len = min(self._ring_n, self._far_len + n)
+
+    def _read_ring(self, end_offset: int, n: int) -> Optional[np.ndarray]:
+        """n samples ending `end_offset` samples before the newest one."""
+        newest = self._far_w - end_offset
+        first = newest - n
+        if n <= 0 or first < 0 or (self._far_w - first) > self._far_len:
+            return None
+        idx = np.arange(first, newest) % self._ring_n
+        return self._far_ring[idx]
+
+    @staticmethod
+    def _push_env(env: np.ndarray, pcm: np.ndarray) -> None:
+        """Fold |samples| into 1ms bins and shift them into the history.
+
+        Envelopes rather than waveforms because the lag search only needs the
+        SHAPE of what was played. A room and a speaker mangle phase; they leave
+        the shape of a syllable or a drum hit intact.
+        """
+        per_bin = SAMPLE_RATE // 1000                # 16 samples at 16 kHz
+        usable = (pcm.size // per_bin) * per_bin
+        if usable <= 0:
+            return
+        bins = np.abs(pcm[:usable].astype(np.float32)).reshape(-1, per_bin).mean(axis=1)
+        k = min(bins.size, env.size)
+        env[:-k] = env[k:]
+        env[-k:] = bins[-k:]
+
+    def _estimate_lag(self) -> None:
+        """Find how far the microphone is behind the speakers, and remember it.
+
+        Normalised cross-correlation of the two envelopes over 0..400ms. Only
+        adopted when it is CONFIDENT: a correlation peak on near-silence is
+        noise, and acting on it would be worse than keeping a stale but
+        plausible alignment. The accepted value is smoothed, because the true
+        delay does not jump around and a jumping estimate would make the filter
+        re-adapt from scratch every quarter second.
+        """
+        try:
+            mic = self._mic_env
+            far = self._far_env
+            win = int(0.6 * 1000)                    # 600ms of mic to match
+            if mic.size < win + _MAX_LAG_MS:
+                return
+            m = mic[-win:]
+            m = m - m.mean()
+            m_norm = float(np.sqrt((m * m).sum()))
+            if m_norm < 1e-3:
+                return                               # microphone is silent
+            best_lag, best_score = None, 0.0
+            for lag in range(0, _MAX_LAG_MS + 1, 2):
+                seg = far[far.size - win - lag: far.size - lag] if lag else far[-win:]
+                if seg.size != win:
+                    continue
+                f = seg - seg.mean()
+                f_norm = float(np.sqrt((f * f).sum()))
+                if f_norm < 1e-3:
+                    continue
+                score = float((m * f).sum() / (m_norm * f_norm))
+                if score > best_score:
+                    best_score, best_lag = score, lag
+            if best_lag is None or best_score < _MIN_CONFIDENCE:
+                return
+            self._lag_conf = best_score
+            # MEDIAN of recent confident estimates, not an exponential slew.
+            # Measured: a slew still chased outliers — the estimate walked
+            # 2.5 -> 94.6 -> 16 -> 47 ms and cancellation collapsed on every
+            # jump, because the filter re-adapts whenever the alignment moves.
+            # The true delay is a property of the speaker-mic path and barely
+            # changes, so a median throws single bad reads away entirely
+            # instead of averaging them in.
+            self._lag_votes.append(float(best_lag))
+            if len(self._lag_votes) < 3:
+                return
+            lag = float(np.median(np.fromiter(self._lag_votes, dtype=np.float32)))
+            first = self._lag_ms is None
+            self._lag_ms = lag
+            if first:
+                log.info(f"speaker-to-mic delay measured at {lag:.0f}ms "
+                         f"(confidence {best_score:.2f})")
+        except Exception as exc:
+            log.debug(f"lag estimate failed: {exc}")
+
     def _take_far(self, n: int) -> Optional[np.ndarray]:
-        """Pull exactly n reference samples, consuming the queue in step with
-        the mic. Returns None when Nova is not speaking."""
+        """The n reference samples that match the mic frame just received.
+
+        Read at the MEASURED offset rather than consumed FIFO. Until a lag has
+        been measured this falls back to the newest reference, which is what the
+        queue effectively did and is right for Nova's own voice, where the
+        handoff happens microseconds before playback.
+        """
         with self._lock:
             if self._far_len == 0:
                 return None
-            out = np.zeros(n, dtype=np.int16)
-            filled = 0
-            while filled < n and self._far:
-                chunk = self._far[0]
-                take = min(n - filled, chunk.size)
-                out[filled:filled + take] = chunk[:take]
-                filled += take
-                if take == chunk.size:
-                    self._far.popleft()
-                else:
-                    self._far[0] = chunk[take:]
-                self._far_len -= take
-            return out
+            lag_samples = 0
+            if self._lag_ms is not None:
+                lag_samples = int(self._lag_ms * SAMPLE_RATE / 1000)
+            far = self._read_ring(lag_samples, n)
+            if far is None:
+                far = self._read_ring(0, n)          # not enough history yet
+            return far
+
+    @property
+    def delay_ms(self) -> Optional[float]:
+        """The measured speaker-to-mic delay, for /api/status."""
+        return None if self._lag_ms is None else round(self._lag_ms, 1)
 
 
 def _resample(x: np.ndarray, src: int, dst: int) -> np.ndarray:
