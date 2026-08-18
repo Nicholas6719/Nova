@@ -98,6 +98,9 @@ class STTEngine:
         # Barge-in: keep a wake-only ear open while Nova speaks. Needs a
         # canceller with a real reference, so it is off unless both are.
         self.barge_in = bool(config.get("barge_in", False)) and echo is not None
+        # Called when the wake word fires WHILE Nova is talking. nova.py points
+        # this at tts.stop_and_flush; None means barge-in stops at detection.
+        self.on_barge_in = None
         # Wake-word settings (engine choice + OpenWakeWord tuning). Kept separate
         # from the stt block so the wake engine can be swapped without touching
         # STT. Defaults keep the legacy transcript engine if unspecified.
@@ -211,6 +214,38 @@ class STTEngine:
             return False
 
     # ── Persistent audio stream ────────────────────────────────────────────────────
+    def _wake_frame(self, timeout: float) -> Optional[bytes]:
+        """One frame for the WAKE detector.
+
+        While Nova is silent this is the ordinary queue, exactly as before.
+        While she is speaking that queue is shut — which is what keeps
+        end-of-speech detection honest — so the frame comes from `_wake_q`,
+        which carries echo-cancelled audio continuously. The wake detector is
+        the only thing in Nova allowed to listen through her own voice.
+        """
+        if self.barge_in and not self._mic_gate.is_set():
+            try:
+                return self._wake_q.get(timeout=timeout)
+            except queue.Empty:
+                return None
+        try:
+            return self._audio_q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def _fire_barge_in(self) -> None:
+        """He said "Nova" over the top of her. Stop talking."""
+        if not self.barge_in or self._mic_gate.is_set():
+            return                      # she was not speaking; nothing to cut
+        cb = self.on_barge_in
+        if cb is None:
+            return
+        try:
+            log.info("wake word heard while speaking — interrupting")
+            cb()
+        except Exception as exc:
+            log.warning(f"could not interrupt playback: {exc}")
+
     def _drain_audio_q(self) -> int:
         """Throw away buffered audio. Returns how many frames were dropped."""
         dropped = 0
@@ -347,14 +382,14 @@ class STTEngine:
         self._drain_audio_q()
         start = time.time()
         while time.time() - start < timeout_s:
-            try:
-                frame = self._audio_q.get(timeout=0.1)
-            except queue.Empty:
+            frame = self._wake_frame(0.1)
+            if frame is None:
                 continue
             if len(frame) != FRAME_BYTES:
                 continue
             self._pre_wake_buf.append(frame)
             if detector.process(frame):
+                self._fire_barge_in()
                 self._pending_pre_wake = b"".join(self._pre_wake_buf)
                 self._pre_wake_buf.clear()
                 return True
@@ -377,9 +412,8 @@ class STTEngine:
         window: "collections.deque[bytes]" = collections.deque(maxlen=WAKE_WINDOW_FRAMES)
 
         while time.time() - start < timeout_s:
-            try:
-                frame = self._audio_q.get(timeout=0.1)
-            except queue.Empty:
+            frame = self._wake_frame(0.1)
+            if frame is None:
                 continue
 
             window.append(frame)

@@ -385,6 +385,13 @@ class VoiceAssistant:
             wake_config=self.config.get("wake_word", {}),
             echo=self.echo,
         )
+        # Barge-in: the wake detector is allowed to hear Nova, and when it does
+        # she stops mid-sentence. Wired here because the STT engine must not
+        # know what a TTS engine is.
+        try:
+            self.stt.on_barge_in = self.tts.stop_and_flush
+        except AttributeError:
+            pass                       # TTS is built later; re-pointed below
 
     def _init_echo(self) -> None:
         """Optional echo canceller, shared by TTS (which supplies the
@@ -512,6 +519,7 @@ class VoiceAssistant:
         from tts_engine import TTSEngine
         self.tts = TTSEngine(self.config["tts"], mic_gate=self.mic_gate,
                              echo=self.echo)
+        self.stt.on_barge_in = self.tts.stop_and_flush
         # Kokoro is already in the speaker mix; see tts_engine.suppress_reference.
         try:
             self.tts.suppress_reference = lambda: self.hears_speakers

@@ -238,6 +238,43 @@ check(config["stt"]["beam_size"] == 5,
       f"beam_size={config['stt']['beam_size']}")
 
 
+# ── Barge-in: the wake ear stays open while Nova speaks ──────────────────────
+# The FIRST attempt held the one mic queue open whenever cancellation was on,
+# and the command recorder's VAD then never saw a quiet frame — every turn ran
+# to the 15s cap. These pin the split that fixed it.
+def _barge_rig(barge_in=True, speaking=True):
+    import queue as _q, threading as _t
+    from stt_engine import STTEngine
+    eng = STTEngine.__new__(STTEngine)
+    eng._audio_q = _q.Queue(maxsize=8)
+    eng._wake_q = _q.Queue(maxsize=8)
+    eng._mic_gate = _t.Event()
+    if not speaking:
+        eng._mic_gate.set()          # gate OPEN means Nova is silent
+    eng.barge_in = barge_in
+    eng.on_barge_in = None
+    return eng
+
+
+_e = _barge_rig(True, True); _e._wake_q.put(b"WAKE"); _e._audio_q.put(b"CMD")
+check(_e._wake_frame(0.05) == b"WAKE",
+      "while Nova speaks the wake ear reads the barge-in queue")
+_e = _barge_rig(True, False); _e._wake_q.put(b"WAKE"); _e._audio_q.put(b"CMD")
+check(_e._wake_frame(0.05) == b"CMD",
+      "while Nova is silent it reads the ordinary queue, as before")
+_e = _barge_rig(False, True); _e._wake_q.put(b"WAKE"); _e._audio_q.put(b"CMD")
+check(_e._wake_frame(0.05) == b"CMD",
+      "with barge-in off nothing changes at all")
+_fired = []
+_e = _barge_rig(True, True); _e.on_barge_in = lambda: _fired.append(1)
+_e._fire_barge_in()
+check(_fired == [1], "hearing the wake word mid-speech stops the playback")
+_fired.clear()
+_e = _barge_rig(True, False); _e.on_barge_in = lambda: _fired.append(1)
+_e._fire_barge_in()
+check(_fired == [], "...and never interrupts when she was not speaking")
+
+
 # ══════════════════════════════════════════════════════════════════════════
 section("RESULT")
 # ══════════════════════════════════════════════════════════════════════════
