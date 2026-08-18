@@ -70,7 +70,12 @@ struct OrbView: View {
 
         context.addFilter(.blur(radius: R * 0.012))
 
-        ambientField(&context, center, R, tint, 0.13 * dim)
+        ambientField(&context, center, R, tint, 0.10 * dim)
+        // A real BODY under the rings. He said it looked square-y and not like
+        // an actual orb, and he was right: it was concentric rings and arcs
+        // with a hole in the middle, so the eye read a diagram rather than a
+        // sphere. This is the volume the rings now sit on.
+        sphere(&context, center, R * 0.92, tint, dim, lvl)
 
         switch density {
         case .reactor: drawReactor(&context, center, R, t, lvl, open, tint, dim)
@@ -85,7 +90,7 @@ struct OrbView: View {
         // The hero, drawn last so it sits on top of everything.
         let coreR = R * (density == .reactor ? 0.30 : 0.32) * open
         torus(&context, center, coreR, R * (0.045 + lvl * 0.05), tint,
-              (0.55 + lvl * 0.45) * dim)
+              (0.38 + lvl * 0.34) * dim)
     }
 
     // MARK: Reactor
@@ -94,19 +99,19 @@ struct OrbView: View {
                              _ t: Double, _ lvl: Double, _ open: Double,
                              _ tint: Color, _ dim: Double) {
         for (i, f) in [0.46, 0.60, 0.78, 0.90, 1.02].enumerated() {
-            ring(&c, o, R * f * open, tint, (0.20 - Double(i) * 0.026) * dim, 1)
+            ring(&c, o, R * f * open, tint, (0.13 - Double(i) * 0.018) * dim, 1)
         }
-        dashedRing(&c, o, R * 0.68 * open, tint, 0.30 * dim, [2, 6], t * state.spin * 0.5)
-        dashedRing(&c, o, R * 1.10 * open, tint, 0.18 * dim, [1, 9], -t * state.spin * 0.3)
+        dashedRing(&c, o, R * 0.68 * open, tint, 0.18 * dim, [2, 6], t * state.spin * 0.5)
+        dashedRing(&c, o, R * 1.10 * open, tint, 0.11 * dim, [1, 9], -t * state.spin * 0.3)
 
         for (i, a) in Self.reactorArcs.enumerated() {
             var phase = t * state.spin * a.direction + a.phase
             if state.jitters { phase += sin(t * 24 + Double(i)) * 0.14 }
             arc(&c, o, R * a.radius * open, phase, a.length, tint,
-                0.72 * dim, a.weight)
+                0.50 * dim, a.weight)
         }
 
-        particles(&c, o, R * 1.25 * open, t, tint, 0.5 * dim, count: 46)
+        particles(&c, o, R * 1.25 * open, t, tint, 0.30 * dim, count: 40)
     }
 
     // MARK: Array
@@ -158,7 +163,7 @@ struct OrbView: View {
             .init(color: tint.opacity(alpha * 0.12), location: 0),
             .init(color: tint.opacity(alpha * 0.10), location: max(0.001, p - b * 2.4)),
             .init(color: tint.opacity(alpha * 0.62), location: max(0.002, p - b * 0.9)),
-            .init(color: Color.white.opacity(alpha),  location: p),
+            .init(color: Color.white.opacity(alpha * 0.72), location: p),
             .init(color: tint.opacity(alpha * 0.55), location: min(0.998, p + b * 0.9)),
             .init(color: tint.opacity(alpha * 0.08), location: min(0.999, p + b * 2.4)),
             .init(color: tint.opacity(0),             location: 1),
@@ -166,6 +171,25 @@ struct OrbView: View {
         c.fill(Path(ellipseIn: rect(o, outer)),
                with: .radialGradient(Gradient(stops: stops), center: o,
                                      startRadius: 0, endRadius: outer))
+    }
+
+    /// A lit sphere: brightest above centre, falling to a dark limb. What
+    /// makes the thing read as round rather than as a set of circles.
+    private func sphere(_ c: inout GraphicsContext, _ o: CGPoint, _ r: Double,
+                        _ tint: Color, _ dim: Double, _ lvl: Double) {
+        let lit = CGPoint(x: o.x - r * 0.22, y: o.y - r * 0.28)
+        let stops: [Gradient.Stop] = [
+            .init(color: tint.opacity(0.30 * dim), location: 0.00),
+            .init(color: tint.opacity(0.20 * dim), location: 0.38),
+            .init(color: tint.opacity(0.10 * dim), location: 0.68),
+            // A slightly brighter limb: the rim-light that tells the eye this
+            // is a ball and not a disc.
+            .init(color: tint.opacity(0.16 * dim), location: 0.93),
+            .init(color: tint.opacity(0), location: 1.0),
+        ]
+        c.fill(Path(ellipseIn: rect(o, r)),
+               with: .radialGradient(Gradient(stops: stops), center: lit,
+                                     startRadius: 0, endRadius: r * 1.25))
     }
 
     private func ambientField(_ c: inout GraphicsContext, _ o: CGPoint, _ R: Double,

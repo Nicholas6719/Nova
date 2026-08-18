@@ -58,17 +58,23 @@ enum NovaState: String, CaseIterable {
         }
     }
 
-    /// Cyan throughout, as in the mockup. Only `working` and `unsure` break the
-    /// palette, because those two have to be unmistakable from across a room.
+    /// One hue family, walked by temperature rather than jumped between.
+    ///
+    /// He said the colours did not match: the old set mixed a cyan, a
+    /// blue-violet and a near-white that shared no common ground, so every
+    /// state change looked like a different palette. These stay on a
+    /// teal-to-blue axis and differ by DEPTH — idle is deep and desaturated,
+    /// speaking is the same hue brought forward. Only `working` and `unsure`
+    /// leave the family, because those two must be unmistakable at a glance.
     var tint: Color {
         switch self {
-        case .idle:      return Color(red: 0.243, green: 0.561, blue: 0.659)
-        case .listening: return Color(red: 0.251, green: 0.839, blue: 1.000)
-        case .thinking:  return Color(red: 0.494, green: 0.612, blue: 1.000)
-        case .speaking:  return Color(red: 0.659, green: 0.925, blue: 1.000)
-        case .working:   return Color(red: 1.000, green: 0.745, blue: 0.353)
-        case .sleeping:  return Color(red: 0.106, green: 0.212, blue: 0.282)
-        case .unsure:    return Color(red: 1.000, green: 0.588, blue: 0.376)
+        case .idle:      return Color(red: 0.157, green: 0.404, blue: 0.478)
+        case .listening: return Color(red: 0.208, green: 0.706, blue: 0.831)
+        case .thinking:  return Color(red: 0.286, green: 0.518, blue: 0.808)
+        case .speaking:  return Color(red: 0.322, green: 0.808, blue: 0.898)
+        case .working:   return Color(red: 0.902, green: 0.643, blue: 0.310)
+        case .sleeping:  return Color(red: 0.086, green: 0.176, blue: 0.227)
+        case .unsure:    return Color(red: 0.878, green: 0.494, blue: 0.337)
         }
     }
 

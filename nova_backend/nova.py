@@ -302,6 +302,7 @@ class VoiceAssistant:
         self._init_ws()
         self._init_views()          # after _init_ws: it needs the WS server
         self._verify_engines()
+        self._show_home()
         self._warm_prompt_cache()
         log.info("Nova ready.")
 
@@ -650,6 +651,20 @@ class VoiceAssistant:
         self._handle_turn_impl(text)
         return ""
 
+    def _show_home(self) -> None:
+        """Put Nova on the home screen at startup.
+
+        The WS held view="home" with EMPTY data and nothing ever built the
+        payload, so the app was told "home" and found no blocks to render — it
+        came up as a bare orb and Nicholas could not find the home screen at
+        all. Best-effort: home degrades block by block, and a failure here must
+        never stop Nova starting.
+        """
+        try:
+            self.views.handle("home")
+        except Exception as exc:
+            log.warning(f"could not show home at startup: {exc}")
+
     def _emit_panel(self, engine) -> None:
         """Send the panel a handler just built, if it built one.
 
@@ -664,9 +679,37 @@ class VoiceAssistant:
         try:
             view_name, payload = panel
             self.ws.send_view(view_name, payload)
+            self._arm_panel_dismiss()
         except Exception as exc:
             # A panel failing must never cost him the spoken answer.
             log.warning(f"could not send panel: {exc}")
+
+    def _arm_panel_dismiss(self) -> None:
+        """Send the panel away again after a while, back to home.
+
+        Panels used to persist until something replaced them, so the weather
+        sat on screen long after he had heard the answer. An answer is
+        transient; the screen should agree with that. Any NEW panel cancels the
+        pending dismissal, so a run of questions never yanks the screen away
+        mid-read.
+        """
+        seconds = float(self.config.get("ui", {}).get("panel_seconds", 25))
+        if seconds <= 0:
+            return
+        token = self._panel_token = getattr(self, "_panel_token", 0) + 1
+
+        def _dismiss() -> None:
+            # Only the LATEST panel's timer may fire.
+            if getattr(self, "_panel_token", 0) != token:
+                return
+            try:
+                self.views.handle("home")
+            except Exception as exc:
+                log.warning(f"panel dismiss failed: {exc}")
+
+        t = threading.Timer(seconds, _dismiss)
+        t.daemon = True
+        t.start()
 
     # ── State broadcasting ────────────────────────────────────────────────────────
     def set_state(self, state: str) -> None:

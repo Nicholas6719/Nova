@@ -25,7 +25,7 @@
     "_grace_note": "How long Nicholas has to START his command after saying the wake word. The wake word is replayed from the pre-wake buffer, so the recorder already counts itself as 'speaking' and the normal 700ms silence cutoff applied immediately \u2014 saying 'Nova', pausing to think, then speaking looked like the wake word not working. Only applies until he starts talking; normal cutoffs take over after that.",
     "min_speech_duration_s": 0.5,
     "command_max_duration_s": 15.0,
-    "echo_cancellation": false,
+    "echo_cancellation": true,
     "echo_stream_delay_ms": 35,
     "_aec_note": "Subtract Nova's own voice from the microphone so she can be interrupted while speaking. Measured on real Kokoro output: 27-36 dB of her voice removed, his voice attenuated only 1.5-3.9 dB, and 0.2 dB when she is silent. DEFAULT FALSE because turning it on also means keeping mic frames during playback, which is a change to the live listening path that needs his ears on real speakers. echo_stream_delay_ms is the speaker-to-mic delay estimate.",
     "confidence_gate": true,
@@ -127,5 +127,9 @@
   "actuation": {
     "enabled": true,
     "_note": "Nova types and clicks. Refused outside WORK MODE - a hard gate in code, not a line in a prompt. A target must be FOUND BY NAME via Accessibility or Vision OCR bounding boxes before it is clicked; Nova never clicks a coordinate she could not verify. Typing is free (what is typed is visible before it goes anywhere); clicking send/delete/buy is confirmed, and Return is confirmed when the front app is one where Return sends. Needs Accessibility permission for the app bundle. Set false to disable entirely."
+  },
+  "ui": {
+    "panel_seconds": 25,
+    "_panel_note": "How long an answer's panel stays on screen before Nova returns to home. He reported the weather panel outstaying its answer. A new panel cancels the pending dismissal, so a run of questions is never cut off mid-read. 0 disables the dismissal and panels persist as before."
   }
 }
