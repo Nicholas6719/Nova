@@ -483,7 +483,8 @@ class VoiceAssistant:
         from tools import NovaTools
         # on_announce lets a timer speak when it fires — nothing is asking at
         # that moment, so it needs its own safe path to the floor.
-        self.tools = NovaTools(self.config, on_announce=self._announce)
+        self.tools = NovaTools(self.config, on_announce=self._announce,
+                               on_progress=self._show_work)
 
     def _init_calendar(self) -> None:
         # NovaCalendar's LLM extraction/summarize calls run on the nova-llm
@@ -682,6 +683,33 @@ class VoiceAssistant:
             self.views.handle("home")
         except Exception as exc:
             log.warning(f"could not show home at startup: {exc}")
+        self._start_home_ticker()
+
+    def _start_home_ticker(self) -> None:
+        """Keep home honest about the world while he is looking at it.
+
+        This is what makes Now Playing arrive when HE starts a song rather than
+        when he asks Nova to. It is deliberately one ticker rather than a
+        poller per card: every tile already knows its own refresh interval, and
+        `refresh_home` sends nothing unless the payload actually changed, so a
+        tick where the world stood still costs a dict comparison.
+
+        Daemon, like every other background worker here, so it can never hold
+        the process open (invariant 4's reasoning, applied to a second thread).
+        """
+        seconds = float(self.config.get("ui", {}).get("home_tick_seconds", 4))
+        if seconds <= 0:
+            return
+
+        def _tick() -> None:
+            while True:
+                time.sleep(seconds)
+                try:
+                    self.views.refresh_home()
+                except Exception as exc:
+                    log.warning(f"home tick failed: {exc}")
+
+        threading.Thread(target=_tick, name="nova-home-tick", daemon=True).start()
 
     def _emit_panel(self, engine) -> None:
         """Send the panel a handler just built, if it built one.
@@ -697,10 +725,37 @@ class VoiceAssistant:
         try:
             view_name, payload = panel
             self.ws.send_view(view_name, payload)
+            # The ticker refreshes home in the background. Without this it
+            # would not know an ANSWER is on screen and would push home
+            # straight over the top of it a few seconds later.
+            self.views.current = view_name
             self._arm_panel_dismiss()
         except Exception as exc:
             # A panel failing must never cost him the spoken answer.
             log.warning(f"could not send panel: {exc}")
+
+    def _show_work(self, payload: dict) -> None:
+        """Put a live step list on screen while a handler is working.
+
+        Called repeatedly by panels.Progress as a handler advances, so this is
+        the one place the screen learns that Nova is DOING something rather
+        than thinking about it. The orb goes amber on the first push and the
+        panel becomes the work surface.
+
+        Each push re-arms the dismissal, so the surface clears a while after
+        the LAST step rather than mid-run — the same token trick the answer
+        panels use, for the same reason.
+        """
+        try:
+            self.set_state("working")
+            self.ws.send_view("working", payload)
+            # Without this the home ticker would push home straight over the
+            # top of the work she is showing him.
+            self.views.current = "working"
+            self._arm_panel_dismiss()
+        except Exception as exc:
+            # The screen, never the work.
+            log.warning(f"could not show work: {exc}")
 
     def _arm_panel_dismiss(self) -> None:
         """Send the panel away again after a while, back to home.
@@ -1206,6 +1261,15 @@ class VoiceAssistant:
             if getattr(self.tools, "touched_mac", False):
                 self.tools.touched_mac = False
                 self.set_work_mode(True, reason="acted on the Mac")
+            # He asked what his CPU was doing: the number she just said should
+            # also be a number he can see, so the status row comes back for a
+            # while and then settles away on its own.
+            if getattr(self.tools, "showed_system", False):
+                self.tools.showed_system = False
+                try:
+                    self.views.recall_system()
+                except Exception as exc:
+                    log.warning(f"could not recall status row: {exc}")
             self._respond(resp)
             return
 

@@ -30,6 +30,21 @@ struct Panel {
         blocks = [block]
     }
 
+    /// The card in a named home slot, if anything is there.
+    func block(inSlot slot: String) -> PanelBlock? {
+        blocks.first { $0.slot == slot }
+    }
+
+    /// The bottom-left instrumentation row, if Nova is showing it.
+    var statusReadings: [PanelMetric] {
+        for b in blocks {
+            if case let .metrics(_, readings) = b.content, b.slot == "status" {
+                return readings
+            }
+        }
+        return []
+    }
+
     /// Decoded defensively: a malformed payload yields an empty panel and the
     /// orb keeps the screen, rather than throwing away Nova's answer.
     init(_ data: [String: Any]) {
@@ -60,6 +75,10 @@ struct PanelItem: Identifiable {
     /// the reason, never silently omitted.
     var available = true
     var note = ""
+    /// A hint from the engine about what KIND of row this is — "reminder"
+    /// marks the reminders mixed into Upcoming, so calendar and reminders stay
+    /// tellable apart without needing two cards.
+    var accent = ""
 
     init(_ d: [String: Any]) {
         title = d["title"] as? String ?? d["name"] as? String ?? ""
@@ -67,45 +86,101 @@ struct PanelItem: Identifiable {
         meta = d["meta"] as? String ?? ""
         available = d["available"] as? Bool ?? true
         note = d["note"] as? String ?? ""
+        accent = d["accent"] as? String ?? ""
     }
 }
 
-enum PanelBlock: Identifiable {
-    case stat(id: UUID, value: String, label: String, detail: String)
-    case rows(id: UUID, title: String, pairs: [(String, String)])
-    case items(id: UUID, title: String, items: [PanelItem])
-    case text(id: UUID, title: String, body: String)
-    case note(id: UUID, body: String)
+/// One reading on the status row. Value is templated by the engine; `pct`
+/// drives the hairline so a level is readable without reading the number.
+struct PanelMetric: Identifiable {
+    let id = UUID()
+    var label = ""
+    var value = ""
+    var pct: Double?
+    var flag = ""
+    var alert = false
 
-    var id: UUID {
-        switch self {
-        case let .stat(id, _, _, _), let .rows(id, _, _),
-             let .items(id, _, _), let .text(id, _, _), let .note(id, _):
-            return id
-        }
+    init(_ d: [String: Any]) {
+        label = d["label"] as? String ?? ""
+        value = d["value"] as? String ?? ""
+        pct = d["pct"] as? Double
+        flag = d["flag"] as? String ?? ""
+        alert = d["alert"] as? Bool ?? false
     }
+}
+
+/// One line of what Nova is doing, while she is doing it.
+struct PanelStep: Identifiable {
+    let id = UUID()
+    var label = ""
+    var state = "pending"      // done | running | pending | failed
+    var meta = ""
+
+    init(_ d: [String: Any]) {
+        label = d["label"] as? String ?? ""
+        state = d["state"] as? String ?? "pending"
+        meta = d["meta"] as? String ?? ""
+    }
+}
+
+/// A block, plus where on the home grid it belongs.
+///
+/// Slot and card live on the WRAPPER rather than inside every content case:
+/// they are placement, not content, and threading them through five enum
+/// payloads would mean every render site had to ignore them by hand.
+struct PanelBlock: Identifiable {
+    let id = UUID()
+    let content: PanelContent
+    /// "L1".."R3" for a home card, "status" for the bottom row, "" elsewhere.
+    let slot: String
+    /// Stable identity for a card across renders — this is what lets a card
+    /// FLY to its new slot when he moves it, instead of blinking out of one
+    /// place and into another.
+    let card: String
 
     init?(_ d: [String: Any]) {
-        let id = UUID()
+        guard let content = PanelContent(d) else { return nil }
+        self.content = content
+        self.slot = d["slot"] as? String ?? ""
+        self.card = d["card"] as? String ?? ""
+    }
+}
+
+enum PanelContent {
+    case stat(value: String, label: String, detail: String)
+    case rows(title: String, pairs: [(String, String)])
+    case items(title: String, items: [PanelItem])
+    case text(title: String, body: String)
+    case note(body: String)
+    case metrics(title: String, readings: [PanelMetric])
+    case steps(title: String, detail: String, entries: [PanelStep])
+
+    init?(_ d: [String: Any]) {
         switch d["kind"] as? String {
         case "stat":
-            self = .stat(id: id,
-                         value: d["value"] as? String ?? "",
+            self = .stat(value: d["value"] as? String ?? "",
                          label: d["label"] as? String ?? "",
                          detail: d["detail"] as? String ?? "")
         case "rows":
             let pairs = (d["rows"] as? [[String: Any]] ?? []).map {
                 ($0["label"] as? String ?? "", $0["value"] as? String ?? "")
             }
-            self = .rows(id: id, title: d["title"] as? String ?? "", pairs: pairs)
+            self = .rows(title: d["title"] as? String ?? "", pairs: pairs)
         case "items":
-            self = .items(id: id, title: d["title"] as? String ?? "",
+            self = .items(title: d["title"] as? String ?? "",
                           items: (d["items"] as? [[String: Any]] ?? []).map(PanelItem.init))
         case "text":
-            self = .text(id: id, title: d["title"] as? String ?? "",
+            self = .text(title: d["title"] as? String ?? "",
                          body: d["text"] as? String ?? "")
         case "note":
-            self = .note(id: id, body: d["text"] as? String ?? "")
+            self = .note(body: d["text"] as? String ?? "")
+        case "metrics":
+            self = .metrics(title: d["title"] as? String ?? "",
+                            readings: (d["metrics"] as? [[String: Any]] ?? []).map(PanelMetric.init))
+        case "steps":
+            self = .steps(title: d["title"] as? String ?? "",
+                          detail: d["detail"] as? String ?? "",
+                          entries: (d["steps"] as? [[String: Any]] ?? []).map(PanelStep.init))
         default:
             return nil
         }
@@ -167,8 +242,8 @@ struct PanelView: View {
 
     @ViewBuilder
     private func block(for b: PanelBlock) -> some View {
-        switch b {
-        case let .stat(_, value, label, detail):
+        switch b.content {
+        case let .stat(value, label, detail):
             VStack(alignment: .leading, spacing: 2) {
                 if !label.isEmpty { caption(label) }
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -183,7 +258,7 @@ struct PanelView: View {
                 }
             }
 
-        case let .rows(_, title, pairs):
+        case let .rows(title, pairs):
             VStack(alignment: .leading, spacing: 8) {
                 if !title.isEmpty { caption(title) }
                 ForEach(Array(pairs.enumerated()), id: \.offset) { _, pair in
@@ -199,13 +274,13 @@ struct PanelView: View {
                 }
             }
 
-        case let .items(_, title, list):
+        case let .items(title, list):
             VStack(alignment: .leading, spacing: 10) {
                 if !title.isEmpty { caption(title) }
                 ForEach(list) { row(for: $0) }
             }
 
-        case let .text(_, title, body):
+        case let .text(title, body):
             VStack(alignment: .leading, spacing: 6) {
                 if !title.isEmpty { caption(title) }
                 Text(body)
@@ -214,10 +289,30 @@ struct PanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-        case let .note(_, body):
+        case let .note(body):
             Text(body)
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.4))
+
+        case let .metrics(title, readings):
+            // Rendered inline here only for completeness — on home the status
+            // row is pulled out and pinned along the bottom by ShellView,
+            // because it is a line of instrumentation and not a card.
+            VStack(alignment: .leading, spacing: 8) {
+                if !title.isEmpty { caption(title) }
+                StatusRow(readings: readings, tint: tint)
+            }
+
+        case let .steps(title, detail, entries):
+            VStack(alignment: .leading, spacing: 8) {
+                if !title.isEmpty { caption(title) }
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+                StepList(entries: entries, tint: tint)
+            }
         }
     }
 
@@ -231,7 +326,13 @@ struct PanelView: View {
     private func row(for item: PanelItem) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Rectangle()
-                .fill(item.available ? tint.opacity(0.55) : Color.white.opacity(0.12))
+                .fill(item.available
+                      // A reminder mixed into Upcoming reads as a different
+                      // kind of thing from a meeting, and one colour is
+                      // cheaper than a second card.
+                      ? (item.accent == "reminder" ? Color.green.opacity(0.65)
+                                                   : tint.opacity(0.55))
+                      : Color.white.opacity(0.12))
                 .frame(width: 2)
                 .frame(maxHeight: .infinity)
 
@@ -268,5 +369,133 @@ struct PanelView: View {
             .font(.system(size: 9, weight: .medium, design: .monospaced))
             .tracking(1.6)
             .foregroundStyle(.white.opacity(0.35))
+    }
+}
+
+
+// MARK: - Status row
+
+/// CPU, memory and battery as a LINE, not a card.
+///
+/// His call and the right one: this is glanceable furniture, and a box would
+/// give it the same visual weight as his calendar. Each reading is a label, a
+/// templated value, and a hairline whose fill is the level — so he can read
+/// the state without reading a single number.
+struct StatusRow: View {
+    let readings: [PanelMetric]
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(readings.enumerated()), id: \.element.id) { index, r in
+                if index > 0 {
+                    Text("—")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.14))
+                        .padding(.horizontal, 11)
+                }
+                reading(r)
+            }
+        }
+        .animation(.easeInOut(duration: 0.45), value: readings.map(\.value))
+    }
+
+    private func reading(_ r: PanelMetric) -> some View {
+        HStack(spacing: 6) {
+            Text(r.label.uppercased())
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .tracking(1.5)
+                .foregroundStyle(.white.opacity(0.30))
+            Text(r.value)
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .tracking(0.8)
+                .foregroundStyle(.white.opacity(0.55))
+                .monospacedDigit()
+            if let pct = r.pct {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.10))
+                        Capsule()
+                            .fill(r.alert ? Color.orange.opacity(0.9) : tint.opacity(0.8))
+                            .frame(width: max(1, geo.size.width * pct))
+                    }
+                }
+                .frame(width: 22, height: 2)
+            }
+            if r.flag == "charging" {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 7.5))
+                    .foregroundStyle(Color.green.opacity(0.85))
+            }
+        }
+    }
+}
+
+// MARK: - Step list
+
+/// What Nova is doing, while she is doing it.
+struct StepList: View {
+    let entries: [PanelStep]
+    let tint: Color
+    /// Drives the pulse on the running step. One clock for the whole list, so
+    /// several steps could never breathe out of phase with each other.
+    @State private var pulse = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(entries) { step in
+                HStack(alignment: .firstTextBaseline, spacing: 9) {
+                    marker(step)
+                        .frame(width: 12, alignment: .leading)
+                    Text(step.label)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(opacity(step)))
+                    Spacer(minLength: 8)
+                    if !step.meta.isEmpty {
+                        Text(step.meta)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.3))
+                    }
+                }
+                .animation(.easeOut(duration: 0.3), value: step.state)
+            }
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func marker(_ step: PanelStep) -> some View {
+        switch step.state {
+        case "done":
+            Image(systemName: "checkmark")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Color.green.opacity(0.8))
+        case "running":
+            Circle()
+                .fill(tint)
+                .frame(width: 6, height: 6)
+                .opacity(pulse ? 0.25 : 1.0)
+        case "failed":
+            Image(systemName: "xmark")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Color.red.opacity(0.75))
+        default:
+            Circle()
+                .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                .frame(width: 6, height: 6)
+        }
+    }
+
+    private func opacity(_ step: PanelStep) -> Double {
+        switch step.state {
+        case "running": return 0.95
+        case "done":    return 0.6
+        case "failed":  return 0.6
+        default:        return 0.3
+        }
     }
 }

@@ -130,6 +130,8 @@
   },
   "ui": {
     "panel_seconds": 25,
-    "_panel_note": "How long an answer's panel stays on screen before Nova returns to home. He reported the weather panel outstaying its answer. A new panel cancels the pending dismissal, so a run of questions is never cut off mid-read. 0 disables the dismissal and panels persist as before."
+    "_panel_note": "How long an answer's panel stays on screen before Nova returns to home. He reported the weather panel outstaying its answer. A new panel cancels the pending dismissal, so a run of questions is never cut off mid-read. 0 disables the dismissal and panels persist as before.",
+    "home_tick_seconds": 4,
+    "_home_tick_note": "How often home re-checks the world while he is looking at it. This is what makes Now Playing appear when HE starts a song rather than when he asks. Cheap by construction: every tile caches on its own interval and nothing is sent unless the payload actually changed. 0 disables it and home only updates when something asks it to."
   }
 }

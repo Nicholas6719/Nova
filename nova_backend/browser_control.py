@@ -341,6 +341,107 @@ _JS_HELP = ("That needs JavaScript from Apple Events enabled: in the browser's "
             "Develop menu, turn on Allow JavaScript from Apple Events.")
 
 
+def _js_literal(js: str) -> str:
+    """Escape JavaScript for embedding in an AppleScript string literal."""
+    return js.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def run_js(js: str, app: Optional[str] = None) -> tuple[bool, str]:
+    """Evaluate JavaScript in the front tab and return what it produced.
+
+    Reading the page Nova already opened is how she can tell him what she
+    found. Note what this deliberately is NOT: a new network call. The browser
+    already fetched the page, so nothing additional leaves the machine —
+    which keeps "read the results" on the right side of invariant 3.
+
+    Needs "Allow JavaScript from Apple Events". Returns (False, reason) rather
+    than raising, so a caller can degrade honestly instead of claiming a result
+    it never got.
+    """
+    target = app or active_browser()
+    if not target:
+        return False, "no browser"
+    lit = _js_literal(js)
+    if target == SAFARI:
+        return _osa(f'tell application "Safari" to do JavaScript "{lit}" '
+                    f'in current tab of window 1')
+    return _osa(f'tell application "{target}" to tell active tab of window 1 '
+                f'to execute javascript "{lit}"')
+
+
+# Result titles live in an <h3> inside a result link on every engine we open.
+# Deliberately structural — titles and hosts only, never body text. See
+# read_results for why that restraint is load-bearing rather than laziness.
+_RESULTS_JS = (
+    "(function(){try{"
+    "var o=[],seen={};"
+    # Deliberately no nested quoting beyond one level: an earlier version
+    # carried a [data-testid='...'] selector whose inner quotes collapsed on
+    # the way through AppleScript, turning the whole selector into a syntax
+    # error. It did not fail loudly — querySelectorAll threw, the function
+    # returned nothing, and the caller simply reported "still loading" forever.
+    "var n=document.querySelectorAll('a h3, h3 a');"
+    "for(var i=0;i<n.length&&o.length<8;i++){"
+    "var h=n[i];var a=(h.tagName==='A')?h:h.closest('a');"
+    "if(!a||!a.href)continue;"
+    "var t=(h.innerText||'').replace(/\\s+/g,' ').trim();"
+    "if(!t||seen[t])continue;seen[t]=1;"
+    "var u='';try{u=new URL(a.href).hostname.replace(/^www\\./,'');}catch(e){}"
+    "if(!u||u.indexOf('google.')===0)continue;"
+    "o.push({t:t,u:u});}"
+    "return JSON.stringify({ready:document.readyState,results:o});"
+    # A thrown selector is reported rather than swallowed, so the next person
+    # to break this string sees why instead of watching it time out.
+    "}catch(e){return JSON.stringify({ready:'error',error:String(e),results:[]});}})()"
+)
+
+
+def read_results(app: Optional[str] = None, timeout: float = 6.0,
+                 on_ready=None) -> tuple[bool, list, str]:
+    """The search results currently on screen: (ok, [{title, host}], reason).
+
+    ONLY titles and hostnames are extracted, and only those are ever shown or
+    spoken. That is a security boundary, not a shortcut: a web page is
+    untrusted text, and Nova can type, click and move files. Feeding page body
+    content into the model that drives those tools would make any page able to
+    talk to her. Titles go to a panel and a templated sentence; nothing from a
+    page reaches the LLM.
+
+    Polls, because the page is still loading when the search is issued.
+    """
+    import json as _json
+    import time as _time
+    deadline = _time.time() + timeout
+    last = "no results"
+    announced = False
+    while _time.time() < deadline:
+        ok, raw = run_js(_RESULTS_JS, app=app)
+        if not ok:
+            return False, [], f"I couldn't read the page. {_JS_HELP}"
+        try:
+            data = _json.loads(raw) if raw else {}
+        except ValueError:
+            data = {}
+        # Told the caller the page has landed, so its step list can move on
+        # from "loading" to "reading" at the moment that is actually true.
+        if not announced and data.get("ready") == "complete" and on_ready:
+            announced = True
+            try:
+                on_ready()
+            except Exception:
+                pass
+        results = data.get("results") or []
+        if results:
+            return True, [{"title": r.get("t", ""), "host": r.get("u", "")}
+                          for r in results if r.get("t")], ""
+        if data.get("ready") == "error":
+            return False, [], f"the page script failed ({data.get('error', '')})"
+        last = ("the page is still loading" if data.get("ready") != "complete"
+                else "no results on the page")
+        _time.sleep(0.4)
+    return False, [], last
+
+
 def scroll(direction: str, amount: str = "page") -> str:
     """Scroll via injected JS. Browsers block this by default, so verify and
     explain rather than claiming success."""

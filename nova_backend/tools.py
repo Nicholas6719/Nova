@@ -109,15 +109,32 @@ _APP_ALIASES: dict[str, str] = {
 
 class NovaTools:
     def __init__(self, config: dict,
-                 on_announce: Optional[Callable[[str], None]] = None) -> None:
+                 on_announce: Optional[Callable[[str], None]] = None,
+                 on_progress: Optional[Callable[[dict], None]] = None) -> None:
         self.config = config
         # Called by a timer/short-reminder when it fires. nova.py supplies a
         # callback that speaks safely (never on top of an in-flight response).
         self._on_announce = on_announce
+        # Pushes a live step list to the screen while a handler works. None in
+        # the routing harness, where Progress simply becomes a no-op.
+        self._on_progress = on_progress
         # True when this turn actually manipulated his Mac (launched an app,
         # drove the browser). nova.py reads it to park Nova in the corner, so
         # she gets out of the way of whatever she just opened. One-shot.
         self.touched_mac = False
+        # True when this turn answered a CPU / memory / battery question. The
+        # home screen reads it to bring the status row back, so the number she
+        # said out loud is also the number he can see. One-shot.
+        self.showed_system = False
+        # Status-row cache. Primed here rather than on first use so the very
+        # first home render — the greeting one, the one he actually looks at —
+        # already has numbers instead of filling in a moment later.
+        self._status_lock = threading.Lock()
+        self._status_cache: list[dict] = []
+        self._status_at = 0.0
+        self._status_busy = False
+        threading.Thread(target=self._refresh_status,
+                         name="nova-status-prime", daemon=True).start()
         # Set to a zero-arg callable when the user must confirm before we act.
         self.pending_confirm: Optional[Callable[[], str]] = None
         # SOFT follow-up ("want me to pull up directions?"). Unlike
@@ -576,13 +593,147 @@ class NovaTools:
     # ═══════════════════════════════════════════════════════════════════════
     # Battery + system stats
     # ═══════════════════════════════════════════════════════════════════════
+    # Structured readings. These exist because the same numbers now go two
+    # places — Nova SAYS them and the home screen SHOWS them — and a spoken
+    # sentence is a terrible thing to parse back into a percentage. The spoken
+    # versions below are built FROM these, so there is exactly one place where
+    # a reading is taken and one place where it could ever be wrong.
+    #
+    # Every one returns None rather than raising: an unreadable stat costs a
+    # segment of the status row, never the row and never the answer.
+
+    def battery_reading(self) -> Optional[dict]:
+        """{'level': 84, 'charging': True, 'ac': True} or None."""
+        try:
+            out = subprocess.run(["pmset", "-g", "batt"],
+                                 capture_output=True, text=True).stdout
+            m = re.search(r"(\d+)%", out)
+            if not m:
+                return None
+            level = int(m.group(1))
+            ac = "AC Power" in out
+            return {"level": level, "ac": ac, "charging": ac and level < 100}
+        except Exception as e:
+            log.warning(f"battery read failed: {e}")
+            return None
+
+    def memory_reading(self) -> Optional[dict]:
+        """{'used_gb', 'total_gb', 'free_gb', 'pct'} or None."""
+        try:
+            # Checked rather than assumed: under load these occasionally come
+            # back empty, and `int("")` turned a transient into a warning and a
+            # missing segment every few seconds once the row ran on a timer.
+            r = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                               capture_output=True, text=True)
+            raw = (r.stdout or "").strip()
+            if r.returncode != 0 or not raw.isdigit():
+                return None
+            total = int(raw)
+            vm = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+            if not vm:
+                return None
+            page = int(re.search(r"page size of (\d+) bytes", vm).group(1))
+
+            def pages(name):
+                m = re.search(rf"{name}:\s+(\d+)\.", vm)
+                return int(m.group(1)) if m else 0
+
+            free = (pages("Pages free") + pages("Pages inactive")) * page
+            used = total - free
+            gb = 1024 ** 3
+            return {"used_gb": used / gb, "total_gb": total / gb,
+                    "free_gb": free / gb, "pct": round(used / total * 100)}
+        except Exception as e:
+            log.warning(f"memory read failed: {e}")
+            return None
+
+    def cpu_reading(self) -> Optional[dict]:
+        """{'busy': 18, 'idle': 82} or None."""
+        try:
+            out = subprocess.run(["top", "-l", "1", "-n", "0"],
+                                 capture_output=True, text=True).stdout
+            m = re.search(r"CPU usage:\s+([\d.]+)%\s+user,\s+([\d.]+)%\s+sys,"
+                          r"\s+([\d.]+)%\s+idle", out)
+            if not m:
+                return None
+            user, sys_, idle = (float(m.group(i)) for i in (1, 2, 3))
+            return {"busy": round(user + sys_), "idle": round(idle)}
+        except Exception as e:
+            log.warning(f"cpu read failed: {e}")
+            return None
+
+    def status_row(self, max_age: float = 5.0) -> list[dict]:
+        """The bottom-left instrumentation line, ready for panels.metrics().
+
+        NEVER BLOCKS. Measured, `top -l 1` alone is 363ms of a 343ms row, and
+        home is re-rendered at startup, on every panel dismissal, and on every
+        tick of the now-playing poller — paying a third of a second each time
+        to redraw furniture is the wrong trade. So this returns the last
+        reading and refreshes behind it. The row is glanceable context; five
+        seconds of staleness is invisible, and a stalled pipeline is not.
+
+        The spoken answer does NOT come through here: "what's my CPU" calls
+        `cpu_reading` directly and gets a fresh number, because a question
+        deserves a real answer even if it costs 363ms.
+
+        Each reading that fails is simply absent. A row with two of three is
+        still useful; a row that refuses to render because the battery could
+        not be read is not.
+        """
+        now = time.time()
+        with self._status_lock:
+            fresh = (now - self._status_at) < max_age
+            busy = self._status_busy
+            cached = list(self._status_cache)
+            if not fresh and not busy:
+                self._status_busy = True
+                spawn = True
+            else:
+                spawn = False
+        if spawn:
+            t = threading.Thread(target=self._refresh_status,
+                                 name="nova-status", daemon=True)
+            t.start()
+        return cached
+
+    def _refresh_status(self) -> None:
+        """Take the readings and store them. Runs off the pipeline thread."""
+        try:
+            out: list[dict] = []
+            cpu = self.cpu_reading()
+            if cpu:
+                out.append({"label": "CPU", "value": f"{cpu['busy']}%",
+                            "pct": cpu["busy"] / 100.0,
+                            # The only reading that should ever catch his eye.
+                            "alert": cpu["busy"] >= 85})
+            mem = self.memory_reading()
+            if mem:
+                out.append({"label": "Memory", "value": f"{mem['used_gb']:.1f} GB",
+                            "pct": mem["pct"] / 100.0,
+                            "alert": mem["pct"] >= 90})
+            bat = self.battery_reading()
+            if bat:
+                out.append({"label": "Battery", "value": f"{bat['level']}%",
+                            "pct": bat["level"] / 100.0,
+                            "flag": "charging" if bat["charging"] else
+                                    ("plugged" if bat["ac"] else ""),
+                            "alert": bat["level"] <= 15 and not bat["ac"]})
+        except Exception as e:                       # never take the row down
+            log.warning(f"status refresh failed: {e}")
+            out = None
+        with self._status_lock:
+            if out is not None:
+                self._status_cache = out
+            self._status_at = time.time()
+            self._status_busy = False
+
     def _battery_status(self) -> str:
-        output = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
-        m = re.search(r"(\d+)%", output)
-        if not m:
+        self.showed_system = True
+        b = self.battery_reading()
+        if b is None:
             return "I couldn't read the battery level."
-        level = int(m.group(1))
-        if "AC Power" in output:
+        level = b["level"]
+        if b["ac"]:
             status = "and charging" if level < 100 else "and fully charged"
         elif level > 20:
             status = "on battery"
@@ -591,38 +742,23 @@ class NovaTools:
         return f"Battery is at {level} percent, {status}."
 
     def _memory_status(self) -> str:
-        """Free/used RAM from vm_stat (page counts) + total from sysctl."""
-        try:
-            total = int(subprocess.run(["sysctl", "-n", "hw.memsize"],
-                                       capture_output=True, text=True).stdout.strip())
-            vm = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
-            page = int(re.search(r"page size of (\d+) bytes", vm).group(1))
-            def pages(name):
-                m = re.search(rf"{name}:\s+(\d+)\.", vm)
-                return int(m.group(1)) if m else 0
-            free = (pages("Pages free") + pages("Pages inactive")) * page
-            used = total - free
-            gb = 1024 ** 3
-            pct = round(used / total * 100)
-            return (f"You're using about {used/gb:.1f} of {total/gb:.0f} gigabytes of memory, "
-                    f"roughly {pct} percent, with {free/gb:.1f} gigabytes free.")
-        except Exception as e:
-            log.warning(f"memory stat failed: {e}")
+        self.showed_system = True
+        m = self.memory_reading()
+        if m is None:
             return "I couldn't read the memory usage."
+        return (f"You're using about {m['used_gb']:.1f} of {m['total_gb']:.0f} "
+                f"gigabytes of memory, roughly {m['pct']} percent, with "
+                f"{m['free_gb']:.1f} gigabytes free.")
 
     def _cpu_status(self) -> str:
-        try:
-            out = subprocess.run(["top", "-l", "1", "-n", "0"], capture_output=True, text=True).stdout
-            m = re.search(r"CPU usage:\s+([\d.]+)%\s+user,\s+([\d.]+)%\s+sys,\s+([\d.]+)%\s+idle", out)
-            if not m:
-                return "I couldn't read the CPU usage."
-            user, sys_, idle = (float(m.group(i)) for i in (1, 2, 3))
-            busy = round(user + sys_)
-            mood = "mostly idle" if busy < 25 else "working steadily" if busy < 70 else "under heavy load"
-            return f"CPU is at about {busy} percent, {mood}. {round(idle)} percent idle."
-        except Exception as e:
-            log.warning(f"cpu stat failed: {e}")
+        self.showed_system = True
+        c = self.cpu_reading()
+        if c is None:
             return "I couldn't read the CPU usage."
+        busy = c["busy"]
+        mood = ("mostly idle" if busy < 25 else
+                "working steadily" if busy < 70 else "under heavy load")
+        return f"CPU is at about {busy} percent, {mood}. {c['idle']} percent idle."
 
     def _disk_status(self) -> str:
         try:
@@ -1111,6 +1247,25 @@ class NovaTools:
     #   repeat    — Spotify `repeating` (bool), Music `song repeat` (off/one/all)
     #   previous  — Music also has `back track` (restart-then-previous)
     _PLAYERS = ("Spotify", "Music")     # preference order
+
+    def any_player_running(self) -> bool:
+        """Cheap pre-check for the now-playing poller.
+
+        `_running_player` costs one subprocess per player per call, and the
+        poller runs forever while the answer is almost always no. NSWorkspace
+        answers from memory, and — unlike `tell application "Spotify"` — it
+        cannot start anything by asking.
+
+        Returns True when it genuinely cannot tell, so the real check still
+        gets its say and a missing PyObjC can never make Now Playing vanish.
+        """
+        try:
+            from AppKit import NSWorkspace
+            names = {a.localizedName() for a
+                     in NSWorkspace.sharedWorkspace().runningApplications()}
+            return any(p in names for p in self._PLAYERS)
+        except Exception:
+            return True
 
     def _running_player(self, launch_if_none: bool = False) -> Optional[str]:
         """Which music app is running (Spotify preferred). Never auto-launches
@@ -1692,9 +1847,89 @@ class NovaTools:
         return f"Opening {path.name.replace('_', ' ')}."
 
     def _web_search(self, query: str) -> str:
+        """Search the web, and SHOW the work.
+
+        This used to be three lines: build a URL, `open` it, say "Searching for
+        X." Nova never looked at the page, so the one thing she could not tell
+        him about a search was what it found.
+
+        Two things changed. It goes through `browser_control` now, so the
+        search lands in whichever browser is ALREADY running rather than in
+        whatever macOS considers default — every other part of Nova works that
+        way and this was the odd one out. And it reads the results back off the
+        page she just opened, which costs no additional network call: the
+        browser already fetched it.
+
+        What it reads is deliberately narrow — titles and hostnames, nothing
+        else, and none of it reaches the LLM. A web page is untrusted text, and
+        this same Nova can type, click and move files. Body content in the
+        prompt would make any page she visits able to talk to her. So the
+        spoken answer is templated from titles here, in Python, the same way
+        every other number and fact she speaks is.
+        """
+        import panels as P
+        self.touched_mac = True
         url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
-        subprocess.run(["open", url], check=False)
-        return f"Searching for {query}."
+
+        try:
+            import browser_control as B
+        except Exception as exc:
+            log.warning(f"browser_control unavailable ({exc})")
+            subprocess.run(["open", url], check=False)
+            return f"Searching for {query}."
+
+        prog = P.Progress(self._on_progress, "Searching the web",
+                          ["Opening the browser", "Loading the page",
+                           "Reading the results"], detail=query)
+        prog.start()
+
+        opened = B.open_url(url, f"a search for {query}", new_tab=True)
+        if opened.startswith("I couldn't"):
+            prog.fail("The browser wouldn't open.")
+            return f"I couldn't open a search for {query}."
+        prog.advance()
+
+        ok, results, why = B.read_results(on_ready=prog.advance)
+        if not ok or not results:
+            # Honest degradation: the search DID happen and it is on his
+            # screen. Only the reading failed, and the difference matters.
+            prog.fail(why)
+            return (f"I searched for {query}. It's on your screen, but I "
+                    f"couldn't read the results off the page.")
+
+        prog.finish(P.items(
+            [{"title": r["title"][:90], "meta": r["host"]} for r in results[:6]],
+            title="What's on the page"))
+        return self._speak_results(query, results)
+
+    @staticmethod
+    def _speak_results(query: str, results: list) -> str:
+        """One sentence about what came back. Templated, never generated.
+
+        Hostnames are spoken as their name rather than their domain — "from
+        imdb", not "from imdb dot com" — because he is listening, not reading.
+        """
+        def site(host: str) -> str:
+            parts = [p for p in (host or "").split(".") if p]
+            return parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
+
+        def clean(title: str) -> str:
+            # A page title is untrusted text. It cannot do anything spoken
+            # aloud, but it can be enormous, so it gets cut to a sentence.
+            t = " ".join((title or "").split())
+            return t[:80].rstrip(" -|·") if len(t) > 80 else t
+
+        top = results[0]
+        where = site(top.get("host", ""))
+        line = f"Top result for {query} is {clean(top.get('title'))}"
+        line += f", from {where}." if where else "."
+        others = [site(r.get("host", "")) for r in results[1:3]]
+        others = [o for o in others if o and o != where]
+        if len(others) == 2:
+            line += f" There's also {others[0]} and {others[1]}."
+        elif len(others) == 1:
+            line += f" There's also {others[0]}."
+        return line
 
 
 def _which(cmd: str) -> bool:

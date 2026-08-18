@@ -118,6 +118,8 @@ SUITES = {
                 "play-by-name works and shadows no transport command", False, False),
     "views":   ("test_views.py",
                 "voice navigation reaches the right screen and fakes nothing", False, False),
+    "home":    ("test_home.py",
+                "home shows what belongs and hides what doesn't", False, False),
     "market":  ("test_market.py",
                 "market answers are real numbers, and never advice", False, False),
     "act":     ("test_actuation.py",
@@ -166,7 +168,7 @@ def main() -> int:
     for key in SUITES:
         ap.add_argument(f"--{key}", action="store_true", help=SUITES[key][1])
     ap.add_argument("--quick", action="store_true",
-                    help="every fast suite: env, routing, loop, wake, cache, rag, tts, weather, music, views, echo (no audio)")
+                    help="every fast suite: env, routing, loop, wake, cache, rag, tts, weather, music, views, home, echo (no audio)")
     ap.add_argument("--all", action="store_true", help="every suite")
     args = ap.parse_args()
 
@@ -174,7 +176,8 @@ def main() -> int:
         chosen = list(SUITES)
     elif args.quick:
         chosen = ["env", "routing", "loop", "wake", "cache", "rag", "tts",
-                  "weather", "music", "views", "market", "act", "conf", "echo"]
+                  "weather", "music", "views", "home", "market", "act",
+                  "conf", "echo"]
     else:
         chosen = [k for k in SUITES if getattr(args, k)]
     if not chosen:

@@ -20,6 +20,9 @@ struct ShellView: View {
     @State private var typing = false
     @State private var draft = ""
     @FocusState private var draftFocused: Bool
+    /// Cards keep their identity across slots, so moving one by voice makes it
+    /// FLY there rather than blink out of one place and into another.
+    @Namespace private var cardSpace
 
     init() {
         _vm = StateObject(wrappedValue: ShellViewModel())
@@ -66,7 +69,9 @@ struct ShellView: View {
 
     private var fullShell: some View {
         VStack(spacing: 0) {
-            if isHome {
+            if isWorking {
+                workLayout
+            } else if isHome {
                 homeLayout
             } else {
                 answerLayout
@@ -75,33 +80,121 @@ struct ShellView: View {
         }
         .padding(28)
         .animation(.easeOut(duration: 0.24), value: vm.view)
+        .animation(.easeOut(duration: 0.30), value: panel.title)
         .animation(.easeOut(duration: 0.22), value: panel.isEmpty)
+        .animation(.spring(response: 0.5, dampingFraction: 0.82), value: isWorking)
+        // Cards rearrange on a spring rather than a fade: a card that MOVES
+        // reads as the same card in a new place, which is the whole point of
+        // being able to move one.
+        .animation(.spring(response: 0.46, dampingFraction: 0.84),
+                   value: slotSignature)
     }
 
     private var isHome: Bool { vm.view == "home" }
 
-    /// HOME: the orb is the centre of the screen, the greeting sits under it,
-    /// and what he wants at a glance flanks it. This is his concept, and it is
-    /// a different shape from an answer — an answer steps the orb aside, home
-    /// puts it in the middle.
+    /// True while Nova is showing her working — a live step list on screen.
+    private var isWorking: Bool {
+        panel.blocks.contains { if case .steps = $0.content { return true }
+                                return false }
+    }
+
+    /// Which card is in which slot, as one comparable value. This is what a
+    /// move animates against.
+    private var slotSignature: String {
+        panel.blocks.map { "\($0.card):\($0.slot)" }.sorted().joined(separator: ",")
+    }
+
+    /// HOME: the orb is the centre of the SCREEN — not the centre of whatever
+    /// space the cards leave over.
+    ///
+    /// That distinction is the whole layout. Flanking the orb with two columns
+    /// in an HStack means an empty column on one side shoves it off centre,
+    /// and home spends most of its life with an uneven number of cards (Now
+    /// Playing comes and goes on its own). Stacking instead keeps the orb
+    /// nailed to the middle no matter what appears beside it.
     private var homeLayout: some View {
-        HStack(alignment: .center, spacing: 24) {
-            homeCards(Array(panel.blocks.prefix(1)))
-                .frame(width: 250)
+        ZStack {
+            HStack(alignment: .top, spacing: 24) {
+                slotColumn(["L1", "L2", "L3"])
+                Spacer(minLength: 40)
+                slotColumn(["R1", "R2", "R3"])
+            }
 
             VStack(spacing: 10) {
-                Spacer(minLength: 0)
                 OrbView(state: vm.state, density: .reactor)
                     .frame(maxWidth: 380, maxHeight: 380)
                     .aspectRatio(1, contentMode: .fit)
                 greeting
                 readout
+            }
+            // The orb owns the middle and must never be pushed by a card, so
+            // it does not participate in the columns' layout at all.
+            .allowsHitTesting(false)
+
+            VStack {
+                Spacer(minLength: 0)
+                HStack {
+                    statusRow
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    /// One side of the home grid. Empty slots take no room, so a column with
+    /// one card sits at the top rather than floating in the middle of a gap.
+    private func slotColumn(_ slots: [String]) -> some View {
+        VStack(spacing: 14) {
+            ForEach(slots, id: \.self) { slot in
+                if let block = panel.block(inSlot: slot) {
+                    PanelView(panel: Panel(single: block), tint: vm.state.tint,
+                              compact: true)
+                        .matchedGeometryEffect(id: block.card.isEmpty ? slot : block.card,
+                                               in: cardSpace)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.94))
+                                .combined(with: .move(edge: .bottom)),
+                            removal: .opacity.combined(with: .scale(scale: 0.96))))
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(width: 250)
+    }
+
+    /// CPU, memory and battery along the very bottom left. Absent entirely
+    /// unless Nova is showing it — at launch, or because he just asked.
+    @ViewBuilder
+    private var statusRow: some View {
+        let readings = panel.statusReadings
+        if !readings.isEmpty {
+            StatusRow(readings: readings, tint: vm.state.tint)
+                .transition(.opacity.combined(with: .move(edge: .leading)))
+                .animation(.easeOut(duration: 0.4), value: readings.count)
+        }
+    }
+
+    /// WORKING: the orb steps aside and shrinks, and the room it gives up
+    /// becomes what she is doing right now.
+    ///
+    /// Same orb, same panel renderer — only the proportions change, so the
+    /// transition is a movement rather than a screen swap. That is what makes
+    /// it read as Nova turning to a task instead of the app changing pages.
+    private var workLayout: some View {
+        HStack(spacing: 26) {
+            VStack(spacing: 8) {
+                Spacer(minLength: 0)
+                OrbView(state: vm.state, density: .reactor)
+                    .frame(maxWidth: 230, maxHeight: 230)
+                    .aspectRatio(1, contentMode: .fit)
+                readout
                 Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity)
+            .frame(width: 260)
 
-            homeCards(Array(panel.blocks.dropFirst(1)))
-                .frame(width: 250)
+            PanelView(panel: panel, tint: vm.state.tint)
+                .frame(maxWidth: .infinity)
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
         }
     }
 
@@ -118,39 +211,29 @@ struct ShellView: View {
         }
     }
 
-    /// The greeting, under the orb, as in his concept.
+    /// The greeting, under the orb, as in his concept — and it goes away the
+    /// moment he speaks. The backend signals that by clearing the panel title
+    /// (views.py `spoken_yet`), so BOTH halves hang off it. Conditioning only
+    /// the "good evening" line left NICHOLAS marooned under the orb for the
+    /// rest of the session.
+    @ViewBuilder
     private var greeting: some View {
-        VStack(spacing: 2) {
-            if !panel.title.isEmpty {
+        if !panel.title.isEmpty {
+            VStack(spacing: 2) {
                 Text(panel.title.uppercased())
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .tracking(2.6)
                     .foregroundStyle(.white.opacity(0.45))
+                Text(userName.uppercased())
+                    .font(.system(size: 30, weight: .light))
+                    .tracking(6)
+                    .foregroundStyle(vm.state.tint.opacity(0.95))
             }
-            Text(userName.uppercased())
-                .font(.system(size: 30, weight: .light))
-                .tracking(6)
-                .foregroundStyle(vm.state.tint.opacity(0.95))
+            .transition(.opacity)
         }
     }
 
     private var userName: String { "Nicholas" }
-
-    /// Home's blocks as cards down a side column, rather than one long panel.
-    @ViewBuilder
-    private func homeCards(_ blocks: [PanelBlock]) -> some View {
-        if blocks.isEmpty {
-            Color.clear
-        } else {
-            VStack(spacing: 14) {
-                ForEach(blocks) { b in
-                    PanelView(panel: Panel(single: b), tint: vm.state.tint,
-                              compact: true)
-                }
-                Spacer(minLength: 0)
-            }
-        }
-    }
 
     private var orbColumn: some View {
         VStack(spacing: 6) {

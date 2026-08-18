@@ -254,6 +254,26 @@ class NovaMarket:
                              "meta": f"{q['price']:,.2f}   {self._move(q)}"})
         return [P.items(rows, title="Watchlist")] if rows else []
 
+    # ── The home card ─────────────────────────────────────────────────────────
+    def home_block(self) -> Optional[dict]:
+        """A compact watchlist card for home.
+
+        BLOCKING — one network round trip per ticker — and that is fine,
+        because views.py wraps it in a tile that only ever calls this from a
+        background thread. It deliberately does NOT cache here: two cache
+        layers with different clocks is how the card ends up pinned to
+        whatever the inner one happened to hold when the outer one primed.
+        """
+        if not self.enabled:
+            return None
+        rows = []
+        for sym in self.watchlist[:5]:
+            q = M.quote(sym)
+            if q.get("ok"):
+                rows.append({"title": q["symbol"], "detail": f"{q['price']:,.2f}",
+                             "meta": self._move(q)})
+        return P.items(rows, title="Markets") if rows else None
+
     # ── The finance screen ────────────────────────────────────────────────────
     def screen_payload(self) -> dict:
         """What "go to finance" shows: the indices and his watchlist."""

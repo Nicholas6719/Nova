@@ -137,6 +137,39 @@ go to the weather  ==>  view
 show me the finance screen  ==>  view
 open the memory panel  ==>  view
 
+# ── The home surface: clearing it, restoring it, rearranging it ─────────────
+# Written BEFORE the code, per the regression-first rule. The near-misses
+# below matter more than the hits: "move X to Y" is the shape of a FILE move,
+# and views runs at stage 2c, five stages before file intents ever see it.
+clear home  ==>  view
+nova clear home  ==>  view
+clear the home screen  ==>  view
+clear my screen  ==>  view
+restore home  ==>  view
+bring back the cards  ==>  view
+put back everything  ==>  view
+move the now playing to the bottom right  ==>  view
+move now playing bottom right  ==>  view
+put markets top left  ==>  view
+move music to the left  ==>  view
+stick the weather in the bottom left  ==>  view
+send the stocks to the middle right  ==>  view
+
+# ...and the file moves that share the exact same verb and must never be
+#    claimed by the home grid.
+move my resume to Downloads  ==>  files
+move the report to Documents  ==>  files
+clear my calendar  ==>  llm
+clear the table  ==>  llm
+#    These three reach neither the home grid nor a file move. Recorded as they
+#    actually behave rather than as they ought to: "that file" has no
+#    searchable token so file_intents declines it on purpose, and the other two
+#    are a PRE-EXISTING gap in file phrasing, not something the home grid
+#    introduced. Verified: views.detect_intent returns None for all three.
+move that file to the desktop  ==>  unsupported
+put the invoice in Documents  ==>  llm
+move over  ==>  unsupported
+
 # ── ...and the collisions a loose navigation regex would cause. Every one of
 #    these contains a navigation word and must NOT be stolen. This is the same
 #    failure family as the memory regex eating "what's my calendar". ─────────
