@@ -25,13 +25,14 @@
     "_grace_note": "How long Nicholas has to START his command after saying the wake word. The wake word is replayed from the pre-wake buffer, so the recorder already counts itself as 'speaking' and the normal 700ms silence cutoff applied immediately \u2014 saying 'Nova', pausing to think, then speaking looked like the wake word not working. Only applies until he starts talking; normal cutoffs take over after that.",
     "min_speech_duration_s": 0.5,
     "command_max_duration_s": 15.0,
-    "echo_cancellation": false,
+    "echo_cancellation": true,
     "echo_stream_delay_ms": 120,
     "_aec_note": "OFF. Turning it on keeps mic frames during playback so she can be interrupted \u2014 and in his REAL room that made her hear herself, transcribe it, and answer herself in a loop. The 27-36 dB measurement was against a SIMULATED speaker path; his room is the test that matters and it failed. The canceller and the self-hearing guard both stay; this flag is what needs his ears before it goes back on.",
     "confidence_gate": true,
     "_confidence_note": "Gate action on how sure Whisper was. Nova has no transcript on screen any more, so a mishear is otherwise silent. Measured over 270 clips (18 commands x 3 voices x 5 noise levels): a -0.50 floor catches 75% of mishears while asking again unnecessarily only 5% of the time. The bar rises with consequence - chat is cheap to get wrong, sending a message is not, and anything outbound is read back regardless of confidence. Set false to act on every transcript as Nova did before.",
-    "barge_in": false,
-    "_barge_in_note": "Keep a WAKE-ONLY ear open while Nova is speaking, so 'Nova' can interrupt her. Needs echo_cancellation and a real reference (the system tap), so it does nothing on its own. The mic gate is now SPLIT: the command recorder still only ever sees frames while Nova is silent - which is what makes end-of-speech detection work, and holding that gate open was what made every turn run to the 15s cap - while a second queue carries cancelled audio to the wake detector continuously."
+    "barge_in": true,
+    "_barge_in_note": "Keep a WAKE-ONLY ear open while Nova is speaking, so 'Nova' can interrupt her. Needs echo_cancellation and a real reference (the system tap), so it does nothing on its own. The mic gate is now SPLIT: the command recorder still only ever sees frames while Nova is silent - which is what makes end-of-speech detection work, and holding that gate open was what made every turn run to the 15s cap - while a second queue carries cancelled audio to the wake detector continuously.",
+    "_echo_note": "ON. This was off for a long time because enabling it used to hold the mic gate permanently open, so the command recorder's VAD never saw a quiet frame and every turn ran to the 15s cap. That is fixed: the gate is SPLIT, _audio_q is still shut while Nova speaks, and only the wake detector reads the cancelled stream. Cancels Nova's OWN voice (27-36 dB) which is all barge-in needs; the system tap for music is separate and still off."
   },
   "tts": {
     "primary": "kokoro",
