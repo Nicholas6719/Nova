@@ -1841,6 +1841,18 @@ class NovaTools:
                 return
             if (self._player_get(app, "player state") or "").lower() != "playing":
                 return                  # nothing audible to duck
+            # PAUSING beats ducking, and he asked for exactly this: with the
+            # music stopped there is nothing of it in the microphone at all.
+            # Measured, ducking to 20% still left Whisper mishearing him at his
+            # desk — 20% of loud is not quiet. The player is paused for the
+            # whole conversation and resumed on the single path back to wake
+            # mode, so it never stutters between turns.
+            if bool(self.config.get("music", {})
+                    .get("pause_while_listening", True)):
+                if self._player_do(app, "pause"):
+                    self._ducked = (app, None)   # None level => WE paused it
+                    log.info(f"paused {app} while listening")
+                return
             cur = self._player_get(app, "sound volume")
             level = int(float(cur))
             target = int(self.config.get("music", {}).get("duck_level", 20))
@@ -1861,6 +1873,10 @@ class NovaTools:
         app, level = state
         self._ducked = None             # cleared FIRST, so a failure cannot
         try:                            # wedge Nova into never ducking again
+            if level is None:           # we paused it, so we play it again
+                self._player_do(app, "play")
+                log.info(f"resumed {app} after listening")
+                return
             self._player_do(app, f"set sound volume to {level}")
             log.info(f"restored {app} volume to {level}")
         except Exception as exc:

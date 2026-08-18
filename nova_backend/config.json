@@ -100,7 +100,8 @@
   "music": {
     "duck_while_listening": true,
     "duck_level": 20,
-    "_note": "Turn the music down while Nova is listening, then put it back when the conversation ends. Music coming out of the speakers goes into the microphone: measured with music mixed into real command audio, Whisper went from 0% word error in silence to 9.7% at full volume and 709% when loud, where it starts transcribing the music itself. Ducking to 20% recovers most of that. The PLAYER's volume is ducked, never the system's \u2014 system volume would take Nova's own voice down with it. Set false to leave the music alone."
+    "_note": "What happens to his music while Nova is listening. PAUSE is the default and the only thing that actually works: ducking to 20% still left Whisper mishearing him at his desk, because 20% of loud is not quiet. With the player paused there is nothing of it in the microphone at all. Set pause_while_listening false to fall back to ducking to duck_level instead. Either way it is the PLAYER, never the system volume, which would take Nova's own voice down with it. This covers players Nova can control; audio from a browser or a video call needs the system-audio tap, which is a separate build.",
+    "pause_while_listening": true
   },
   "weather": {
     "enabled": true,
@@ -135,5 +136,10 @@
     "_home_tick_note": "How often home re-checks the world while he is looking at it. This is what makes Now Playing appear when HE starts a song rather than when he asks; measured, it appeared 6s after Spotify started at the old 4s tick, which does not feel alive. Cheap by construction: the music check short-circuits on NSWorkspace (0.1ms) when no player is running, every other tile caches on a much longer interval, and nothing is sent unless the payload actually changed. 0 disables it and home only updates when something asks it to.",
     "status_recall_seconds": 10,
     "_status_recall_note": "How long the bottom status row stays after he asks about CPU, memory or battery. The clock starts when Nova STOPS TALKING, not when the handler runs, so it is ten seconds of him looking at the number rather than ten seconds of her reading it out."
+  },
+  "sounds": {
+    "enabled": true,
+    "volume": 0.5,
+    "_note": "Nova's four cues, synthesised at import \u2014 no audio files anywhere. boot plays while the engines come up, ready when she is online, wake when the wake word fires (in puck mode too), and rest when a conversation ends and she goes back to waiting. wake and rest are the same two notes inverted: a fifth up to arrive, a fifth down to withdraw, so they are tellable apart across a room. The wake cue is 170ms and BLOCKS, because it has to finish before the microphone opens or the VAD hears it as speech. enabled false makes Nova silent again; volume is 0..1."
   }
 }

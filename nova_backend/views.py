@@ -195,6 +195,8 @@ _SLOT_ALIASES: dict[str, str] = {
     # Bare sides land at the top of that side, which is what "put it on the
     # left" means to a person.
     "left": "L1", "left side": "L1", "right": "R1", "right side": "R1",
+    "left hand side": "L1", "right hand side": "R1",
+    "lefthand side": "L1", "righthand side": "R1",
 }
 
 _CARD_ALIASES: dict[str, str] = {
@@ -240,9 +242,35 @@ _MOVE_RE = re.compile(
     # says it. Safe to relax because BOTH ends still have to be known names.
     r"(?:(?:to|into|over\s+to|down\s+to|up\s+to|on|in)\s+)?(?:the\s+)?"
     r"(" + _SLOT_ALT + r")"
-    r"(?:\s+(?:corner|side|slot|spot|position))?\s*[.?!]?$",
+    r"(?:\s+(?:corner|side|slot|spot|position))?"
+    # "...of the screen" is how he actually said it, and the end-anchor threw
+    # the whole command away: "move the music widget to the right side of the
+    # screen" was answered with "I can't do that one yet."
+    r"(?:\s+(?:of|on)\s+(?:the|my)\s+(?:screen|window|display|home|panel))?"
+    r"\s*[.?!]?$",
     re.IGNORECASE,
 )
+
+
+def _move_match(text: str):
+    """Match a card move against the utterance, or any sentence in it.
+
+    Whisper repeats him when he says something twice while waiting — a real
+    transcript from his desk was "Move now playing to bottom right. Move now
+    playing to the bottom." Anchoring against the whole string threw both
+    halves away. Each sentence gets its own chance, latest first, so the last
+    thing he said wins.
+    """
+    t = (text or "").strip()
+    m = _MOVE_RE.match(t)
+    if m:
+        return m
+    parts = [p.strip() for p in re.split(r"[.?!]+", t) if p.strip()]
+    for part in reversed(parts):
+        m = _MOVE_RE.match(part)
+        if m:
+            return m
+    return None
 
 # 6. Clearing home down to the orb, and putting it back. Anchored like
 #    everything else: "clear my calendar" is not this, and never reaches it.
@@ -595,7 +623,7 @@ class NovaViews:
             return "clear_home"
         if _RESTORE_RE.match(t):
             return "restore_home"
-        if _MOVE_RE.match(t):
+        if _move_match(t):
             return "move_card"
 
         if _HOME_RE.match(t):
@@ -682,7 +710,7 @@ class NovaViews:
         which is the only resolution that leaves every card still on screen —
         evicting the occupant would silently lose him a card he never mentioned.
         """
-        m = _MOVE_RE.match((text or "").strip())
+        m = _move_match(text)
         if not m:                                   # unreachable via detect
             return "I didn't catch where you wanted that."
         card = _CARD_ALIASES.get(m.group(1).lower(), "")

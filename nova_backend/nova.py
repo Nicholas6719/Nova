@@ -227,7 +227,13 @@ class VoiceAssistant:
 
     # ── Init ──────────────────────────────────────────────────────────────────────
     def __init__(self) -> None:
+        # The boot sequence starts before anything else does, because it is
+        # describing exactly this: the engines coming up. It runs on its own
+        # thread, so it costs startup nothing.
+        from sounds import NovaSounds
         self.config = load_config()
+        self.sounds = NovaSounds(self.config)
+        self.sounds.play("boot")
         self._init_state()
         self._init_engines()
 
@@ -250,6 +256,12 @@ class VoiceAssistant:
         # `_last_response` because that only becomes true after she ANSWERS,
         # which is a beat too late to be a greeting.
         self._conversation_started = False
+        # A harness builds the assistant through _init_state alone, so the
+        # cues have to exist here too — silent by default in that case, since
+        # nothing has configured or started them.
+        if not hasattr(self, "sounds"):
+            from sounds import NovaSounds
+            self.sounds = NovaSounds(self.config)
         # A SOFT one-shot follow-up armed by a calendar read ("want to hear
         # what's coming up?"). It only fires on an affirmative reply and never
         # eats an unrelated next command.
@@ -311,6 +323,8 @@ class VoiceAssistant:
         self._show_home()
         self._warm_prompt_cache()
         log.info("Nova ready.")
+        self.sounds.play("ready")   # systems online
+
 
     def _warm_prompt_cache(self) -> None:
         """Pre-process the unchanging head of the system prompt so the FIRST
@@ -837,6 +851,10 @@ class VoiceAssistant:
     def _main_loop(self) -> None:
         in_conversation = False   # once awake, keep listening without the wake word
         empty_turns = 0           # consecutive unintelligible turns
+        # The first pass through is Nova arriving, not a conversation ending —
+        # `ready` has just played and a `rest` on top of it would be two cues
+        # for one event.
+        first_wake = True
         while True:
             if self.is_muted or not self.is_awake:
                 in_conversation = False
@@ -853,6 +871,13 @@ class VoiceAssistant:
                 # a handler raising) and is a no-op when nothing was ducked.
                 if self._duck_enabled:
                     self.tools.restore_music()
+                # Deliberately the wake cue inverted: a fifth DOWN, so he can
+                # tell arriving from leaving without being told which is which.
+                # Only when a conversation actually ended — not at startup,
+                # where `ready` has just played.
+                if not first_wake:
+                    self.sounds.play("rest")
+                first_wake = False
                 log.info("Waiting for wake word…")
                 wake_detected = self.stt.record_wake(
                     wake_keywords=self.config["wake_word"]["keywords"],
@@ -862,6 +887,11 @@ class VoiceAssistant:
                     continue
                 just_woke = True
                 empty_turns = 0
+                # Blocking, and short. It has to be OVER before record_command
+                # opens the mic, or the VAD reads Nova's own chime as speech
+                # onset and Whisper is handed a note instead of a word. Fires
+                # in puck mode too — this is the one path into a conversation.
+                self.sounds.play_and_wait("wake")
                 # He said "Nova". The conversation has started, so the welcome
                 # and the status row go now — not when she finishes answering.
                 # Hooking this to the reply meant "Good morning, NICHOLAS" was

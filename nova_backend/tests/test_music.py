@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path as _Path
 
 TESTS_DIR = _Path(__file__).resolve().parent
@@ -313,15 +314,25 @@ section("DUCKING: TURN THE MUSIC DOWN TO HEAR HIM, AND ALWAYS PUT IT BACK")
 # recovers most of it. The bug to fear here is not failing to duck — it is
 # failing to RESTORE and leaving his music quiet.
 class DuckRig(NovaTools):
-    def __init__(self, state="playing", volume="80", player="Spotify"):
-        self.config = {"music": {"duck_level": 20}}
+    """The duck/pause worker with the OS removed.
+
+    Drives `_duck_music_now` rather than `duck_music`: the public one hands the
+    work to a thread (534ms of AppleScript used to sit between the wake word
+    and the microphone opening, eating his head start), so asserting straight
+    after it would be a race. The thread is checked separately, below.
+    """
+
+    def __init__(self, state="playing", volume="80", player="Spotify",
+                 pause=False):
+        self.config = {"music": {"duck_level": 20, "pause_while_listening": pause}}
         self._ducked = None
         self._vol = volume
         self._state = state
         self._player = player
         self.sets = []
+        self.cmds = []
 
-    def _osa(self, script):
+    def _osa(self, script, timeout=10.0):
         if "set sound volume to" in script:
             self.sets.append(int(script.rsplit(" ", 1)[-1]))
             self._vol = script.rsplit(" ", 1)[-1]
@@ -330,19 +341,43 @@ class DuckRig(NovaTools):
             return True, self._vol
         if "player state" in script:
             return True, self._state
+        for word in ("pause", "play"):
+            if script.endswith(" to " + word):
+                self.cmds.append(word)
+                self._state = "paused" if word == "pause" else "playing"
         return True, ""
 
     def _running_player(self, launch_if_none=False):
         return self._player
 
 
-r = DuckRig()
-r.duck_music()
-check(r.sets == [20], "music playing loudly is ducked", f"volume sets: {r.sets}")
+# ── The default: PAUSE. Ducking to 20% still left him mis-heard at his desk,
+#    because 20% of loud is not quiet. Paused, there is nothing of it in the
+#    microphone at all.
+r = DuckRig(pause=True)
+r._duck_music_now()
+check(r.cmds == ["pause"], "music is PAUSED while Nova listens", f"{r.cmds}")
+check(r.sets == [], "and its volume is left alone", f"{r.sets}")
+check(r._ducked == ("Spotify", None), "remembered as ours to resume", f"{r._ducked}")
+r.restore_music()
+check(r.cmds == ["pause", "play"], "and resumed afterwards", f"{r.cmds}")
+check(r._ducked is None, "the state is cleared")
+
+# Music HE paused must not be started by Nova finishing a conversation.
+r2 = DuckRig(state="paused", pause=True)
+r2._duck_music_now()
+check(r2.cmds == [], "music that was already paused is left alone", f"{r2.cmds}")
+r2.restore_music()
+check(r2.cmds == [], "and is not started up afterwards", f"{r2.cmds}")
+
+# ── The fallback, for when he wants the music to keep playing.
+r = DuckRig(pause=False)
+r._duck_music_now()
+check(r.sets == [20], "with pausing off, loud music is ducked", f"volume sets: {r.sets}")
 check(r._ducked is not None, "the original volume is remembered")
 
 before = len(r.sets)
-r.duck_music()
+r._duck_music_now()
 check(len(r.sets) == before, "ducking twice does not touch the player again")
 
 r.restore_music()
@@ -352,6 +387,14 @@ check(r._ducked is None, "and the ducked state is cleared")
 before = len(r.sets)
 r.restore_music()
 check(len(r.sets) == before, "restoring when not ducked does nothing")
+
+# ── It must never delay the microphone.
+r3 = DuckRig(pause=True)
+_t0 = time.time()
+r3.duck_music()
+check(time.time() - _t0 < 0.05,
+      "duck_music returns immediately — it must not eat his head start",
+      f"{(time.time()-_t0)*1000:.0f}ms")
 
 # Nothing audible -> leave it alone entirely.
 r = DuckRig(state="paused")
