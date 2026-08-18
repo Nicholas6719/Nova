@@ -495,6 +495,17 @@ class STTEngine:
                 pre_roll.append(frame)
 
             if speaking and total_ms >= hard_cap_ms:
+                # Hitting the CAP means the VAD never saw him stop — silence
+                # detection failed, it did not merely take a while. That is a
+                # different fault from a long sentence and it is invisible from
+                # the outside: every turn just feels sluggish. It cost a whole
+                # test session to find, from timestamps, when echo cancellation
+                # held the mic gate permanently open and the VAD never got a
+                # quiet frame. Say so, loudly, once per turn.
+                log.warning(
+                    f"Recording hit the {max_duration_s:.0f}s cap without ever "
+                    "detecting silence — end-of-speech detection is not working. "
+                    "Every turn will feel slow until this is fixed.")
                 break
 
         audio = np.frombuffer(buf, dtype=np.int16)
