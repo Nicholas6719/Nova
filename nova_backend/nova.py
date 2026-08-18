@@ -520,6 +520,10 @@ class VoiceAssistant:
         self.tts = TTSEngine(self.config["tts"], mic_gate=self.mic_gate,
                              echo=self.echo)
         self.stt.on_barge_in = self.tts.stop_and_flush
+        # Continuous, because the main loop is blocked inside
+        # tts.wait_until_done() for the whole time she is speaking — which is
+        # exactly the window barge-in has to cover.
+        self.stt.start_barge_watch()
         # Kokoro is already in the speaker mix; see tts_engine.suppress_reference.
         try:
             self.tts.suppress_reference = lambda: self.hears_speakers

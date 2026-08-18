@@ -101,6 +101,8 @@ class STTEngine:
         # Called when the wake word fires WHILE Nova is talking. nova.py points
         # this at tts.stop_and_flush; None means barge-in stops at detection.
         self.on_barge_in = None
+        self._barge_thread = None
+        self._closing = threading.Event()
         # Wake-word settings (engine choice + OpenWakeWord tuning). Kept separate
         # from the stt block so the wake engine can be swapped without touching
         # STT. Defaults keep the legacy transcript engine if unspecified.
@@ -214,6 +216,92 @@ class STTEngine:
             return False
 
     # ── Persistent audio stream ────────────────────────────────────────────────────
+    def _make_wake_detector(self):
+        """A FRESH OpenWakeWord instance, separate from the main one.
+
+        OWW is a streaming model with internal state, so the barge-in watcher
+        cannot share `self._oww` with `record_wake` — they would corrupt each
+        other's windows, which is the same mistake that made an earlier
+        instrumentation attempt read 0.000 for every score.
+        """
+        try:
+            from pathlib import Path as _Path
+            from wake_openwakeword import OpenWakeWordDetector
+            model_path = self._wake_config.get("oww_model_path", "")
+            if model_path and not _Path(model_path).is_absolute():
+                model_path = str(_Path(__file__).parent / model_path)
+            return OpenWakeWordDetector(
+                model_path=model_path,
+                threshold=float(self._wake_config.get("oww_threshold", 0.5)),
+                # One window, not two. A false fire here only stops Nova
+                # talking, which is cheap and instantly correctable; the same
+                # mistake in record_wake would start a whole conversation.
+                trigger_level=int(self._wake_config.get(
+                    "barge_trigger_level", 1)),
+                vad_threshold=float(self._wake_config.get("oww_vad_threshold", 0.5)),
+            )
+        except Exception as exc:
+            log.warning(f"barge-in detector unavailable ({exc})")
+            return None
+
+    def start_barge_watch(self) -> None:
+        """Listen for the wake word WHILE Nova is speaking, on its own thread.
+
+        This is the piece that was missing, and its absence made everything
+        else look broken. `record_wake` only runs at the top of the main loop —
+        while Nova is talking that loop is blocked inside
+        `tts.wait_until_done()`, so nothing was reading `_wake_q` at all. The
+        queue filled with perfectly good cancelled audio and no detector ever
+        saw a frame of it.
+
+        So the watcher owns its own OpenWakeWord instance and runs
+        independently. It only looks while the mic gate is SHUT — that is
+        precisely the window the main loop cannot cover — and it stays out of
+        the way entirely the rest of the time, so ordinary wake detection is
+        untouched.
+        """
+        if not self.barge_in or self._barge_thread is not None:
+            return
+
+        def _watch() -> None:
+            detector = None
+            while not self._closing.is_set():
+                if self._mic_gate.is_set():          # Nova is silent
+                    if detector is not None:
+                        detector.reset()             # do not carry her voice
+                    self._drain_wake_q()
+                    time.sleep(0.05)
+                    continue
+                if detector is None:
+                    detector = self._make_wake_detector()
+                    if detector is None:
+                        return                       # no OWW; nothing to do
+                try:
+                    frame = self._wake_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if len(frame) != FRAME_BYTES:
+                    continue
+                try:
+                    if detector.process(frame):
+                        self._fire_barge_in()
+                        detector.reset()
+                        self._drain_wake_q()
+                except Exception as exc:
+                    log.debug(f"barge-in detector failed: {exc}")
+
+        self._barge_thread = threading.Thread(target=_watch, daemon=True,
+                                              name="nova-barge-watch")
+        self._barge_thread.start()
+        log.info("barge-in watcher running (wake word can interrupt)")
+
+    def _drain_wake_q(self) -> None:
+        while True:
+            try:
+                self._wake_q.get_nowait()
+            except queue.Empty:
+                return
+
     def _wake_frame(self, timeout: float) -> Optional[bytes]:
         """One frame for the WAKE detector.
 
