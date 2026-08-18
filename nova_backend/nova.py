@@ -557,6 +557,24 @@ class VoiceAssistant:
         self.views = NovaViews(self.config, ws=getattr(self, "ws", None),
                                assistant=self)
 
+    def _sounds_like_me(self, text: str) -> bool:
+        """True when a capture is mostly Nova's own last reply coming back.
+
+        Word overlap rather than equality: the speaker-to-mic path mangles
+        edges, so an exact match almost never happens, but the middle of the
+        sentence survives intact.
+        """
+        said = (self._last_response or "").lower()
+        heard = (text or "").lower()
+        if len(heard.split()) < 3 or not said:
+            return False
+        mine = set(re.findall(r"[a-z']+", said))
+        theirs = re.findall(r"[a-z']+", heard)
+        if not mine or not theirs:
+            return False
+        overlap = sum(1 for w in theirs if w in mine) / len(theirs)
+        return overlap >= 0.7
+
     def _check_mic_health(self) -> None:
         """Notice a microphone that is delivering nothing, and say so.
 
@@ -871,6 +889,16 @@ class VoiceAssistant:
             # The transcript used to be on screen, so a mishear was visible.
             # It isn't any more, so how sure Whisper was now decides whether
             # Nova acts — and the bar rises with what the action costs.
+            # Nova must never answer HERSELF. With echo cancellation on, mic
+            # frames are kept while she speaks, and if the room defeats the
+            # canceller Whisper transcribes her own reply — she then answers it,
+            # and the pair of them talk in a loop. Belt and braces: whatever the
+            # canceller does, a transcript that is mostly her own last sentence
+            # is discarded here.
+            if self._sounds_like_me(text):
+                log.info(f"[self-heard] discarding my own voice: {text[:60]!r}")
+                continue
+
             gate = self._confidence_gate(text)
             if gate is not None and not gate.should_act:
                 continue

@@ -316,8 +316,12 @@ class NovaViews:
         """
         import panels as P
 
+        # The greeting is a welcome, not a permanent header. He said it should
+        # go once he has said something, and he is right: after the first turn
+        # it is just a word taking up the top of his home screen.
+        spoken_yet = bool(getattr(self.assistant, "_last_response", ""))
         return P.panel(
-            title=_greeting(),
+            title="" if spoken_yet else _greeting(),
             subtitle=_today_line(),
             blocks=[
                 self._home_events(),

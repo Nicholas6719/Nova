@@ -25,9 +25,9 @@
     "_grace_note": "How long Nicholas has to START his command after saying the wake word. The wake word is replayed from the pre-wake buffer, so the recorder already counts itself as 'speaking' and the normal 700ms silence cutoff applied immediately \u2014 saying 'Nova', pausing to think, then speaking looked like the wake word not working. Only applies until he starts talking; normal cutoffs take over after that.",
     "min_speech_duration_s": 0.5,
     "command_max_duration_s": 15.0,
-    "echo_cancellation": true,
+    "echo_cancellation": false,
     "echo_stream_delay_ms": 35,
-    "_aec_note": "Subtract Nova's own voice from the microphone so she can be interrupted while speaking. Measured on real Kokoro output: 27-36 dB of her voice removed, his voice attenuated only 1.5-3.9 dB, and 0.2 dB when she is silent. DEFAULT FALSE because turning it on also means keeping mic frames during playback, which is a change to the live listening path that needs his ears on real speakers. echo_stream_delay_ms is the speaker-to-mic delay estimate.",
+    "_aec_note": "OFF. Turning it on keeps mic frames during playback so she can be interrupted \u2014 and in his REAL room that made her hear herself, transcribe it, and answer herself in a loop. The 27-36 dB measurement was against a SIMULATED speaker path; his room is the test that matters and it failed. The canceller and the self-hearing guard both stay; this flag is what needs his ears before it goes back on.",
     "confidence_gate": true,
     "_confidence_note": "Gate action on how sure Whisper was. Nova has no transcript on screen any more, so a mishear is otherwise silent. Measured over 270 clips (18 commands x 3 voices x 5 noise levels): a -0.50 floor catches 75% of mishears while asking again unnecessarily only 5% of the time. The bar rises with consequence - chat is cheap to get wrong, sending a message is not, and anything outbound is read back regardless of confidence. Set false to act on every transcript as Nova did before."
   },

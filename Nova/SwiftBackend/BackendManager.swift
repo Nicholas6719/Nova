@@ -114,6 +114,13 @@ final class BackendManager: ObservableObject {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pythonPath)
         proc.arguments = [scriptURL.path]
+
+        // The child's output went nowhere: standardOutput was never set, so it
+        // inherited the app's, and launched from Finder or Xcode that is a
+        // black hole. Nicholas went looking for the backend log in Xcode and
+        // found nothing. Now every line is both printed (so the Xcode console
+        // shows it) and appended to a file he can tail.
+        attachLogging(to: proc)
         proc.currentDirectoryURL = scriptURL.deletingLastPathComponent()
 
         var env = ProcessInfo.processInfo.environment
@@ -165,6 +172,42 @@ final class BackendManager: ObservableObject {
             return true
         }
     }
+
+    /// Route the backend's stdout and stderr to the Xcode console AND to
+    /// ~/Library/Logs/Nova/backend.log, so there is somewhere to look either
+    /// way. Failing to open the file costs the file, never the console.
+    private func attachLogging(to proc: Process) {
+        let logDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Nova", isDirectory: true)
+        try? FileManager.default.createDirectory(at: logDir,
+                                                 withIntermediateDirectories: true)
+        let logURL = logDir.appendingPathComponent("backend.log")
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        }
+        let handle = try? FileHandle(forWritingTo: logURL)
+        try? handle?.seekToEnd()
+
+        let out = Pipe()
+        let err = Pipe()
+        proc.standardOutput = out
+        proc.standardError = err
+
+        for pipe in [out, err] {
+            pipe.fileHandleForReading.readabilityHandler = { fh in
+                let data = fh.availableData
+                guard !data.isEmpty else { return }
+                if let line = String(data: data, encoding: .utf8) {
+                    FileHandle.standardError.write(Data(line.utf8))
+                }
+                try? handle?.write(contentsOf: data)
+            }
+        }
+        backendLogURL = logURL
+    }
+
+    /// Where the backend log is, so anything that wants to point at it can.
+    private(set) var backendLogURL: URL?
 
     private func terminateProcess() {
         guard let proc = process, proc.isRunning else { return }
