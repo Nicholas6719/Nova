@@ -450,9 +450,24 @@ class EchoCanceller:
         with self._lock:
             if self._far_len == 0:
                 return None
+            # The measured lag is NOT applied here, and this is the whole of
+            # why cancellation kept collapsing.
+            #
+            # AEC3 has its own delay estimator and adapts to whatever offset it
+            # observes. Shifting the reference underneath it means that offset
+            # keeps moving, so the filter re-converges forever and never
+            # settles. Measured per half-second, the shape is unmistakable:
+            # every configuration where this estimator LOCKED decayed from
+            # ~40 dB to single digits, while the one where it never locked held
+            # ~30 dB for the whole run. With real Kokoro speech it fell from
+            # 35.5 dB to 1.6 in three seconds.
+            #
+            # So the reference is handed over in order and AEC3 is left to
+            # align it, which is what the original FIFO did and why it measured
+            # 27-36 dB. The estimator stays — `delay_ms` is genuinely useful to
+            # the system tap's magnitude-domain suppressor, which is not an
+            # adaptive filter and does not mind being nudged.
             lag_samples = 0
-            if self._lag_ms is not None:
-                lag_samples = int(self._lag_ms * SAMPLE_RATE / 1000)
             far = self._read_ring(lag_samples, n)
             if far is None:
                 far = self._read_ring(0, n)          # not enough history yet
