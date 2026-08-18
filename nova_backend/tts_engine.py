@@ -188,6 +188,11 @@ class TTSEngine:
         # about to be played, so it is the only place the reference can come
         # from. None means cancellation is off and nothing changes.
         self._echo = echo
+        # Set by nova.py when the system tap is live. Kokoro's output is
+        # already IN the speaker mix, so feeding it here as well would hand
+        # the canceller two copies of the same sound a few milliseconds apart
+        # and ask it to cancel both.
+        self.suppress_reference = lambda: False
         self.config   = config
         self._queue   = queue.Queue()
         self._stop    = threading.Event()
@@ -367,7 +372,8 @@ class TTSEngine:
         # This is the whole reason cancellation is tractable for Nova: she
         # knows exactly what is about to come out of the speakers.
         if self._echo is not None:
-            self._echo.feed_far(audio, sample_rate)
+            if not self.suppress_reference():
+                self._echo.feed_far(audio, sample_rate)
         if self._player is not None:
             self._player.feed(audio)
 

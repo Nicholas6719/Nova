@@ -46,6 +46,7 @@ class NovaWSServer:
         # window comes up blank until Nicholas happens to navigate somewhere.
         self._view            = "home"
         self._view_data: dict = {}
+        self._system_audio = None
         self._puck            = False
         self._running         = False
         # Event loop that owns the WS connections. Broadcasts originate on other
@@ -85,6 +86,18 @@ class NovaWSServer:
         the app enforces on its side."""
         self._puck = puck
         self._ws_broadcast({"type": "mode", "puck": puck})
+
+    def audio_status(self) -> dict:
+        """What the speaker-mix tap is doing, if anything."""
+        rx = getattr(self, "_system_audio", None)
+        if rx is None:
+            return {"system_tap": "off"}
+        try:
+            st = rx.stats
+            return {"system_tap": "live" if st.get("live") else "silent",
+                    "packets": st.get("packets"), "age_s": st.get("age_s")}
+        except Exception:
+            return {"system_tap": "unknown"}
 
     def send_view(self, view: str, data: Optional[dict] = None) -> None:
         """Tell the UI which screen to show, and give it the data to show.
@@ -193,7 +206,13 @@ class NovaWSServer:
 
             def do_GET(self):
                 if self.path == "/api/status":
-                    self._json({"status": "ok", "state": server_ref._state})
+                    # `audio` reports whether the speaker mix is actually
+                    # arriving. Exposed because "is barge-in on right now" is
+                    # otherwise invisible: it depends on a Screen Recording
+                    # grant, a macOS version and a live UDP stream, and when it
+                    # is off Nova silently reverts to pausing his music.
+                    self._json({"status": "ok", "state": server_ref._state,
+                                "audio": server_ref.audio_status()})
 
                 elif self.path.startswith("/api/messages"):
                     self._json({"messages": server_ref._messages[-50:]})

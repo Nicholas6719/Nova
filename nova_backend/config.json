@@ -141,5 +141,11 @@
     "enabled": true,
     "volume": 0.5,
     "_note": "Nova's four cues, synthesised at import \u2014 no audio files anywhere. boot plays while the engines come up, ready when she is online, wake when the wake word fires (in puck mode too), and rest when a conversation ends and she goes back to waiting. wake and rest are the same two notes inverted: a fifth up to arrive, a fifth down to withdraw, so they are tellable apart across a room. The wake cue is 170ms and BLOCKS, because it has to finish before the microphone opens or the VAD hears it as speech. enabled false makes Nova silent again; volume is 0..1."
+  },
+  "audio": {
+    "system_tap": {
+      "enabled": false,
+      "_note": "Capture the system audio mix in the Swift app (ScreenCaptureKit) and send it to the backend as the echo canceller's reference, over UDP on 127.0.0.1:8767. This is what makes 'Nova cannot hear my speakers' one rule instead of a list of special cases, and barge-in falls out of it because Nova's own voice is in that mix too. Needs Screen Recording permission; without it the tap never starts and Nova falls back exactly to her old behaviour - half duplex, music paused while she listens. Turning this on also turns echo cancellation on, because the tap is the reference it was always missing."
+    }
   }
 }

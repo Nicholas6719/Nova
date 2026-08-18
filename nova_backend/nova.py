@@ -318,6 +318,14 @@ class VoiceAssistant:
         self._init_market()
         self._init_actuation()
         self._init_ws()
+        # After the WS server exists: the tap is created during _init_stt, which
+        # runs earlier, so this cannot be done at the point of creation.
+        # /api/status reports it because "is barge-in actually on" is otherwise
+        # invisible — it needs a Screen Recording grant, macOS 13+, and a live
+        # stream, and when any of those is missing Nova quietly goes back to
+        # pausing his music.
+        if getattr(self, "system_audio", None) is not None:
+            self.ws._system_audio = self.system_audio
         self._init_views()          # after _init_ws: it needs the WS server
         self._verify_engines()
         self._show_home()
@@ -384,7 +392,13 @@ class VoiceAssistant:
         keeping mic frames during playback, and Nova listens far more often
         than she speaks."""
         self.echo = None
-        if not self.config["stt"].get("echo_cancellation", False):
+        self.system_audio = None
+        tap_cfg = self.config.get("audio", {}).get("system_tap", {})
+        want_tap = bool(tap_cfg.get("enabled", False))
+        # The tap is a REASON to cancel, not an extra on top of it. Nova only
+        # ever had a reference for her own voice; with the speaker mix arriving
+        # she has one for everything, so cancellation turns itself on.
+        if not (self.config["stt"].get("echo_cancellation", False) or want_tap):
             return
         try:
             from echo_canceller import EchoCanceller
@@ -396,6 +410,31 @@ class VoiceAssistant:
         except Exception as exc:
             log.warning(f"echo cancellation unavailable: {exc}")
             self.echo = None
+
+        if want_tap and self.echo is not None:
+            try:
+                from system_audio import SystemAudioReceiver
+                self.system_audio = SystemAudioReceiver(self.echo)
+                if not self.system_audio.start():
+                    self.system_audio = None
+
+            except Exception as exc:
+                log.warning(f"speaker mix unavailable: {exc}")
+                self.system_audio = None
+
+    @property
+    def hears_speakers(self) -> bool:
+        """True while the speaker mix is actually arriving.
+
+        Everything that exists to work AROUND Nova hearing the speakers is
+        conditioned on this: pausing his music, and dropping mic frames while
+        she talks. Both of those are the old workaround, and both should stop
+        the moment the real fix is running — and start again the moment it
+        stops, which is why this asks the receiver rather than reading a flag
+        set at startup.
+        """
+        rx = getattr(self, "system_audio", None)
+        return bool(rx is not None and rx.is_live)
 
     def _init_llm(self) -> None:
         # MLX arrays and Metal GPU streams are thread-local: the model must be
@@ -473,6 +512,11 @@ class VoiceAssistant:
         from tts_engine import TTSEngine
         self.tts = TTSEngine(self.config["tts"], mic_gate=self.mic_gate,
                              echo=self.echo)
+        # Kokoro is already in the speaker mix; see tts_engine.suppress_reference.
+        try:
+            self.tts.suppress_reference = lambda: self.hears_speakers
+        except Exception:
+            pass
 
     def _init_memory(self) -> None:
         from memory import NovaMemory
@@ -530,6 +574,11 @@ class VoiceAssistant:
 
     @property
     def _duck_enabled(self) -> bool:
+        # Pausing his music was always a workaround for not being able to
+        # cancel it. With the speaker mix arriving it is cancelled for real, so
+        # the music keeps playing — which is the whole point of barge-in.
+        if self.hears_speakers:
+            return False
         return bool(self.config.get("music", {}).get("duck_while_listening", True))
 
     def _init_weather(self) -> None:

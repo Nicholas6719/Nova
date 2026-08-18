@@ -5,6 +5,7 @@
 //  Nova — Neural Omniscient Voice Assistant. Minimal entry point.
 //
 
+import Combine
 import SwiftUI
 import AppKit
 
@@ -20,6 +21,14 @@ struct NovaApp: App {
     /// location is silently ignored and never prompts. See LocationProvider.
     @StateObject private var locationProvider = LocationProvider()
 
+    /// Captures the system audio mix and streams it to the backend, so the
+    /// echo canceller finally has a reference for everything the speakers play
+    /// rather than only for Nova's own voice. Lives here for the same reason
+    /// LocationProvider does: ScreenCaptureKit is delegate-driven and needs the
+    /// app's run loop and its Screen Recording grant, neither of which a
+    /// headless python child has.
+    @StateObject private var systemAudio = SystemAudioTapBox()
+
     /// The AppDelegate exists solely to terminate the backend on app quit —
     /// SwiftUI's App has no reliable "will terminate" hook, but AppKit does.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -34,6 +43,20 @@ struct NovaApp: App {
                     // Nicholas is actually at the keyboard, and so NovaOS shows
                     // up under Privacy & Security > Location Services.
                     locationProvider.requestLocation()
+                    // NOT STARTED YET, deliberately. The tap is written and
+                    // builds, but starting it crashed the app: an uncaught
+                    // Objective-C exception out of ScreenCaptureKit, which
+                    // Swift cannot catch, so it takes the whole process down
+                    // rather than degrading. Two likely causes are already
+                    // fixed (an absurd 2x2 capture size, and a hand-rolled
+                    // audio buffer copy) and it still crashes, so the cause is
+                    // not yet understood — and an unexplained crash on the
+                    // launch path is not something to leave switched on.
+                    //
+                    // Re-enable by uncommenting, with `audio.system_tap.enabled`
+                    // true in config.json. Both halves have to be on.
+                    // systemAudio.start()
+                    _ = systemAudio
                 }
         }
         // The SwiftUI-native way, and the one that actually works. Measured:
@@ -63,5 +86,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // no windowless app left running the backend.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+}
+
+
+/// Owns the tap and keeps it alive for the life of the app.
+///
+/// A tiny ObservableObject wrapper because SCStream capture is only available
+/// on macOS 13+, and `@StateObject` cannot itself be conditioned on
+/// availability — the check has to live inside.
+final class SystemAudioTapBox: ObservableObject {
+    private var tap: AnyObject?
+
+    func start() {
+        guard #available(macOS 13.0, *) else {
+            NSLog("[Nova] system audio tap needs macOS 13 or newer")
+            return
+        }
+        let tap = SystemAudioTap()
+        self.tap = tap
+        tap.start()
+    }
+
+    func stop() {
+        if #available(macOS 13.0, *), let tap = tap as? SystemAudioTap {
+            tap.stop()
+        }
     }
 }
