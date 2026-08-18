@@ -232,7 +232,16 @@ class STTEngine:
                 model_path = str(_Path(__file__).parent / model_path)
             return OpenWakeWordDetector(
                 model_path=model_path,
-                threshold=float(self._wake_config.get("oww_threshold", 0.5)),
+                # A LOWER bar than ordinary wake, for two reasons that
+                # compound: his voice reaches this detector already attenuated
+                # by the canceller (1.5-3.9 dB measured), and it is competing
+                # with Nova's own speech rather than with silence. At the
+                # normal 0.5 he had to shout to be heard.
+                #
+                # Cheap to be wrong this way: a false fire only stops her
+                # talking. The same mistake in record_wake would start a whole
+                # conversation out of nowhere.
+                threshold=float(self._wake_config.get("barge_threshold", 0.30)),
                 # One window, not two. A false fire here only stops Nova
                 # talking, which is cheap and instantly correctable; the same
                 # mistake in record_wake would start a whole conversation.

@@ -519,7 +519,7 @@ class VoiceAssistant:
         from tts_engine import TTSEngine
         self.tts = TTSEngine(self.config["tts"], mic_gate=self.mic_gate,
                              echo=self.echo)
-        self.stt.on_barge_in = self.tts.stop_and_flush
+        self.stt.on_barge_in = self._barged_in
         # Continuous, because the main loop is blocked inside
         # tts.wait_until_done() for the whole time she is speaking — which is
         # exactly the window barge-in has to cover.
@@ -1431,6 +1431,17 @@ class VoiceAssistant:
         self.set_state("idle")
 
     # ── Respond helper ────────────────────────────────────────────────────────────
+    def _barged_in(self) -> None:
+        """He talked over her: stop, and SAY so on screen immediately.
+
+        The orb read "Speaking" for a moment after she had gone quiet, because
+        nothing broadcast a state until the main loop unblocked from
+        `tts.wait_until_done`. From where he is sitting that is Nova ignoring
+        him — the one impression barge-in exists to prevent.
+        """
+        self.tts.stop_and_flush()
+        self.set_state("listening")
+
     def _begin_conversation(self) -> None:
         """The welcome is over: he is talking to her now.
 

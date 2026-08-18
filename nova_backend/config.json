@@ -78,7 +78,10 @@
     "work_mode_timeout_s": 60.0,
     "_work_mode_note": "How long Nova waits for him to start speaking while working alongside him in the puck, versus conversation_timeout_s everywhere else. Longer because while they work he reads, thinks and scrolls, and the 15s default would drop the session every time he paused. The session does not end here either: saying the wake word resumes IN the puck with the conversation intact.",
     "_keywords_note": "MEASURED 2026-08-17, over the speakers, 3 trials each: 'Nova, <command>' fires 6/6 at scores 0.86-0.99. 'HEY Nova' fires 0/6 at scores 0.001-0.211 \u2014 the 'Hey' prefix actively destroys the score. And with engine=openwakeword this keywords list is IGNORED entirely: record_wake dispatches to _record_wake_oww WITHOUT passing it, so only the legacy transcript engine reads it. Say 'Nova' followed by the command. The list stays for the transcript fallback.",
-    "_trigger_note": "trigger_level=2 is correct and was re-checked: at 1, 'November is cold' false-fires (it is in the adversarial corpus for exactly that reason). At 2 and 3, 5/5 wake phrases still fire and 0/12 non-wake phrases do."
+    "_trigger_note": "trigger_level=2 is correct and was re-checked: at 1, 'November is cold' false-fires (it is in the adversarial corpus for exactly that reason). At 2 and 3, 5/5 wake phrases still fire and 0/12 non-wake phrases do.",
+    "barge_threshold": 0.3,
+    "barge_trigger_level": 1,
+    "_barge_note": "A lower bar than oww_threshold, and one window instead of two. His voice reaches the barge-in detector attenuated by the canceller and competing with Nova's own speech, so at the normal 0.5 he had to shout. Being wrong in this direction is cheap: a false fire only stops her talking."
   },
   "server": {
     "http_port": 5001,
