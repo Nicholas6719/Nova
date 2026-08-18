@@ -442,6 +442,7 @@ class NovaViews:
         # back when he asks about CPU / memory / battery. This is when that
         # recall expires.
         self._system_until = 0.0
+        self._system_token = 0
         self._lock = threading.Lock()
         # Last payload actually sent. Home is re-pushed on a ticker so a song
         # he starts himself appears on its own — but pushing an IDENTICAL
@@ -452,7 +453,10 @@ class NovaViews:
         # would notice lagging, because he can hear it start.
         self._tiles: dict[str, _Tile] = {
             "market":   _Tile("market", self._build_market, 300.0, self.refresh_home),
-            "playing":  _Tile("playing", self._build_music, 4.0, self.refresh_home),
+            # Music is the one he can HEAR change, so it is checked often.
+            # Affordable because current_track_for_panel short-circuits on
+            # NSWorkspace when no player is running, which is nearly always.
+            "playing":  _Tile("playing", self._build_music, 2.0, self.refresh_home),
             "weather":  _Tile("weather", self._build_weather, 600.0, self.refresh_home),
             "upcoming": _Tile("upcoming", self._build_upcoming, 120.0, self.refresh_home),
         }
@@ -504,30 +508,61 @@ class NovaViews:
             log.warning(f"could not save home layout: {exc}")
 
     # ── The status row ────────────────────────────────────────────────────────
-    def recall_system(self, seconds: float = 30.0) -> None:
+    def recall_system(self) -> None:
         """Bring the status row back because he just asked about it.
 
         The number Nova said out loud should also be a number he can see. It
-        settles away again on its own: asking once should not pin it there for
-        the rest of the session.
+        is HELD here with no expiry: the countdown starts when she stops
+        talking, not when the handler runs, because a timer armed here would
+        already be several seconds down by the time he had heard the answer.
+        `settle_system` is what starts it.
         """
         with self._lock:
-            self._system_until = time.time() + seconds
+            self._system_until = float("inf")
+            self._system_token += 1
         self.refresh_home()
-        token = self._system_until
 
-        def _settle() -> None:
-            # Only the LATEST recall may retire the row — asking twice in a row
-            # must not have the first timer clear the second one's window.
+    def settle_system(self, seconds: float = 10.0) -> None:
+        """Start the countdown to hide the row again. Called once Nova has
+        finished speaking, so the ten seconds are ten seconds of him looking
+        at it rather than ten seconds of her talking over it."""
+        with self._lock:
+            if self._system_until != float("inf"):
+                return                       # nothing being held
+            self._system_until = time.time() + seconds
+            self._system_token += 1
+            token = self._system_token
+
+        def _retire() -> None:
+            # Only the LATEST recall may retire the row — asking twice must not
+            # have the first timer close the second one's window.
             with self._lock:
-                if self._system_until != token:
+                if self._system_token != token:
                     return
                 self._system_until = 0.0
             self.refresh_home()
 
-        t = threading.Timer(seconds, _settle)
+        t = threading.Timer(seconds, _retire)
         t.daemon = True
         t.start()
+
+    def _home_is_showing(self) -> bool:
+        """Is home what the app is actually rendering right now?
+
+        Asked of the WS SERVER rather than of `self.current`. That attribute is
+        a second copy of the same fact, and other code writes it — nova.py
+        stamps it when a handler emits a panel — so the two can drift. When
+        they do, home goes permanently stale: the ticker sees a view that is
+        not "home", declines to push, and Now Playing never appears again for
+        the life of the process. Nothing in the app tells him why.
+
+        The server holds what was last sent to the client, which is by
+        definition what he is looking at.
+        """
+        shown = getattr(self.ws, "_view", None)
+        if shown is None:                     # a harness WS without the field
+            return self.current == "home"
+        return shown == "home"
 
     def refresh_home(self) -> None:
         """Re-push home, but only if home is what he is looking at.
@@ -536,7 +571,7 @@ class NovaViews:
         threads. Neither may yank an answer off the screen to show him a card
         that changed behind it.
         """
-        if self.current != "home" or self.ws is None:
+        if self.ws is None or not self._home_is_showing():
             return
         try:
             payload = self._home_payload()

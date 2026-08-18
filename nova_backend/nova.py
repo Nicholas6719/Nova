@@ -1379,6 +1379,7 @@ class VoiceAssistant:
         # last thing he wants. The reply still reaches the UI over the WS.
         if self._silent_turn:
             self.set_state("idle")
+            self._settle_panels()
             return
 
         self.set_state("speaking")
@@ -1391,6 +1392,18 @@ class VoiceAssistant:
         self.tts.speak(_clean_for_tts(text))
         self.tts.wait_until_done(timeout=60)
         self.set_state("idle")
+        # She has stopped talking, so anything held on screen for him to READ
+        # can start its clock now. Armed here rather than in the handler
+        # because a timer started before she spoke is already half spent by
+        # the time he has heard the answer.
+        self._settle_panels()
+
+    def _settle_panels(self) -> None:
+        try:
+            self.views.settle_system(
+                float(self.config.get("ui", {}).get("status_recall_seconds", 10)))
+        except Exception as exc:
+            log.warning(f"could not settle the status row: {exc}")
 
     # ═════════════════════════════════════════════════════════════════════════════
     # Fast-path intents (date / time / greeting / repeat)

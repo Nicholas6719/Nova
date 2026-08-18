@@ -45,10 +45,14 @@ enum NovaState: String, CaseIterable {
     }
 
     /// The word under the orb. Tiny and dim by design — it is the only thing
-    /// that distinguishes idle from sleeping at a glance.
+    /// that distinguishes waiting-for-the-wake-word from sleeping at a glance.
     var readout: String {
         switch self {
-        case .idle:      return "Idle"
+        // NOT "Idle". Nova is running the wake detector continuously — she is
+        // never doing nothing — and the word he needs at this moment is the
+        // one that gets her attention. This is the only state where the
+        // readout is an instruction rather than a description.
+        case .idle:      return "Say \"Nova\""
         case .listening: return "Listening"
         case .thinking:  return "Thinking"
         case .speaking:  return "Speaking"

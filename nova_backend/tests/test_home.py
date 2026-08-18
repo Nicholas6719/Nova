@@ -204,11 +204,31 @@ def test_status_recall():
     views.assistant._last_response = "Sure."
     check(not has_status(views._home_payload()), "row is away before he asks")
 
-    views.recall_system(seconds=0.6)
+    views.recall_system()
     check(has_status(views._home_payload()), "row is back after he asks")
 
+    # HELD while she is still talking. A timer armed when the handler ran
+    # would already be most of the way down by the time he heard the number.
+    time.sleep(0.8)
+    check(has_status(views._home_payload()),
+          "row is held while Nova is still speaking")
+
+    # The clock starts when she stops.
+    views.settle_system(0.6)
+    check(has_status(views._home_payload()), "still up the moment she stops")
     time.sleep(1.0)
     check(not has_status(views._home_payload()), "row settles away on its own")
+
+    # Asking twice must not let the first countdown close the second window.
+    views.recall_system()
+    views.settle_system(0.5)
+    views.recall_system()
+    time.sleep(0.8)
+    check(has_status(views._home_payload()),
+          "a second question re-holds the row past the first countdown")
+    views.settle_system(0.3)
+    time.sleep(0.7)
+    check(not has_status(views._home_payload()), "and then settles once")
 
 
 # ── 3. Now Playing only when something is playing ────────────────────────────
@@ -339,10 +359,24 @@ def test_render_cost():
           f"{len(ws.sent)} sends")
 
     # An ANSWER is on screen: the ticker must not push home over the top of it.
+    ws.server._view = "weather"
     views.current = "weather"
     ws.sent.clear()
     views.refresh_home()
     check(ws.sent == [], "the ticker leaves an answer alone")
+
+    # ...and it must decide that from what the app is actually SHOWING, not
+    # from views.current. Those are two copies of one fact and nova.py writes
+    # the other one; when they drift, home goes stale for the life of the
+    # process and nothing says why.
+    ws.server._view = "home"
+    views.current = "weather"          # drifted
+    views._last_sent = None
+    ws.sent.clear()
+    views.refresh_home()
+    check(len(ws.sent) == 1,
+          "home still refreshes when views.current has drifted off home")
+    views.current = "home"
 
 
 # ── 7. Showing the work ──────────────────────────────────────────────────────

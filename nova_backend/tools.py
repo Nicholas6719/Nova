@@ -1348,6 +1348,12 @@ class NovaTools:
         Never launches a player: `_running_player` without launch_if_none, so
         asking for home does not open Spotify.
         """
+        # NSWorkspace first: 0.1ms against 289ms for the AppleScript path, and
+        # home asks this every couple of seconds forever. Almost every one of
+        # those asks happens with no player running at all, and that case is
+        # now free.
+        if not self.any_player_running():
+            return None
         app = self._running_player(launch_if_none=False)
         if not app:
             return None
@@ -1776,9 +1782,24 @@ class NovaTools:
     # The PLAYER's volume is ducked, never the system's — system volume would
     # take Nova's own voice down with it, which is the opposite of helpful.
     def duck_music(self) -> None:
-        """Lower the player while Nova listens. Cheap and safe to call often."""
+        """Lower the player while Nova listens, WITHOUT making him wait.
+
+        Measured on a real Spotify: the AppleScript round trip is 534ms. It sat
+        between the wake word firing and the microphone opening, and he only
+        gets about 700ms of head start before recording begins — so ducking ate
+        most of the window and the first word of his command was being clipped.
+        That is the likeliest reason Nova mis-heard him over music.
+
+        Off-thread instead. The volume drops a beat into the utterance rather
+        than before it, which is almost always still inside the VAD's wait for
+        speech onset, and the recording starts on time either way.
+        """
         if self._ducked is not None:
             return                      # already ducked; no AppleScript at all
+        threading.Thread(target=self._duck_music_now,
+                         name="nova-duck", daemon=True).start()
+
+    def _duck_music_now(self) -> None:
         try:
             app = self._running_player()          # never launches
             if not app:
