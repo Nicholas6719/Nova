@@ -57,8 +57,102 @@ _RING_SECONDS = 3.0        # reference history to search within
 _ENV_SECONDS = 1.5         # envelope history used for the correlation
 _MAX_LAG_MS = 400          # how far behind the mic can plausibly be
 _ESTIMATE_EVERY = 8        # mic frames between lag estimates (~240ms)
-_MIN_CONFIDENCE = 0.50     # below this the estimate is noise; keep the old lag
+# 0.35, not 0.50. The floor was raised to 0.50 to stop the estimate jumping,
+# but the MEDIAN is what actually fixed that — and at 0.50 music never cleared
+# the bar at all, so the lag stayed unmeasured. Permissive detection plus a
+# robust median beats a strict threshold with nothing behind it.
+_MIN_CONFIDENCE = 0.35
 _LAG_VOTES = 9             # estimates kept; the MEDIAN of them is the lag
+
+
+class _ResidualSuppressor:
+    """Removes what the linear filter cannot: the nonlinear residue.
+
+    WHY THIS EXISTS. AEC3 models the echo path as a linear filter, and against
+    a simulated speaker that is exactly what the path is — which is why the
+    own-voice suite measures 27-36 dB. A real laptop speaker driven at volume
+    clips and resonates, so a large part of what reaches the microphone was
+    never a linear function of the reference and cannot be subtracted from it.
+    Measured on this Mac: 1.6-12.7 dB with alignment already correct.
+
+    So this works in the frequency domain instead of subtracting. For each bin
+    it keeps a running estimate of how strongly the reference COUPLES into the
+    microphone — learned only while the far end dominates, so his voice never
+    teaches it — and then attenuates bins where the predicted echo accounts for
+    most of what is there. Nonlinearity does not matter to a magnitude estimate
+    the way it does to a subtraction.
+
+    Two properties it must have, and does:
+      * When the speakers are silent the reference is silent, the predicted
+        echo is zero, every gain is 1, and his voice passes through untouched.
+      * Gains are smoothed across frequency AND time. An unsmoothed spectral
+        gain is what makes suppressors sound like a broken radio, and it would
+        wreck Whisper long before it helped it.
+
+    STFT with 50% overlap-add, so the output is continuous. Costs 16ms of
+    latency, which is invisible next to the wake word.
+    """
+
+    N = 512                      # 32ms window
+    H = 256                      # 50% hop
+    _FLOOR = 0.05                # never more than 26dB in one bin
+    _OVER = 1.6                  # over-subtract a little; residue is bursty
+
+    def __init__(self) -> None:
+        self.win = np.hanning(self.N + 1)[:self.N].astype(np.float32)
+        self._near = np.zeros(0, dtype=np.float32)
+        self._far = np.zeros(0, dtype=np.float32)
+        self._ola = np.zeros(0, dtype=np.float32)
+        self._out = np.zeros(0, dtype=np.float32)
+        bins = self.N // 2 + 1
+        self._coupling = np.full(bins, 0.2, dtype=np.float32)
+        self._gain = np.ones(bins, dtype=np.float32)
+
+    def process(self, near: np.ndarray, far: np.ndarray) -> Optional[np.ndarray]:
+        """Suppress residue in `near` using `far`. Returns the same number of
+        samples once primed, or None while filling the first window."""
+        self._near = np.concatenate([self._near, near.astype(np.float32)])
+        self._far = np.concatenate([self._far, far.astype(np.float32)])
+        want = near.size
+
+        while self._near.size >= self.N and self._far.size >= self.N:
+            n_blk = self._near[:self.N] * self.win
+            f_blk = self._far[:self.N] * self.win
+            Y = np.fft.rfft(n_blk)
+            X = np.fft.rfft(f_blk)
+            ymag = np.abs(Y) + 1e-6
+            xmag = np.abs(X) + 1e-6
+
+            # Learn the coupling only where the reference clearly dominates, so
+            # his voice can never be mistaken for echo and taught as one.
+            ratio = ymag / xmag
+            learn = xmag > (4.0 * np.median(xmag))
+            if np.any(learn):
+                self._coupling[learn] = (0.9 * self._coupling[learn]
+                                         + 0.1 * np.minimum(ratio[learn], 4.0))
+
+            predicted = self._OVER * self._coupling * xmag
+            g = np.clip(1.0 - predicted / ymag, self._FLOOR, 1.0)
+            # Smooth across frequency (3-bin) then across time. Unsmoothed
+            # gains are what make a suppressor sound like a broken radio.
+            g = np.convolve(g, np.array([0.25, 0.5, 0.25], dtype=np.float32),
+                            mode="same")
+            self._gain = 0.6 * self._gain + 0.4 * g
+            block = np.fft.irfft(Y * self._gain, n=self.N).astype(np.float32) * self.win
+
+            if self._ola.size < self.N:
+                self._ola = np.pad(self._ola, (0, self.N - self._ola.size))
+            self._ola[:self.N] += block
+            self._out = np.concatenate([self._out, self._ola[:self.H]])
+            self._ola = np.concatenate([self._ola[self.H:],
+                                        np.zeros(self.H, dtype=np.float32)])
+            self._near = self._near[self.H:]
+            self._far = self._far[self.H:]
+
+        if self._out.size < want:
+            return None
+        out, self._out = self._out[:want], self._out[want:]
+        return out
 
 
 class EchoCanceller:
@@ -92,6 +186,7 @@ class EchoCanceller:
         self._mic_env = np.zeros(self._env_bins, dtype=np.float32)
         self._lag_ms: Optional[float] = None
         self._lag_votes = deque(maxlen=_LAG_VOTES)
+        self._residual = _ResidualSuppressor()
         self._lag_conf = 0.0
         self._since_estimate = 0
         self._stream_delay_ms = stream_delay_ms
@@ -187,6 +282,13 @@ class EchoCanceller:
                                         far[i:i + APM_FRAME])
                 out[i:i + APM_FRAME] = np.asarray(
                     res, dtype=np.int16).reshape(-1)[:APM_FRAME]
+            # Second stage: whatever the linear filter could not subtract.
+            # Feeding it the AEC OUTPUT rather than the raw mic means it only
+            # ever has to deal with the residue.
+            res = self._residual.process(out.astype(np.float32),
+                                         far.astype(np.float32))
+            if res is not None:
+                out = np.clip(res, -32768, 32767).astype(np.int16)
             cleaned = out.tobytes()
             self._note_attenuation(mic_frame, cleaned)
             return cleaned
