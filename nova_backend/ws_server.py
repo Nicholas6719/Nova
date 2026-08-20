@@ -47,6 +47,8 @@ class NovaWSServer:
         self._view            = "home"
         self._view_data: dict = {}
         self._system_audio = None
+        # Called when he presses the interrupt key. Set by nova.py.
+        self.on_interrupt = None
         self._puck            = False
         self._running         = False
         # Event loop that owns the WS connections. Broadcasts originate on other
@@ -222,6 +224,17 @@ class NovaWSServer:
                     self._json({"status": "ok", "state": server_ref._state,
                                 "audio": server_ref.audio_status()})
 
+                elif self.path == "/api/interrupt":
+                    # GET as well as POST: a key press should never be blocked
+                    # by a preflight or a content type.
+                    cb = server_ref.on_interrupt
+                    if cb:
+                        try:
+                            cb()
+                        except Exception:
+                            pass
+                    self._json({"ok": True})
+
                 elif self.path.startswith("/api/messages"):
                     self._json({"messages": server_ref._messages[-50:]})
 
@@ -233,6 +246,15 @@ class NovaWSServer:
                     self.send_error(404)
 
             def do_POST(self):
+                if self.path == "/api/interrupt":
+                    cb = server_ref.on_interrupt
+                    if cb:
+                        try:
+                            cb()
+                        except Exception:
+                            pass
+                    self._json({"ok": True})
+                    return
                 length = int(self.headers.get("Content-Length", 0))
                 body   = self.rfile.read(length)
                 try:

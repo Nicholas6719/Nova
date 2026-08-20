@@ -113,6 +113,18 @@ final class NovaAPIClient: ObservableObject {
     /// `silent` asks the backend to answer in text only, without speaking. When
     /// Nicholas types instead of talking he is usually somewhere he cannot talk,
     /// so a spoken reply is the last thing he wants.
+    /// Stop Nova talking. Fire and forget.
+    ///
+    /// Nothing is awaited and nothing is read back: this is a key press, and
+    /// the only thing that matters is that it leaves immediately.
+    nonisolated func interrupt() {
+        guard let url = URL(string: "http://127.0.0.1:5001/api/interrupt") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 2
+        URLSession.shared.dataTask(with: req).resume()
+    }
+
     func sendMessage(_ text: String, silent: Bool = false) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }

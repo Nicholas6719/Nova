@@ -72,6 +72,14 @@ final class ShellViewModel: ObservableObject {
         Task { await api.sendMessage(trimmed, silent: silent) }
     }
 
+    /// Space bar: stop her talking, now.
+    ///
+    /// Fire and forget — the reply is irrelevant and waiting on it would make
+    /// the one interaction that must feel instant depend on a round trip.
+    func interrupt() {
+        api.interrupt()
+    }
+
     func setPuck(_ on: Bool) {
         guard isPuck != on else { return }
         isPuck = on

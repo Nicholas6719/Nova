@@ -62,6 +62,15 @@ struct ShellView: View {
                 // way in and out until then — and worth keeping regardless.
                 Button("") { vm.setPuck(!vm.isPuck) }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
+                // SPACE stops her talking. Deterministic where acoustics are
+                // not: no threshold, no cancellation, nothing to mishear. It
+                // is unmodified on purpose — reaching for a chord while she is
+                // mid-sentence is not interrupting, it is admin. Harmless when
+                // she is silent, and the composer takes the key back the
+                // moment he is typing.
+                Button("") { vm.interrupt() }
+                    .keyboardShortcut(.space, modifiers: [])
+                    .disabled(typing)
             }
             .opacity(0)
         )

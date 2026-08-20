@@ -300,8 +300,24 @@ class EchoCanceller:
             # The linear canceller alone is measured safe for his voice: 27-36
             # dB off Nova against 1.5-3.9 dB off him. That is ample for a wake
             # word, and it is all the wake path gets.
+            # The two stages want DIFFERENT references, and giving them the
+            # same one is why cancellation kept trading places.
+            #
+            # AEC3 gets the reference unshifted, because it aligns internally
+            # and moving it underneath makes it re-converge forever (measured:
+            # ~30 dB decaying to single digits). The residual suppressor is not
+            # an adaptive filter — it compares magnitudes per bin — so it wants
+            # the reference actually LINED UP with what the mic heard, and
+            # without that it fell from ~19 dB to 4.
+            far_aligned = far
+            if self._lag_ms is not None:
+                with self._lock:
+                    shifted = self._read_ring(
+                        int(self._lag_ms * SAMPLE_RATE / 1000), near.size)
+                if shifted is not None:
+                    far_aligned = shifted
             res = (self._residual.process(out.astype(np.float32),
-                                          far.astype(np.float32))
+                                          far_aligned.astype(np.float32))
                    if residual else None)
             if res is not None:
                 out = np.clip(res, -32768, 32767).astype(np.int16)

@@ -326,6 +326,11 @@ class VoiceAssistant:
         # pausing his music.
         if getattr(self, "system_audio", None) is not None:
             self.ws._system_audio = self.system_audio
+        # Space bar. Deterministic where acoustics never are: no threshold, no
+        # cancellation, nothing to mishear. It also means the WAKE WORD no
+        # longer has to survive her own voice, which was the hardest problem in
+        # the build and is now simply not on the critical path.
+        self.ws.on_interrupt = self._barged_in
         self._init_views()          # after _init_ws: it needs the WS server
         self._verify_engines()
         self._show_home()

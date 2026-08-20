@@ -30,8 +30,8 @@
     "_aec_note": "OFF. Turning it on keeps mic frames during playback so she can be interrupted \u2014 and in his REAL room that made her hear herself, transcribe it, and answer herself in a loop. The 27-36 dB measurement was against a SIMULATED speaker path; his room is the test that matters and it failed. The canceller and the self-hearing guard both stay; this flag is what needs his ears before it goes back on.",
     "confidence_gate": true,
     "_confidence_note": "Gate action on how sure Whisper was. Nova has no transcript on screen any more, so a mishear is otherwise silent. Measured over 270 clips (18 commands x 3 voices x 5 noise levels): a -0.50 floor catches 75% of mishears while asking again unnecessarily only 5% of the time. The bar rises with consequence - chat is cheap to get wrong, sending a message is not, and anything outbound is read back regardless of confidence. Set false to act on every transcript as Nova did before.",
-    "barge_in": true,
-    "_barge_in_note": "Keep a WAKE-ONLY ear open while Nova is speaking, so 'Nova' can interrupt her. Needs echo_cancellation and a real reference (the system tap), so it does nothing on its own. The mic gate is now SPLIT: the command recorder still only ever sees frames while Nova is silent - which is what makes end-of-speech detection work, and holding that gate open was what made every turn run to the 15s cap - while a second queue carries cancelled audio to the wake detector continuously.",
+    "barge_in": false,
+    "_barge_in_note": "OFF, and deliberately. Barge-in is the SPACE BAR now: POST /api/interrupt, no threshold, no cancellation, nothing to mishear. That also takes the hardest problem in the build off the critical path \u2014 the wake word no longer has to be heard over Nova's own voice. The acoustic path still exists and still works; it is simply not what he relies on.",
     "_echo_note": "ON. This was off for a long time because enabling it used to hold the mic gate permanently open, so the command recorder's VAD never saw a quiet frame and every turn ran to the 15s cap. That is fixed: the gate is SPLIT, _audio_q is still shut while Nova speaks, and only the wake detector reads the cancelled stream. Cancels Nova's OWN voice (27-36 dB) which is all barge-in needs; the system tap for music is separate and still off.",
     "_delay_note": "35ms is Kokoro's path: she hands the samples to the canceller microseconds before they are played, so the only delay is the speaker and the room. It was left at 120 from tuning the SYSTEM TAP, whose path is much longer, and never put back when the tap was switched off \u2014 so the canceller spent every barge-in attempt aligned for a signal that was not arriving, cancelled Nova badly, and the wake detector heard her instead of him."
   },
@@ -151,7 +151,7 @@
   },
   "audio": {
     "system_tap": {
-      "enabled": false,
+      "enabled": true,
       "_note": "OFF. The tap works and the residual suppressor removes ~19 dB of real speaker music, but ~19 dB is not enough: with it on, music stops pausing and Nova keeps listening while she speaks, and in real use that was worse than the workaround it replaced - she interrupted herself, took longer to notice he had stopped talking, and still could not hear him over music. The pause-while-listening path is what actually works today. Turn this on only alongside a measurement above ~30 dB."
     }
   }
