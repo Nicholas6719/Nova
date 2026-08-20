@@ -475,6 +475,11 @@ class NovaViews:
         # back when he asks about CPU / memory / battery. This is when that
         # recall expires.
         self._system_until = 0.0
+        # A proactive announcement, briefly on screen as well as spoken. Held
+        # here rather than pushed as a one-off payload so any re-render of home
+        # keeps showing it until it expires.
+        self._notice = ""
+        self._notice_until = 0.0
         self._system_token = 0
         self._lock = threading.Lock()
         # Last payload actually sent. Home is re-pushed on a ticker so a song
@@ -596,6 +601,49 @@ class NovaViews:
         if shown is None:                     # a harness WS without the field
             return self.current == "home"
         return shown == "home"
+
+    def flash_notice(self, text: str, seconds: float = 12.0) -> None:
+        """Show what she just said, briefly, in the bottom-right slot.
+
+        Proactive announcements were voice-only, which is fine when he is at
+        the desk and useless when he is not — he hears half a sentence and has
+        no way to get it back. This is the other half.
+
+        Deliberately short-lived and deliberately in a slot he can move: it is
+        a notice, not a card he owns. It never displaces one of his own cards
+        — if the bottom right is taken it simply is not shown, because a
+        notice that hides his calendar is worse than no notice.
+        """
+        if not text:
+            return
+        with self._lock:
+            self._notice = text.strip()
+            self._notice_until = time.time() + seconds
+            token = self._notice_until
+        self.refresh_home()
+
+        def _clear() -> None:
+            with self._lock:
+                if self._notice_until != token:
+                    return          # a newer notice owns the slot now
+                self._notice = ""
+                self._notice_until = 0.0
+            self.refresh_home()
+
+        t = threading.Timer(seconds, _clear)
+        t.daemon = True
+        t.start()
+
+    def _home_notice(self) -> Optional[dict]:
+        import panels as P
+        with self._lock:
+            text, until = self._notice, self._notice_until
+        if not text or time.time() >= until:
+            return None
+        # Never over one of his cards.
+        if any(sl == "R3" for sl in self.slots.values()):
+            return None
+        return P.at(P.items([{"title": text}], title="Heads up"), "R3", "notice")
 
     def refresh_home(self) -> None:
         """Re-push home, but only if home is what he is looking at.
@@ -871,7 +919,7 @@ class NovaViews:
         return P.panel(
             title="" if spoken_yet else _greeting(),
             subtitle=_today_line(),
-            blocks=cards + [self._home_system(spoken_yet)],
+            blocks=cards + [self._home_notice(), self._home_system(spoken_yet)],
         )
 
     def _home_system(self, spoken_yet: bool) -> Optional[dict]:

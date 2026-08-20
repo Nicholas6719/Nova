@@ -783,7 +783,16 @@ class VoiceAssistant:
         """
         try:
             from proactive import ProactiveMonitor
-            self.proactive = ProactiveMonitor(self.config, self, self._announce)
+            def _speak_and_show(text: str) -> None:
+                # On screen first: it costs nothing and _announce blocks until
+                # it finds a gap, which can be a while if she is mid-sentence.
+                try:
+                    self.views.flash_notice(text)
+                except Exception as exc:
+                    log.debug(f"could not show the notice: {exc}")
+                self._announce(text)
+
+            self.proactive = ProactiveMonitor(self.config, self, _speak_and_show)
             self.proactive.start()
         except Exception as exc:
             log.warning(f"proactive monitor unavailable: {exc}")
