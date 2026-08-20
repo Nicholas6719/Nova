@@ -61,7 +61,10 @@ _ESTIMATE_EVERY = 8        # mic frames between lag estimates (~240ms)
 # but the MEDIAN is what actually fixed that — and at 0.50 music never cleared
 # the bar at all, so the lag stayed unmeasured. Permissive detection plus a
 # robust median beats a strict threshold with nothing behind it.
-_MIN_CONFIDENCE = 0.35
+# Onset correlation runs lower in absolute value than envelope
+# correlation did; 0.22 is the equivalent bar, and the median of
+# nine still throws away a bad read.
+_MIN_CONFIDENCE = 0.22
 _LAG_VOTES = 9             # estimates kept; the MEDIAN of them is the lag
 
 
@@ -416,6 +419,25 @@ class EchoCanceller:
             win = int(0.6 * 1000)                    # 600ms of mic to match
             if mic.size < win + _MAX_LAG_MS:
                 return
+            # Correlate ONSET STRENGTH, not the envelope itself.
+            #
+            # Speech has gaps, so its envelope has plenty of variance and
+            # correlates well. Music does not: it is continuously loud, the
+            # envelope is comparatively flat, and a normalised correlation of
+            # two flat things never clears a confidence floor — which is why
+            # this returned None for every music track and the aligned
+            # reference the residual suppressor needs never existed.
+            #
+            # Half-wave-rectified difference keeps only where energy RISES: a
+            # drum hit, a plucked string, the start of a syllable. Those are
+            # sharp in both music and speech, and they are what actually
+            # identifies a moment in time.
+            def onsets(x):
+                d = np.diff(x, prepend=x[:1])
+                return np.maximum(d, 0.0)
+
+            mic = onsets(mic)
+            far = onsets(far)
             m = mic[-win:]
             m = m - m.mean()
             m_norm = float(np.sqrt((m * m).sum()))

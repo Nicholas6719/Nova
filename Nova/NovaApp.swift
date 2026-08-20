@@ -49,7 +49,9 @@ struct NovaApp: App {
                     // halves have to be on, and the tap costs nothing when the
                     // backend is not listening — but there is no reason to
                     // capture the screen for audio nobody reads.
-                    systemAudio.start()
+                    // Off with audio.system_tap.enabled; see config.json.
+                    // systemAudio.start()
+                    _ = systemAudio
                 }
         }
         // The SwiftUI-native way, and the one that actually works. Measured:

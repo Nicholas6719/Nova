@@ -151,8 +151,8 @@
   },
   "audio": {
     "system_tap": {
-      "enabled": true,
-      "_note": "OFF. The tap works and the residual suppressor removes ~19 dB of real speaker music, but ~19 dB is not enough: with it on, music stops pausing and Nova keeps listening while she speaks, and in real use that was worse than the workaround it replaced - she interrupted herself, took longer to notice he had stopped talking, and still could not hear him over music. The pause-while-listening path is what actually works today. Turn this on only alongside a measurement above ~30 dB."
+      "enabled": false,
+      "_note": "OFF because it does not work yet, not because it is unwanted. He asked twice for his music to keep playing while Nova stops hearing it. The tap delivers the speaker mix reliably, but cancellation of it currently measures 2.8-5.4 dB, which leaves Nova effectively deaf to him over music \u2014 worse in daily use than pausing the music, which works. Set true to try it; the blocker is the lag estimator never locking on music, which starves the residual suppressor of the aligned reference it needs (it reached ~19 dB when it had one)."
     }
   }
 }
