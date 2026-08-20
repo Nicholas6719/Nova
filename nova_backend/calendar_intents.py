@@ -313,10 +313,16 @@ class NovaCalendar:
             return "delete_event"
 
         # ── Create calendar event (strict) ───────────────────────────────
+        # `an?`, not `a`. "create AN event" — the way anyone actually says it —
+        # matched nothing here, so every attempt fell through to the LLM, which
+        # correctly refused because creating events is not something a model can
+        # do. Nova could always create events; she simply could not hear the
+        # request. One missing letter.
         if re.search(r"\b(?:add|schedule|put|create|book)\b[^.?!]{0,40}\b(?:to|on|in|for)\s+(?:my\s+)?calendar\b", t) or \
            re.search(r"\bput\s+(?:this|that|it)\s+on\s+my\s+calendar\b", t) or \
-           re.search(r"\bcreate\s+(?:a\s+)?(?:new\s+)?(?:calendar\s+)?event\b", t) or \
-           re.search(r"\badd\s+(?:a\s+)?(?:new\s+)?(?:calendar\s+)?event\b", t) or \
+           re.search(r"\b(?:create|make|set\s+up)\s+(?:an?\s+)?(?:new\s+)?"
+                     r"(?:calendar\s+)?event\b", t) or \
+           re.search(r"\badd\s+(?:an?\s+)?(?:new\s+)?(?:calendar\s+)?event\b", t) or \
            re.search(r"\b(?:schedule|add|book|create)\s+[^.?!]{0,30}\b(?:meeting|appointment)\b", t) or \
            re.search(r"\bnew\s+(?:calendar\s+)?event\b", t):
             return "create_event"
