@@ -68,7 +68,6 @@ class ProactiveMonitor:
             try:
                 line = self.next_announcement()
                 if line:
-                    self._last_spoke = time.time()
                     self._announce(line)
             except Exception as exc:
                 log.warning(f"proactive check failed: {exc}")
@@ -110,6 +109,13 @@ class ProactiveMonitor:
             if key in self._said:
                 continue
             self._said.add(key)
+            # Stamped HERE, where the decision is made, not in the loop.
+            # `quiet_reason` reads this to enforce the floor between
+            # announcements, so leaving it to the caller meant the floor held
+            # only as long as the loop was the only caller — and a rule that
+            # depends on who happens to call it is not a rule. Caught by the
+            # test: with a ten-minute floor it announced twice in a row.
+            self._last_spoke = time.time()
             return line
         return None
 
