@@ -16,6 +16,7 @@ no model at all.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 from typing import Optional
@@ -30,8 +31,17 @@ _WEATHER_RE = re.compile(
     re.IGNORECASE,
 )
 # ...but not when he is asking Nova to *do* something with a file or app.
+# An action verb means this is a command about a FILE or an app that happens to
+# mention weather, not a question about the sky. "move" and "rename" were here
+# from the start; the rest joined after "put my weather report in Documents"
+# and "copy the weather forecast spreadsheet to Documents" were answered with
+# the current temperature while the file sat where it was. Weather runs at
+# stage 4b, one ahead of files, so this list is the only thing standing between
+# a file command and a forecast.
 _NOT_WEATHER_RE = re.compile(
-    r"\b(open|play|search for|google|remind|schedule|delete|move|rename)\b",
+    r"\b(open|play|search for|google|remind|schedule|delete|move|moves|moved|"
+    r"rename|renamed|copy|copies|copied|put|puts|send|sends|stick|drop|"
+    r"transfer|drag|shove|relocate)\b",
     re.IGNORECASE,
 )
 
@@ -50,11 +60,22 @@ _NOT_A_PLACE = {"today", "tomorrow", "tonight", "the", "a", "an", "this",
                 "fahrenheit", "here", "now"}
 
 
+def _weekday_in(days: int) -> str:
+    """"Thursday" for a day this many days out. Panel-only: the spoken path
+    says "tomorrow" and "the day after" and never counts past that."""
+    return (datetime.date.today() + datetime.timedelta(days=days)).strftime("%A")
+
+
 class NovaWeather:
     """Weather questions. `detect_intent` returns None for anything else."""
 
     def __init__(self, config: dict) -> None:
         self.config = config
+        # (view_name, payload) for the panel, picked up by nova.py after the
+        # spoken answer. Same one-shot pattern as calendar.pending_intent.
+        # The panel shows the SAME templated numbers the voice says — nothing
+        # here is phrased by a model, on either channel.
+        self.last_panel: Optional[tuple] = None
 
     # ── Detection ─────────────────────────────────────────────────────────────
     def detect_intent(self, text: str) -> Optional[str]:
@@ -95,11 +116,62 @@ class NovaWeather:
         if not data.get("ok"):
             return "I couldn't reach the weather service just now."
 
+        self.last_panel = ("weather", self._panel(we, data, label))
+
         if intent == "tomorrow":
             return we.say_day(data, 1, "tomorrow", label)
         if intent == "week":
             return self._say_week(we, data, label)
         return we.say_current(data, label)
+
+    # ── Panel ─────────────────────────────────────────────────────────────────
+    def _panel(self, we, data: dict, label: Optional[str]) -> dict:
+        """The screen gets the whole week; the voice gets three days.
+
+        This is the point of having both channels. `_say_week` deliberately
+        stops at three days because a seven-day rundown spoken aloud is a
+        monologue — but seven days on a panel is just a row he can scan.
+        """
+        import panels as P
+
+        cur = data.get("current") or {}
+        days = data.get("days") or []
+        temp = cur.get("temp")
+
+        def deg(v) -> str:
+            return f"{round(v)}°" if isinstance(v, (int, float)) else "—"
+
+        detail_rows = [
+            ("Feels like", deg(cur.get("feels_like"))),
+            ("Humidity", f"{round(cur['humidity'])}%"
+                if isinstance(cur.get("humidity"), (int, float)) else "—"),
+            ("Wind", f"{round(cur['wind'])} mph"
+                if isinstance(cur.get("wind"), (int, float)) else "—"),
+        ]
+
+        week = []
+        for i, d in enumerate(days[:7]):
+            when = "Today" if i == 0 else ("Tomorrow" if i == 1
+                                           else _weekday_in(i))
+            rain = d.get("rain_chance")
+            week.append({
+                "title": when,
+                "detail": we.describe_code(d.get("code")).capitalize(),
+                "meta": f"{deg(d.get('high'))} / {deg(d.get('low'))}"
+                        + (f"   {round(rain)}% rain"
+                           if isinstance(rain, (int, float)) and rain else ""),
+            })
+
+        return P.panel(
+            title="Weather",
+            subtitle=label or "Here",
+            blocks=[
+                P.stat(deg(temp), label="Now",
+                       detail=we.describe_code(cur.get("code")).capitalize()),
+                P.rows(detail_rows),
+                P.items(week, title="Next few days") if week else None,
+            ],
+        )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
     def _here(self):

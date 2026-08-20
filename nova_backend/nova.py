@@ -112,6 +112,18 @@ def _content_before_sleep(text: str, idx: int) -> str:
     # Needs to be a real sentence, not a stray word.
     return lead if len(lead.split()) >= 3 else ""
 
+# Musing, not commanding. "Scroll through my photos sometime" opens with an
+# action verb and survives every handler, so the unsupported guard refused it
+# with "I can't do that" — when he was thinking out loud, not asking. Same
+# family as the sign-off guard: "I was so tired I had to go to sleep early" is
+# a story, not an instruction.
+_HYPOTHETICAL_RE = re.compile(
+    r"\b(?:sometime|someday|some\s+day|one\s+day|at\s+some\s+point|"
+    r"eventually|one\s+of\s+these\s+days|when\s+i\s+get\s+a\s+chance)\b"
+    r"[\s.!?]*$",
+    re.I,
+)
+
 # An imperative that survived every handler. The verbs are ones Nova either
 # performs deterministically or cannot perform at all — so if one reaches the
 # LLM stage, the honest answer is "I can't", never the model's guess.
@@ -201,6 +213,7 @@ class VoiceAssistant:
       1. System commands  (sleep / wake / mute)
       2. Calendar follow-up offer ("want to hear what's coming up?" -> yes/no)
       2b. Pending file question ("which one?" / "move it to Documents?")
+      2c. UI navigation  (go home / show me the menu / go to finance)
       3. Calendar intents (read/create/complete/delete/update events + reminders)
       4. Screen awareness (what's on my screen / what app am I in)
       4b. Weather (current / tomorrow / next few days, here or a named place)
@@ -214,7 +227,13 @@ class VoiceAssistant:
 
     # ── Init ──────────────────────────────────────────────────────────────────────
     def __init__(self) -> None:
+        # The boot sequence starts before anything else does, because it is
+        # describing exactly this: the engines coming up. It runs on its own
+        # thread, so it costs startup nothing.
+        from sounds import NovaSounds
         self.config = load_config()
+        self.sounds = NovaSounds(self.config)
+        self.sounds.play("boot")
         self._init_state()
         self._init_engines()
 
@@ -231,6 +250,18 @@ class VoiceAssistant:
         self.is_muted         = False
         self.is_awake         = True
         self._last_response   = ""
+        # True once he has actually started talking to Nova this session — the
+        # wake word, or typing. Home's greeting and status row are the RESTING
+        # state and go the moment this flips. Kept separate from
+        # `_last_response` because that only becomes true after she ANSWERS,
+        # which is a beat too late to be a greeting.
+        self._conversation_started = False
+        # A harness builds the assistant through _init_state alone, so the
+        # cues have to exist here too — silent by default in that case, since
+        # nothing has configured or started them.
+        if not hasattr(self, "sounds"):
+            from sounds import NovaSounds
+            self.sounds = NovaSounds(self.config)
         # A SOFT one-shot follow-up armed by a calendar read ("want to hear
         # what's coming up?"). It only fires on an affirmative reply and never
         # eats an unrelated next command.
@@ -251,6 +282,16 @@ class VoiceAssistant:
         # Set when a sleep phrase rode along with real content: answer the
         # content first, then return to wake mode.
         self._sleep_after_turn = False
+        # This turn came from the keyboard and must not be spoken aloud. Only
+        # ever set for the duration of one typed turn.
+        self._silent_turn = False
+        # Working alongside him on his Mac: Nova is parked in the puck, the
+        # conversation timeout is long, and she stays there until he says go
+        # home. Entered by phrase OR automatically the moment she does
+        # something on his machine.
+        self.work_mode = False
+        # Said once per episode, not every pass round the wake loop.
+        self._mic_warned = False
 
         # Shared microphone gate. Set = capture allowed; cleared = mic paused.
         # A voice assistant must not record while it speaks — both to avoid
@@ -274,10 +315,29 @@ class VoiceAssistant:
         self._init_files()
         self._init_screen()
         self._init_weather()
+        self._init_market()
+        self._init_actuation()
         self._init_ws()
+        # After the WS server exists: the tap is created during _init_stt, which
+        # runs earlier, so this cannot be done at the point of creation.
+        # /api/status reports it because "is barge-in actually on" is otherwise
+        # invisible — it needs a Screen Recording grant, macOS 13+, and a live
+        # stream, and when any of those is missing Nova quietly goes back to
+        # pausing his music.
+        if getattr(self, "system_audio", None) is not None:
+            self.ws._system_audio = self.system_audio
+        # Space bar. Deterministic where acoustics never are: no threshold, no
+        # cancellation, nothing to mishear. It also means the WAKE WORD no
+        # longer has to survive her own voice, which was the hardest problem in
+        # the build and is now simply not on the critical path.
+        self.ws.on_interrupt = self._barged_in
+        self._init_views()          # after _init_ws: it needs the WS server
         self._verify_engines()
+        self._show_home()
         self._warm_prompt_cache()
         log.info("Nova ready.")
+        self.sounds.play("ready")   # systems online
+
 
     def _warm_prompt_cache(self) -> None:
         """Pre-process the unchanging head of the system prompt so the FIRST
@@ -306,7 +366,9 @@ class VoiceAssistant:
     # __init__, and the behaviour suite missed it because the test harness
     # initialized engines by hand. Fail loudly at startup instead.
     _REQUIRED_ENGINES = ("stt", "llm", "tts", "memory", "tools",
-                         "calendar", "files", "screen", "weather", "ws")
+                         "calendar", "files", "screen", "weather", "market", "actuation",
+                         "ws",
+                         "views")
 
     def _verify_engines(self) -> None:
         missing = [name for name in self._REQUIRED_ENGINES
@@ -321,11 +383,70 @@ class VoiceAssistant:
     def _init_stt(self) -> None:
         log.info("Loading STT (faster-whisper)…")
         from stt_engine import STTEngine
+        self._init_echo()
         self.stt = STTEngine(
             self.config["stt"],
             mic_gate=self.mic_gate,
             wake_config=self.config.get("wake_word", {}),
+            echo=self.echo,
         )
+        # Barge-in: the wake detector is allowed to hear Nova, and when it does
+        # she stops mid-sentence. Wired here because the STT engine must not
+        # know what a TTS engine is.
+        try:
+            self.stt.on_barge_in = self.tts.stop_and_flush
+        except AttributeError:
+            pass                       # TTS is built later; re-pointed below
+
+    def _init_echo(self) -> None:
+        """Optional echo canceller, shared by TTS (which supplies the
+        reference) and STT (which consumes it). Default OFF: it also means
+        keeping mic frames during playback, and Nova listens far more often
+        than she speaks."""
+        self.echo = None
+        self.system_audio = None
+        tap_cfg = self.config.get("audio", {}).get("system_tap", {})
+        want_tap = bool(tap_cfg.get("enabled", False))
+        # The tap is a REASON to cancel, not an extra on top of it. Nova only
+        # ever had a reference for her own voice; with the speaker mix arriving
+        # she has one for everything, so cancellation turns itself on.
+        if not (self.config["stt"].get("echo_cancellation", False) or want_tap):
+            return
+        try:
+            from echo_canceller import EchoCanceller
+            self.echo = EchoCanceller(
+                stream_delay_ms=int(self.config["stt"].get(
+                    "echo_stream_delay_ms", 35)))
+            if not self.echo.enabled:
+                self.echo = None
+        except Exception as exc:
+            log.warning(f"echo cancellation unavailable: {exc}")
+            self.echo = None
+
+        if want_tap and self.echo is not None:
+            try:
+                from system_audio import SystemAudioReceiver
+                self.system_audio = SystemAudioReceiver(self.echo)
+                if not self.system_audio.start():
+                    self.system_audio = None
+
+            except Exception as exc:
+                log.warning(f"speaker mix unavailable: {exc}")
+                self.system_audio = None
+
+    @property
+    def hears_speakers(self) -> bool:
+        """True while the speaker mix is actually arriving.
+
+        Everything that exists to work AROUND Nova hearing the speakers is
+        conditioned on this: pausing his music, and dropping mic frames while
+        she talks. Both of those are the old workaround, and both should stop
+        the moment the real fix is running — and start again the moment it
+        stops, which is why this asks the receiver rather than reading a flag
+        set at startup.
+        """
+        rx = getattr(self, "system_audio", None)
+        return bool(rx is not None and rx.is_live)
 
     def _init_llm(self) -> None:
         # MLX arrays and Metal GPU streams are thread-local: the model must be
@@ -401,7 +522,18 @@ class VoiceAssistant:
     def _init_tts(self) -> None:
         log.info("Loading TTS (Kokoro ONNX)…")
         from tts_engine import TTSEngine
-        self.tts = TTSEngine(self.config["tts"], mic_gate=self.mic_gate)
+        self.tts = TTSEngine(self.config["tts"], mic_gate=self.mic_gate,
+                             echo=self.echo)
+        self.stt.on_barge_in = self._barged_in
+        # Continuous, because the main loop is blocked inside
+        # tts.wait_until_done() for the whole time she is speaking — which is
+        # exactly the window barge-in has to cover.
+        self.stt.start_barge_watch()
+        # Kokoro is already in the speaker mix; see tts_engine.suppress_reference.
+        try:
+            self.tts.suppress_reference = lambda: self.hears_speakers
+        except Exception:
+            pass
 
     def _init_memory(self) -> None:
         from memory import NovaMemory
@@ -432,7 +564,8 @@ class VoiceAssistant:
         from tools import NovaTools
         # on_announce lets a timer speak when it fires — nothing is asking at
         # that moment, so it needs its own safe path to the floor.
-        self.tools = NovaTools(self.config, on_announce=self._announce)
+        self.tools = NovaTools(self.config, on_announce=self._announce,
+                               on_progress=self._show_work)
 
     def _init_calendar(self) -> None:
         # NovaCalendar's LLM extraction/summarize calls run on the nova-llm
@@ -458,6 +591,11 @@ class VoiceAssistant:
 
     @property
     def _duck_enabled(self) -> bool:
+        # Pausing his music was always a workaround for not being able to
+        # cancel it. With the speaker mix arriving it is cancelled for real, so
+        # the music keeps playing — which is the whole point of barge-in.
+        if self.hears_speakers:
+            return False
         return bool(self.config.get("music", {}).get("duck_while_listening", True))
 
     def _init_weather(self) -> None:
@@ -465,6 +603,18 @@ class VoiceAssistant:
         # temperature. See weather_engine.py for the invariant-3 decision.
         from weather_intents import NovaWeather
         self.weather = NovaWeather(self.config)
+
+    def _init_actuation(self) -> None:
+        # Typing and clicking. Needs the assistant so it can check work mode,
+        # which is the gate that keeps it from driving his Mac unasked.
+        from actuation_intents import NovaActuation
+        self.actuation = NovaActuation(self.config, assistant=self)
+
+    def _init_market(self) -> None:
+        # Deterministic end to end: no model ever phrases a price. See
+        # market_engine.py for the invariant-3 decision.
+        from market_intents import NovaMarket
+        self.market = NovaMarket(self.config)
 
     def _init_ws(self) -> None:
         from ws_server import NovaWSServer
@@ -482,6 +632,243 @@ class VoiceAssistant:
             maps_engine.set_location_requester(self.ws.request_location)
         except Exception as exc:
             log.warning(f"could not wire the location requester: {exc}")
+
+    def _init_views(self) -> None:
+        # UI navigation ("go home", "show me the menu"). Needs the WS server, so
+        # this must stay AFTER _init_ws. Deterministic regex only — the 3B is
+        # never asked which screen he meant.
+        # getattr, not self.ws: the routing harness calls the REAL _init_views()
+        # without booting a server, and a harness that had to build NovaViews
+        # itself is exactly the drift rule 1 exists to prevent.
+        from views import NovaViews
+        self.views = NovaViews(self.config, ws=getattr(self, "ws", None),
+                               assistant=self)
+
+    def _sounds_like_me(self, text: str) -> bool:
+        """True when a capture is mostly Nova's own last reply coming back.
+
+        Word overlap rather than equality: the speaker-to-mic path mangles
+        edges, so an exact match almost never happens, but the middle of the
+        sentence survives intact.
+        """
+        said = (self._last_response or "").lower()
+        heard = (text or "").lower()
+        if len(heard.split()) < 3 or not said:
+            return False
+        mine = set(re.findall(r"[a-z']+", said))
+        theirs = re.findall(r"[a-z']+", heard)
+        if not mine or not theirs:
+            return False
+        overlap = sum(1 for w in theirs if w in mine) / len(theirs)
+        return overlap >= 0.7
+
+    def _check_mic_health(self) -> None:
+        """Notice a microphone that is delivering nothing, and say so.
+
+        Measured on his Mac: with AirPods Pro as the default input the stream
+        returned RMS 0.0 and peak 0, while the built-in mic in the same room
+        returned RMS 29. Nova scored 0.000 forever and looked perfectly fine.
+        """
+        if not getattr(self.stt, "mic_is_silent", False):
+            self._mic_warned = False
+            return
+        if self._mic_warned:
+            return
+        self._mic_warned = True
+
+        # Reopening picks up the CURRENT default device, which fixes the common
+        # case: he switched headphones and the old stream is bound to nothing.
+        recovered = False
+        try:
+            recovered = self.stt.reopen_stream()
+        except Exception as exc:
+            log.warning(f"mic reopen failed: {exc}")
+        if recovered:
+            log.info("Mic reopened; waiting to see whether audio returns.")
+            return
+
+        self.set_state("unsure")
+        self._respond(
+            "I can't hear anything. My microphone is connected but it isn't "
+            "picking up any sound. Check which input device is selected.")
+
+    def set_work_mode(self, on: bool, *, reason: str = "") -> None:
+        """Enter or leave work mode, and tell the app to park or restore.
+
+        Idempotent: entering while already in work mode must not re-park the
+        window, or every app launch during a session would yank it back to the
+        corner while he is dragging it somewhere else.
+        """
+        if self.work_mode == on:
+            return
+        self.work_mode = on
+        log.info(f"[work-mode] {'on' if on else 'off'}"
+                 + (f" ({reason})" if reason else ""))
+        try:
+            self.ws.send_mode(puck=on)
+        except Exception as exc:
+            log.warning(f"could not send mode: {exc}")
+
+    def _confidence_gate(self, text: str):
+        """Decide whether to act on what was heard. Returns the Decision, or
+        None when gating is off.
+
+        Three outcomes reach Nicholas:
+          REJECT  — she says she did not catch it and waits. No guess.
+          CONFIRM — she reads back HIS words and acts only on a clear yes.
+          ACT_UNSURE — she acts, with the orb showing she was not certain, so a
+                       wrong answer is explainable instead of mysterious.
+        """
+        if not self.config["stt"].get("confidence_gate", True):
+            return None
+        import confidence as C
+
+        # getattr, not attribute access: a missing signal is designed to mean
+        # "behave exactly as before", and that must not become a crash in the
+        # voice loop just because an STT implementation predates this.
+        decision = C.decide(text, getattr(self.stt, "last_confidence", None))
+        log.info(f"[confidence] {decision.score:.2f} tier={decision.tier} "
+                 f"-> {decision.action}")
+
+        if decision.action == C.REJECT:
+            self._respond(C.ask_again(decision.tier))
+            return decision
+
+        if decision.action == C.CONFIRM:
+            # Route the ORIGINAL words on a yes — not a re-transcription, and
+            # not a paraphrase. What he confirms is exactly what was heard.
+            self._tool_confirm = lambda t=text: self._run_confirmed(t)
+            self._respond(decision.readback)
+            return decision
+
+        if decision.is_unsure:
+            # Visible, not spoken. Interrupting every borderline turn with
+            # "I think you said..." would be worse than the problem.
+            self.set_state("unsure")
+        return decision
+
+    def _run_confirmed(self, text: str) -> str:
+        """He confirmed a read-back: run the utterance for real.
+
+        Returns "" because the handlers speak for themselves through _respond;
+        returning their text would say it twice.
+        """
+        self._handle_turn_impl(text)
+        return ""
+
+    def _show_home(self) -> None:
+        """Put Nova on the home screen at startup.
+
+        The WS held view="home" with EMPTY data and nothing ever built the
+        payload, so the app was told "home" and found no blocks to render — it
+        came up as a bare orb and Nicholas could not find the home screen at
+        all. Best-effort: home degrades block by block, and a failure here must
+        never stop Nova starting.
+        """
+        try:
+            self.views.handle("home")
+        except Exception as exc:
+            log.warning(f"could not show home at startup: {exc}")
+        self._start_home_ticker()
+
+    def _start_home_ticker(self) -> None:
+        """Keep home honest about the world while he is looking at it.
+
+        This is what makes Now Playing arrive when HE starts a song rather than
+        when he asks Nova to. It is deliberately one ticker rather than a
+        poller per card: every tile already knows its own refresh interval, and
+        `refresh_home` sends nothing unless the payload actually changed, so a
+        tick where the world stood still costs a dict comparison.
+
+        Daemon, like every other background worker here, so it can never hold
+        the process open (invariant 4's reasoning, applied to a second thread).
+        """
+        seconds = float(self.config.get("ui", {}).get("home_tick_seconds", 4))
+        if seconds <= 0:
+            return
+
+        def _tick() -> None:
+            while True:
+                time.sleep(seconds)
+                try:
+                    self.views.refresh_home()
+                except Exception as exc:
+                    log.warning(f"home tick failed: {exc}")
+
+        threading.Thread(target=_tick, name="nova-home-tick", daemon=True).start()
+
+    def _emit_panel(self, engine) -> None:
+        """Send the panel a handler just built, if it built one.
+
+        One-shot and cleared on read, like `pending_offer`. A handler that
+        produced no panel simply leaves the previous screen alone rather than
+        blanking it — asking the time should not clear his weather.
+        """
+        panel = getattr(engine, "last_panel", None)
+        if panel is None:
+            return
+        engine.last_panel = None
+        try:
+            view_name, payload = panel
+            self.ws.send_view(view_name, payload)
+            # The ticker refreshes home in the background. Without this it
+            # would not know an ANSWER is on screen and would push home
+            # straight over the top of it a few seconds later.
+            self.views.current = view_name
+            self._arm_panel_dismiss()
+        except Exception as exc:
+            # A panel failing must never cost him the spoken answer.
+            log.warning(f"could not send panel: {exc}")
+
+    def _show_work(self, payload: dict) -> None:
+        """Put a live step list on screen while a handler is working.
+
+        Called repeatedly by panels.Progress as a handler advances, so this is
+        the one place the screen learns that Nova is DOING something rather
+        than thinking about it. The orb goes amber on the first push and the
+        panel becomes the work surface.
+
+        Each push re-arms the dismissal, so the surface clears a while after
+        the LAST step rather than mid-run — the same token trick the answer
+        panels use, for the same reason.
+        """
+        try:
+            self.set_state("working")
+            self.ws.send_view("working", payload)
+            # Without this the home ticker would push home straight over the
+            # top of the work she is showing him.
+            self.views.current = "working"
+            self._arm_panel_dismiss()
+        except Exception as exc:
+            # The screen, never the work.
+            log.warning(f"could not show work: {exc}")
+
+    def _arm_panel_dismiss(self) -> None:
+        """Send the panel away again after a while, back to home.
+
+        Panels used to persist until something replaced them, so the weather
+        sat on screen long after he had heard the answer. An answer is
+        transient; the screen should agree with that. Any NEW panel cancels the
+        pending dismissal, so a run of questions never yanks the screen away
+        mid-read.
+        """
+        seconds = float(self.config.get("ui", {}).get("panel_seconds", 25))
+        if seconds <= 0:
+            return
+        token = self._panel_token = getattr(self, "_panel_token", 0) + 1
+
+        def _dismiss() -> None:
+            # Only the LATEST panel's timer may fire.
+            if getattr(self, "_panel_token", 0) != token:
+                return
+            try:
+                self.views.handle("home")
+            except Exception as exc:
+                log.warning(f"panel dismiss failed: {exc}")
+
+        t = threading.Timer(seconds, _dismiss)
+        t.daemon = True
+        t.start()
 
     # ── State broadcasting ────────────────────────────────────────────────────────
     def set_state(self, state: str) -> None:
@@ -530,6 +917,10 @@ class VoiceAssistant:
     def _main_loop(self) -> None:
         in_conversation = False   # once awake, keep listening without the wake word
         empty_turns = 0           # consecutive unintelligible turns
+        # The first pass through is Nova arriving, not a conversation ending —
+        # `ready` has just played and a `rest` on top of it would be two cues
+        # for one event.
+        first_wake = True
         while True:
             if self.is_muted or not self.is_awake:
                 in_conversation = False
@@ -546,6 +937,13 @@ class VoiceAssistant:
                 # a handler raising) and is a no-op when nothing was ducked.
                 if self._duck_enabled:
                     self.tools.restore_music()
+                # Deliberately the wake cue inverted: a fifth DOWN, so he can
+                # tell arriving from leaving without being told which is which.
+                # Only when a conversation actually ended — not at startup,
+                # where `ready` has just played.
+                if not first_wake:
+                    self.sounds.play("rest")
+                first_wake = False
                 log.info("Waiting for wake word…")
                 wake_detected = self.stt.record_wake(
                     wake_keywords=self.config["wake_word"]["keywords"],
@@ -555,6 +953,17 @@ class VoiceAssistant:
                     continue
                 just_woke = True
                 empty_turns = 0
+                # Blocking, and short. It has to be OVER before record_command
+                # opens the mic, or the VAD reads Nova's own chime as speech
+                # onset and Whisper is handed a note instead of a word. Fires
+                # in puck mode too — this is the one path into a conversation.
+                self.sounds.play_and_wait("wake")
+                # He said "Nova". The conversation has started, so the welcome
+                # and the status row go now — not when she finishes answering.
+                # Hooking this to the reply meant "Good morning, NICHOLAS" was
+                # still sitting under the orb while she was already listening
+                # to him, which is the opposite of what a greeting is for.
+                self._begin_conversation()
                 # Duck for the WHOLE conversation, not per turn: restoring
                 # between turns would pump the volume up and down every time
                 # Nova answered. It stays down until we are back up top.
@@ -563,11 +972,26 @@ class VoiceAssistant:
             else:
                 just_woke = False
 
+            # ── Mic health ───────────────────────────────────────────────
+            # A dead input is the one failure Nova cannot notice by listening
+            # harder. Say it out loud ONCE, after trying to recover, so being
+            # deaf is never silent.
+            self._check_mic_health()
+
             # ── Phase 2: Record command (VAD-gated) ──────────────────────────
             self.set_state("listening")
             # In conversation mode, cap how long we wait for the user to start
             # speaking; if they stay silent past the timeout, drop back to wake.
-            conv_timeout = float(self.config["wake_word"].get("conversation_timeout_s", 15.0))
+            # Work mode gets a much longer leash. While they are working
+            # together he reads an email, thinks, scrolls — and the ordinary
+            # 15s would drop the session constantly, forcing a wake word every
+            # time he paused. The session does NOT end at this timeout either:
+            # saying "Nova" resumes in the puck with the conversation intact.
+            conv_timeout = float(
+                self.config["wake_word"].get(
+                    "work_mode_timeout_s" if self.work_mode
+                    else "conversation_timeout_s",
+                    60.0 if self.work_mode else 15.0))
             command_audio = self.stt.record_command(
                 max_duration_s=self.config["stt"]["command_max_duration_s"],
                 start_timeout_s=None if just_woke else conv_timeout,
@@ -623,10 +1047,33 @@ class VoiceAssistant:
                 continue
 
             empty_turns = 0        # a real utterance resets the tolerance
+
+            # ── Confidence gate ──────────────────────────────────────────
+            # The transcript used to be on screen, so a mishear was visible.
+            # It isn't any more, so how sure Whisper was now decides whether
+            # Nova acts — and the bar rises with what the action costs.
+            # Nova must never answer HERSELF. With echo cancellation on, mic
+            # frames are kept while she speaks, and if the room defeats the
+            # canceller Whisper transcribes her own reply — she then answers it,
+            # and the pair of them talk in a loop. Belt and braces: whatever the
+            # canceller does, a transcript that is mostly her own last sentence
+            # is discarded here.
+            if self._sounds_like_me(text):
+                log.info(f"[self-heard] discarding my own voice: {text[:60]!r}")
+                continue
+
+            gate = self._confidence_gate(text)
+            if gate is not None and not gate.should_act:
+                continue
+
             log.info(f"[user] {text}")
             self.memory.add_turn("user", text)
             self._session_turns.append({"role": "user", "content": text})
             self._turn_was_command = False
+            # He SPOKE this one. Clear any silent flag left by a typed turn, or
+            # a single use of the keyboard would mute Nova for the rest of the
+            # session.
+            self._silent_turn = False
             self.ws.send_message("user", text)
             # Run on the MLX worker thread and wait: capture must not resume
             # until the response (and its TTS) is done, or it self-captures.
@@ -662,6 +1109,11 @@ class VoiceAssistant:
         """Called when the conversation ends and Nova returns to wake mode.
         Kicks off the memory reconciliation pass over what was just said — on the
         nova-llm worker thread, off the live path, silent."""
+        # Tell the UI she has gone back to waiting for her name. Nothing ever
+        # broadcast this, so "waiting for the wake word" and "mid-conversation"
+        # looked identical on screen — which is precisely the distinction the
+        # readout under the orb exists to make.
+        self.set_state("sleeping")
         turns = self._session_turns
         self._session_turns = []
         if not turns:
@@ -720,10 +1172,11 @@ class VoiceAssistant:
                 return ""
 
     # ── Text input from SwiftUI (typed / programmatic) ────────────────────────────
-    def _handle_text_input(self, text: str) -> None:
+    def _handle_text_input(self, text: str, silent: bool = False) -> None:
         if not text.strip():
             return
-        log.info(f"[text-input] {text}")
+        log.info(f"[text-input] {text}{' (silent)' if silent else ''}")
+        self._silent_turn = silent
         self.memory.add_turn("user", text)
         self.ws.send_message("user", text)
         # Submit to the MLX worker and return immediately; the response streams
@@ -789,6 +1242,36 @@ class VoiceAssistant:
                 self._respond(resp)
                 return
 
+        # ── 2c. UI navigation ────────────────────────────────────────────────
+        # "go home", "show me the menu", "go to finance". BEFORE calendar,
+        # weather, files and tools, all of which would otherwise claim these:
+        # "go to the weather" has a weather word, "open the memory panel" looks
+        # like an app launch, "go back home" looked like a browser Back.
+        # Detection is anchored at BOTH ends and the destination must be a known
+        # view, so "I go home every friday" and "I want to go to italy someday"
+        # fall straight through to conversation.
+        view_intent = self.views.detect_intent(text)
+        if view_intent is not None:
+            self._respond(self.views.handle(view_intent, text))
+            return
+
+        # ── 2d. Actuation confirmation ────────────────────────────────────────
+        # "That would send it. Want me to?" — answered before routing, so the
+        # yes cannot be re-read as a fresh command.
+        if self.actuation.pending is not None:
+            resp = self.actuation.resolve_pending(text)
+            if resp is not None:
+                self._respond(resp)
+                return
+
+        # ── 2e. Actuation ─────────────────────────────────────────────────────
+        # Typing and clicking, WORK MODE ONLY. Before tools, whose "open X" and
+        # "search X" rules would claim some of this phrasing.
+        act_intent = self.actuation.detect_intent(text)
+        if act_intent is not None:
+            self._respond(self.actuation.handle(act_intent, text))
+            return
+
         # ── 3. Calendar / reminders intents ──────────────────────────────────
         # BEFORE memory + fast-path + tools: detection is strict (needs an
         # unambiguous calendar word), and running it early stops the greedy
@@ -803,6 +1286,7 @@ class VoiceAssistant:
             self.calendar.pending_intent = None
             if followup:
                 self._calendar_offer = lambda fi=followup: self.calendar.handle(fi, "")
+            self._emit_panel(self.calendar)
             self._respond(resp)
             return
 
@@ -822,7 +1306,21 @@ class VoiceAssistant:
         # a weather word must appear, and an action verb rules it out.
         weather_intent = self.weather.detect_intent(text)
         if weather_intent is not None:
-            self._respond(self.weather.handle(text, weather_intent))
+            resp = self.weather.handle(text, weather_intent)
+            self._emit_panel(self.weather)
+            self._respond(resp)
+            return
+
+        # ── 4c. Market data ───────────────────────────────────────────────────
+        # AFTER weather (both answer "how's the X") and BEFORE files and tools,
+        # whose "find X" and "open X" rules would swallow "what's Apple stock
+        # at". Detection needs a finance word AND a resolvable subject, so
+        # "how are you doing" and "I had apple pie" fall straight through.
+        market_intent = self.market.detect_intent(text)
+        if market_intent is not None:
+            resp = self.market.handle(market_intent, text)
+            self._emit_panel(self.market)
+            self._respond(resp)
             return
 
         # ── 5. File management intents ───────────────────────────────────────
@@ -837,6 +1335,7 @@ class VoiceAssistant:
             if self.files.pending_offer is not None:
                 self._calendar_offer = self.files.pending_offer
                 self.files.pending_offer = None
+            self._emit_panel(self.files)
             self._respond(resp)
             return
 
@@ -865,6 +1364,20 @@ class VoiceAssistant:
             if self.tools.pending_offer is not None:
                 self._calendar_offer = self.tools.pending_offer
                 self.tools.pending_offer = None
+            # She just did something on his Mac, so she steps aside into the
+            # corner — the second way into work mode, alongside asking for it.
+            if getattr(self.tools, "touched_mac", False):
+                self.tools.touched_mac = False
+                self.set_work_mode(True, reason="acted on the Mac")
+            # He asked what his CPU was doing: the number she just said should
+            # also be a number he can see, so the status row comes back for a
+            # while and then settles away on its own.
+            if getattr(self.tools, "showed_system", False):
+                self.tools.showed_system = False
+                try:
+                    self.views.recall_system()
+                except Exception as exc:
+                    log.warning(f"could not recall status row: {exc}")
             self._respond(resp)
             return
 
@@ -877,7 +1390,7 @@ class VoiceAssistant:
         # replied "I've opened the coding projects folder for you." A system
         # prompt rule cut that from 4 cases to 1; only refusing deterministically
         # makes it zero.
-        if _ACTION_REQUEST_RE.match(text):
+        if (_ACTION_REQUEST_RE.match(text) and not _HYPOTHETICAL_RE.search(text)):
             log.info(f"[unsupported-action] {text}")
             self._respond(
                 "I can't do that one yet. I'll tell you when I can, rather "
@@ -923,12 +1436,42 @@ class VoiceAssistant:
         self.set_state("idle")
 
     # ── Respond helper ────────────────────────────────────────────────────────────
+    def _barged_in(self) -> None:
+        """He talked over her: stop, and SAY so on screen immediately.
+
+        The orb read "Speaking" for a moment after she had gone quiet, because
+        nothing broadcast a state until the main loop unblocked from
+        `tts.wait_until_done`. From where he is sitting that is Nova ignoring
+        him — the one impression barge-in exists to prevent.
+        """
+        self.tts.stop_and_flush()
+        self.set_state("listening")
+
+    def _begin_conversation(self) -> None:
+        """The welcome is over: he is talking to her now.
+
+        The greeting and the status row are a RESTING state — what home looks
+        like when nobody has said anything yet. The wake word is exactly the
+        moment that stops being true, so this fires there rather than on her
+        reply: waiting for the answer left "Good morning, NICHOLAS" under the
+        orb while she was already listening to him.
+
+        Typing counts too (see _respond), because Cmd-T is a conversation that
+        never passes the wake word.
+        """
+        self._conversation_started = True
+        try:
+            self.views.refresh_home()
+        except Exception as exc:
+            log.warning(f"could not retire the greeting: {exc}")
+
     def _respond(self, text: str) -> None:
         """Canonical response path: log → store → broadcast → speak."""
         text = text.strip()
         if not text:
             return
         self._last_response = text
+        self._begin_conversation()
         self.memory.add_turn("assistant", text)
         # Deliberately NOT added to _session_turns. This is the deterministic
         # command path; only real conversation is worth learning from. Feeding
@@ -937,6 +1480,15 @@ class VoiceAssistant:
         self._mark_turn_was_command()
         self.ws.send_message("assistant", text)
         log.info(f"[nova] {text}")
+
+        # Typed in, typed back. When Nicholas types instead of talking he is
+        # usually somewhere he cannot talk, so speaking the answer aloud is the
+        # last thing he wants. The reply still reaches the UI over the WS.
+        if self._silent_turn:
+            self.set_state("idle")
+            self._settle_panels()
+            return
+
         self.set_state("speaking")
         # Clean at the SPEAKING boundary, not just on the LLM path. Everything
         # deterministic came through here uncleaned — and the offending text is
@@ -947,6 +1499,18 @@ class VoiceAssistant:
         self.tts.speak(_clean_for_tts(text))
         self.tts.wait_until_done(timeout=60)
         self.set_state("idle")
+        # She has stopped talking, so anything held on screen for him to READ
+        # can start its clock now. Armed here rather than in the handler
+        # because a timer started before she spoke is already half spent by
+        # the time he has heard the answer.
+        self._settle_panels()
+
+    def _settle_panels(self) -> None:
+        try:
+            self.views.settle_system(
+                float(self.config.get("ui", {}).get("status_recall_seconds", 10)))
+        except Exception as exc:
+            log.warning(f"could not settle the status row: {exc}")
 
     # ═════════════════════════════════════════════════════════════════════════════
     # Fast-path intents (date / time / greeting / repeat)
@@ -1268,6 +1832,7 @@ class VoiceAssistant:
         self.tts.wait_until_done(timeout=60)
 
         self._last_response = full_response
+        self._begin_conversation()
         self.memory.add_turn("assistant", full_response)
         self._session_turns.append({"role": "assistant", "content": full_response})
         self.ws.send_message("assistant", full_response)

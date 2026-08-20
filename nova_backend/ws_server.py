@@ -8,6 +8,7 @@ WS message types (JSON):
   {"type": "state",   "state": "idle|listening|thinking|speaking"}
   {"type": "message", "role": "user|assistant", "content": "..."}
   {"type": "token",   "token": "..."}    ← streaming LLM tokens
+  {"type": "view",    "view": "home", "data": {...}}   ← which screen to show
 
 Ports differ from Jarvis (3000/8765) so both can run simultaneously.
 """
@@ -19,7 +20,7 @@ import json
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Callable
+from typing import Callable, Optional
 
 log = logging.getLogger("nova.ws")
 
@@ -29,7 +30,7 @@ class NovaWSServer:
         self,
         http_port: int,
         ws_port: int,
-        on_text_message: Callable[[str], None],
+        on_text_message: Callable[[str, bool], None],
     ) -> None:
         self.http_port        = http_port
         self.ws_port          = ws_port
@@ -39,6 +40,16 @@ class NovaWSServer:
         self._clients_lock    = threading.Lock()
         self._messages: list  = []           # rolling window for /api/messages
         self._state           = "idle"
+        # Which screen the UI should be showing, and its panel data. Held so a
+        # client that connects (or reconnects after an app relaunch) is told
+        # immediately, the same way it is told the current state — otherwise the
+        # window comes up blank until Nicholas happens to navigate somewhere.
+        self._view            = "home"
+        self._view_data: dict = {}
+        self._system_audio = None
+        # Called when he presses the interrupt key. Set by nova.py.
+        self.on_interrupt = None
+        self._puck            = False
         self._running         = False
         # Event loop that owns the WS connections. Broadcasts originate on other
         # threads (LLM worker, main), so sends must be scheduled back onto it.
@@ -68,6 +79,47 @@ class NovaWSServer:
 
     def stream_token(self, token: str) -> None:
         self._ws_broadcast({"type": "token", "token": token})
+
+    def send_mode(self, puck: bool) -> None:
+        """Park Nova in the corner, or bring her back.
+
+        Held like the state and the view so a reconnecting app lands in the
+        right shape — though Nova always LAUNCHES full size regardless, which
+        the app enforces on its side."""
+        self._puck = puck
+        self._ws_broadcast({"type": "mode", "puck": puck})
+
+    def audio_status(self) -> dict:
+        """What the speaker-mix tap is doing, if anything."""
+        rx = getattr(self, "_system_audio", None)
+        if rx is None:
+            return {"system_tap": "off"}
+        try:
+            st = rx.stats
+            out = {"system_tap": "live" if st.get("live") else "silent",
+                   "packets": st.get("packets"), "age_s": st.get("age_s")}
+            ec = getattr(rx, "_echo", None)
+            db = getattr(ec, "attenuation_db", None) if ec is not None else None
+            if db is not None:
+                out["removed_db"] = db
+            d = getattr(ec, "delay_ms", None) if ec is not None else None
+            if d is not None:
+                out["delay_ms"] = d
+            return out
+        except Exception:
+            return {"system_tap": "unknown"}
+
+    def send_view(self, view: str, data: Optional[dict] = None) -> None:
+        """Tell the UI which screen to show, and give it the data to show.
+
+        The panel is fed by whoever ALREADY computed the structure — the
+        calendar, weather and file handlers all build real objects and then
+        flatten them to one spoken sentence. This is how that structure reaches
+        the screen without the LLM ever touching it, which is what keeps the
+        panel free of invented numbers."""
+        self._view = view
+        self._view_data = data or {}
+        self._ws_broadcast({"type": "view", "view": view, "data": self._view_data})
 
     def request_location(self) -> None:
         """Ask the Swift app for a fresh location fix.
@@ -115,9 +167,14 @@ class NovaWSServer:
             async def handler(websocket):
                 with server_ref._clients_lock:
                     server_ref._clients.add(websocket)
-                # Send current state immediately on connect
+                # Send current state AND current view immediately on connect, so
+                # a relaunched app comes up on the right screen instead of blank.
                 await websocket.send(
                     json.dumps({"type": "state", "state": server_ref._state})
+                )
+                await websocket.send(
+                    json.dumps({"type": "view", "view": server_ref._view,
+                                "data": server_ref._view_data})
                 )
                 try:
                     async for raw in websocket:
@@ -126,7 +183,8 @@ class NovaWSServer:
                             if data.get("type") == "message":
                                 content = data.get("content", "").strip()
                                 if content:
-                                    server_ref.on_text_message(content)
+                                    server_ref.on_text_message(
+                                        content, bool(data.get("silent", False)))
                         except (json.JSONDecodeError, KeyError):
                             pass
                 except Exception:
@@ -158,15 +216,45 @@ class NovaWSServer:
 
             def do_GET(self):
                 if self.path == "/api/status":
-                    self._json({"status": "ok", "state": server_ref._state})
+                    # `audio` reports whether the speaker mix is actually
+                    # arriving. Exposed because "is barge-in on right now" is
+                    # otherwise invisible: it depends on a Screen Recording
+                    # grant, a macOS version and a live UDP stream, and when it
+                    # is off Nova silently reverts to pausing his music.
+                    self._json({"status": "ok", "state": server_ref._state,
+                                "audio": server_ref.audio_status()})
+
+                elif self.path == "/api/interrupt":
+                    # GET as well as POST: a key press should never be blocked
+                    # by a preflight or a content type.
+                    cb = server_ref.on_interrupt
+                    if cb:
+                        try:
+                            cb()
+                        except Exception:
+                            pass
+                    self._json({"ok": True})
 
                 elif self.path.startswith("/api/messages"):
                     self._json({"messages": server_ref._messages[-50:]})
+
+                elif self.path == "/api/view":
+                    self._json({"view": server_ref._view,
+                                "data": server_ref._view_data})
 
                 else:
                     self.send_error(404)
 
             def do_POST(self):
+                if self.path == "/api/interrupt":
+                    cb = server_ref.on_interrupt
+                    if cb:
+                        try:
+                            cb()
+                        except Exception:
+                            pass
+                    self._json({"ok": True})
+                    return
                 length = int(self.headers.get("Content-Length", 0))
                 body   = self.rfile.read(length)
                 try:
@@ -188,9 +276,11 @@ class NovaWSServer:
                             status=400,
                         )
                         return
+                    # silent: answer in text only. The app sets this when
+                    # Nicholas typed rather than spoke.
                     threading.Thread(
                         target=server_ref.on_text_message,
-                        args=(content,),
+                        args=(content, bool(data.get("silent", False))),
                         daemon=True,
                     ).start()
                     self._json({"ok": True})

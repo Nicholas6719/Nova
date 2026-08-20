@@ -57,3 +57,7 @@ python-dotenv>=1.0.0
 # NOTE: do NOT add the `moondream` package. 2.x silently calls a cloud API,
 # and 0.0.6 pins huggingface-hub/tokenizers to versions mlx_lm cannot import.
 pyobjc-framework-Vision>=12.2.1
+
+# Echo cancellation, so Nova can be interrupted while speaking.
+# Optional: without it stt.echo_cancellation simply stays off.
+pywebrtc-audio>=0.1.0

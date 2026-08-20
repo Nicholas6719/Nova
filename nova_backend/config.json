@@ -17,14 +17,23 @@
     "vad_aggressiveness": 2,
     "beam_size": 5,
     "pre_roll_ms": 480,
-    "_beam_note": "5 = beam search. An earlier 8-clip test at one noise level made greedy (1) look better; a proper sweep (126 clips, 3 voices, 3 noise levels) says the opposite — beam=5 scores 20.4% WER / 61.1% exact against greedy's 23.6% / 53.2%, for 44ms. Beam search CAN loop on the initial_prompt, which is what the transcription-loop guard in this file is for.",
+    "_beam_note": "5 = beam search. An earlier 8-clip test at one noise level made greedy (1) look better; a proper sweep (126 clips, 3 voices, 3 noise levels) says the opposite \u2014 beam=5 scores 20.4% WER / 61.1% exact against greedy's 23.6% / 53.2%, for 44ms. Beam search CAN loop on the initial_prompt, which is what the transcription-loop guard in this file is for.",
     "_pre_roll_note": "pre_roll_ms: audio kept from BEFORE speech is detected. webrtcvad fires late on soft onsets, and losing the first syllable is the worst thing that can happen to a transcript: measured, 200ms lost drops exact matches from 81% to 21%, while carrying 500ms of extra lead-in costs nothing. Was 150ms.",
     "sample_rate": 16000,
     "silence_duration_s": 1.2,
     "post_wake_grace_s": 2.0,
-    "_grace_note": "How long Nicholas has to START his command after saying the wake word. The wake word is replayed from the pre-wake buffer, so the recorder already counts itself as 'speaking' and the normal 700ms silence cutoff applied immediately — saying 'Nova', pausing to think, then speaking looked like the wake word not working. Only applies until he starts talking; normal cutoffs take over after that.",
+    "_grace_note": "How long Nicholas has to START his command after saying the wake word. The wake word is replayed from the pre-wake buffer, so the recorder already counts itself as 'speaking' and the normal 700ms silence cutoff applied immediately \u2014 saying 'Nova', pausing to think, then speaking looked like the wake word not working. Only applies until he starts talking; normal cutoffs take over after that.",
     "min_speech_duration_s": 0.5,
-    "command_max_duration_s": 15.0
+    "command_max_duration_s": 15.0,
+    "echo_cancellation": true,
+    "echo_stream_delay_ms": 35,
+    "_aec_note": "OFF. Turning it on keeps mic frames during playback so she can be interrupted \u2014 and in his REAL room that made her hear herself, transcribe it, and answer herself in a loop. The 27-36 dB measurement was against a SIMULATED speaker path; his room is the test that matters and it failed. The canceller and the self-hearing guard both stay; this flag is what needs his ears before it goes back on.",
+    "confidence_gate": true,
+    "_confidence_note": "Gate action on how sure Whisper was. Nova has no transcript on screen any more, so a mishear is otherwise silent. Measured over 270 clips (18 commands x 3 voices x 5 noise levels): a -0.50 floor catches 75% of mishears while asking again unnecessarily only 5% of the time. The bar rises with consequence - chat is cheap to get wrong, sending a message is not, and anything outbound is read back regardless of confidence. Set false to act on every transcript as Nova did before.",
+    "barge_in": false,
+    "_barge_in_note": "OFF, and deliberately. Barge-in is the SPACE BAR now: POST /api/interrupt, no threshold, no cancellation, nothing to mishear. That also takes the hardest problem in the build off the critical path \u2014 the wake word no longer has to be heard over Nova's own voice. The acoustic path still exists and still works; it is simply not what he relies on.",
+    "_echo_note": "ON. This was off for a long time because enabling it used to hold the mic gate permanently open, so the command recorder's VAD never saw a quiet frame and every turn ran to the 15s cap. That is fixed: the gate is SPLIT, _audio_q is still shut while Nova speaks, and only the wake detector reads the cancelled stream. Cancels Nova's OWN voice (27-36 dB) which is all barge-in needs; the system tap for music is separate and still off.",
+    "_delay_note": "35ms is Kokoro's path: she hands the samples to the canceller microseconds before they are played, so the only delay is the speaker and the room. It was left at 120 from tuning the SYSTEM TAP, whose path is much longer, and never put back when the tap was switched off \u2014 so the canceller spent every barge-in attempt aligned for a signal that was not arriving, cancelled Nova badly, and the wake detector heard her instead of him."
   },
   "tts": {
     "primary": "kokoro",
@@ -65,7 +74,14 @@
     "oww_threshold": 0.5,
     "oww_trigger_level": 2,
     "oww_vad_threshold": 0.5,
-    "_note": "engine: 'transcript' (legacy Whisper scan) or 'openwakeword' (neural, noise-robust). Stays 'transcript' until the trained nova.onnx is validated, then flip to 'openwakeword'. oww_* tune the neural detector: threshold=per-window score to count as a hit, trigger_level=consecutive hits to fire, vad_threshold=Silero speech gate (0 disables). After Nova replies it stays in conversation mode (no wake word) until conversation_timeout_s of silence."
+    "_note": "engine: 'transcript' (legacy Whisper scan) or 'openwakeword' (neural, noise-robust). Stays 'transcript' until the trained nova.onnx is validated, then flip to 'openwakeword'. oww_* tune the neural detector: threshold=per-window score to count as a hit, trigger_level=consecutive hits to fire, vad_threshold=Silero speech gate (0 disables). After Nova replies it stays in conversation mode (no wake word) until conversation_timeout_s of silence.",
+    "work_mode_timeout_s": 60.0,
+    "_work_mode_note": "How long Nova waits for him to start speaking while working alongside him in the puck, versus conversation_timeout_s everywhere else. Longer because while they work he reads, thinks and scrolls, and the 15s default would drop the session every time he paused. The session does not end here either: saying the wake word resumes IN the puck with the conversation intact.",
+    "_keywords_note": "MEASURED 2026-08-17, over the speakers, 3 trials each: 'Nova, <command>' fires 6/6 at scores 0.86-0.99. 'HEY Nova' fires 0/6 at scores 0.001-0.211 \u2014 the 'Hey' prefix actively destroys the score. And with engine=openwakeword this keywords list is IGNORED entirely: record_wake dispatches to _record_wake_oww WITHOUT passing it, so only the legacy transcript engine reads it. Say 'Nova' followed by the command. The list stays for the transcript fallback.",
+    "_trigger_note": "trigger_level=2 is correct and was re-checked: at 1, 'November is cold' false-fires (it is in the adversarial corpus for exactly that reason). At 2 and 3, 5/5 wake phrases still fire and 0/12 non-wake phrases do.",
+    "barge_threshold": 0.3,
+    "barge_trigger_level": 1,
+    "_barge_note": "A lower bar than oww_threshold, and one window instead of two. His voice reaches the barge-in detector attenuated by the canceller and competing with Nova's own speech, so at the normal 0.5 he had to shout. Being wrong in this direction is cheap: a false fire only stops her talking."
   },
   "server": {
     "http_port": 5001,
@@ -82,7 +98,7 @@
     "rag_enabled": true,
     "rag_docs_dir": "~/Documents",
     "rag_max_distance": 0.45,
-    "_rag_note": "rag_max_distance: how close a document chunk must be before Nova puts it in front of the model (cosine distance, lower = stricter). Raise toward 0.6 to retrieve more eagerly at the cost of injecting irrelevant text into ordinary conversation; see the sweep in rag.py. Dependency and build directories (node_modules, site-packages, .venv, DerivedData…) are never indexed — they were 98% of the corpus."
+    "_rag_note": "rag_max_distance: how close a document chunk must be before Nova puts it in front of the model (cosine distance, lower = stricter). Raise toward 0.6 to retrieve more eagerly at the cost of injecting irrelevant text into ordinary conversation; see the sweep in rag.py. Dependency and build directories (node_modules, site-packages, .venv, DerivedData\u2026) are never indexed \u2014 they were 98% of the corpus."
   },
   "calendar": {
     "natural_confirmations": false,
@@ -91,7 +107,8 @@
   "music": {
     "duck_while_listening": true,
     "duck_level": 20,
-    "_note": "Turn the music down while Nova is listening, then put it back when the conversation ends. Music coming out of the speakers goes into the microphone: measured with music mixed into real command audio, Whisper went from 0% word error in silence to 9.7% at full volume and 709% when loud, where it starts transcribing the music itself. Ducking to 20% recovers most of that. The PLAYER's volume is ducked, never the system's — system volume would take Nova's own voice down with it. Set false to leave the music alone."
+    "_note": "What happens to his music while Nova is listening. PAUSE is the default and the only thing that actually works: ducking to 20% still left Whisper mishearing him at his desk, because 20% of loud is not quiet. With the player paused there is nothing of it in the microphone at all. Set pause_while_listening false to fall back to ducking to duck_level instead. Either way it is the PLAYER, never the system volume, which would take Nova's own voice down with it. This covers players Nova can control; audio from a browser or a video call needs the system-audio tap, which is a separate build.",
+    "pause_while_listening": true
   },
   "weather": {
     "enabled": true,
@@ -103,5 +120,39 @@
     "max_ocr_lines": 80,
     "max_tokens": 90,
     "_note": "Screen awareness reads real window titles + Vision OCR, fully on-device. Describing the screen needs Screen Recording permission for the APP BUNDLE; 'what app am I in' works without it."
+  },
+  "finance": {
+    "enabled": true,
+    "watchlist": [
+      "AAPL",
+      "NVDA",
+      "TSLA",
+      "SPCX",
+      "MSFT"
+    ],
+    "_note": "Market data. Nova is a RESEARCHER, never an advisor: every number is templated from a real payload and the LLM never phrases a price. Two sources - Yahoo for quotes and indices (no key, and Finnhub's index endpoint is paid), Finnhub for symbol search, analyst recommendations, news and fundamentals. The Finnhub key lives at NOVA_DATA_DIR/finnhub_credentials.json, NEVER here: this file is committed. Invariant 3's fourth exception - a stock query leaks what he is invested in. Set enabled false to switch it off."
+  },
+  "actuation": {
+    "enabled": true,
+    "_note": "Nova types and clicks. Refused outside WORK MODE - a hard gate in code, not a line in a prompt. A target must be FOUND BY NAME via Accessibility or Vision OCR bounding boxes before it is clicked; Nova never clicks a coordinate she could not verify. Typing is free (what is typed is visible before it goes anywhere); clicking send/delete/buy is confirmed, and Return is confirmed when the front app is one where Return sends. Needs Accessibility permission for the app bundle. Set false to disable entirely."
+  },
+  "ui": {
+    "panel_seconds": 25,
+    "_panel_note": "How long an answer's panel stays on screen before Nova returns to home. He reported the weather panel outstaying its answer. A new panel cancels the pending dismissal, so a run of questions is never cut off mid-read. 0 disables the dismissal and panels persist as before.",
+    "home_tick_seconds": 2,
+    "_home_tick_note": "How often home re-checks the world while he is looking at it. This is what makes Now Playing appear when HE starts a song rather than when he asks; measured, it appeared 6s after Spotify started at the old 4s tick, which does not feel alive. Cheap by construction: the music check short-circuits on NSWorkspace (0.1ms) when no player is running, every other tile caches on a much longer interval, and nothing is sent unless the payload actually changed. 0 disables it and home only updates when something asks it to.",
+    "status_recall_seconds": 10,
+    "_status_recall_note": "How long the bottom status row stays after he asks about CPU, memory or battery. The clock starts when Nova STOPS TALKING, not when the handler runs, so it is ten seconds of him looking at the number rather than ten seconds of her reading it out."
+  },
+  "sounds": {
+    "enabled": true,
+    "volume": 0.5,
+    "_note": "Nova's four cues, synthesised at import \u2014 no audio files anywhere. boot plays while the engines come up, ready when she is online, wake when the wake word fires (in puck mode too), and rest when a conversation ends and she goes back to waiting. wake and rest are the same two notes inverted: a fifth up to arrive, a fifth down to withdraw, so they are tellable apart across a room. The wake cue is 170ms and BLOCKS, because it has to finish before the microphone opens or the VAD hears it as speech. enabled false makes Nova silent again; volume is 0..1."
+  },
+  "audio": {
+    "system_tap": {
+      "enabled": false,
+      "_note": "OFF because it does not work yet, not because it is unwanted. He asked twice for his music to keep playing while Nova stops hearing it. The tap delivers the speaker mix reliably, but cancellation of it currently measures 2.8-5.4 dB, which leaves Nova effectively deaf to him over music \u2014 worse in daily use than pausing the music, which works. Set true to try it; the blocker is the lag estimator never locking on music, which starves the residual suppressor of the aligned reference it needs (it reached ~19 dB when it had one)."
+    }
   }
 }

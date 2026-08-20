@@ -109,11 +109,32 @@ _APP_ALIASES: dict[str, str] = {
 
 class NovaTools:
     def __init__(self, config: dict,
-                 on_announce: Optional[Callable[[str], None]] = None) -> None:
+                 on_announce: Optional[Callable[[str], None]] = None,
+                 on_progress: Optional[Callable[[dict], None]] = None) -> None:
         self.config = config
         # Called by a timer/short-reminder when it fires. nova.py supplies a
         # callback that speaks safely (never on top of an in-flight response).
         self._on_announce = on_announce
+        # Pushes a live step list to the screen while a handler works. None in
+        # the routing harness, where Progress simply becomes a no-op.
+        self._on_progress = on_progress
+        # True when this turn actually manipulated his Mac (launched an app,
+        # drove the browser). nova.py reads it to park Nova in the corner, so
+        # she gets out of the way of whatever she just opened. One-shot.
+        self.touched_mac = False
+        # True when this turn answered a CPU / memory / battery question. The
+        # home screen reads it to bring the status row back, so the number she
+        # said out loud is also the number he can see. One-shot.
+        self.showed_system = False
+        # Status-row cache. Primed here rather than on first use so the very
+        # first home render — the greeting one, the one he actually looks at —
+        # already has numbers instead of filling in a moment later.
+        self._status_lock = threading.Lock()
+        self._status_cache: list[dict] = []
+        self._status_at = 0.0
+        self._status_busy = False
+        threading.Thread(target=self._refresh_status,
+                         name="nova-status-prime", daemon=True).start()
         # Set to a zero-arg callable when the user must confirm before we act.
         self.pending_confirm: Optional[Callable[[], str]] = None
         # SOFT follow-up ("want me to pull up directions?"). Unlike
@@ -169,7 +190,13 @@ class NovaTools:
                     "the menu bar.")
 
         # ── 5. Brightness ───────────────────────────────────────────────────
-        if "brightness" in low or re.search(r"\b(brighter|dimmer|dim\s+the\s+screen)\b", low):
+        # "brighter days ahead" is not a request to change the display. The
+        # comparative words only count when something on the Mac is named.
+        if "brightness" in low or re.search(
+                r"\b(?:brighter|dimmer|brighten|dim)\b[^.?!]{0,20}"
+                r"\b(?:screen|display|monitor|it)\b", low) or re.search(
+                r"\b(?:screen|display|monitor)\b[^.?!]{0,20}"
+                r"\b(?:brighter|dimmer|brighten|dim)\b", low):
             m = re.search(r"brightness\s+(?:to\s+)?(\d{1,3})\b", low) \
                 or re.search(r"\bset\s+(?:the\s+)?brightness\s+(\d{1,3})\b", low)
             if m:
@@ -189,7 +216,12 @@ class NovaTools:
             return self._mute_audio(mute=not bool(m.group(1)))
         # "music volume" / "Spotify volume" means the PLAYER's own volume — let
         # it fall through to the music section rather than moving system audio.
-        if "volume" in low and not re.search(r"\b(music|spotify|song|track)\b", low):
+        # "the volume of work is insane" is not a request. The word has to be
+        # paired with something to DO to it, or a question about it.
+        if "volume" in low and not re.search(r"\b(music|spotify|song|track)\b", low) \
+           and re.search(r"\b(?:up|down|louder|quieter|softer|increase|raise|"
+                         r"decrease|lower|max|full|mute|off|silent|set|what|"
+                         r"how\s+loud|current|check|\d{1,3})\b", low):
             m = re.search(r"volume\s*(?:to|at)?\s*(\d{1,3})\b", low)
             if m:
                 return self._volume_set(int(m.group(1)))
@@ -210,11 +242,15 @@ class NovaTools:
             return self._battery_status()
 
         # ── 8. System stats ─────────────────────────────────────────────────
-        if re.search(r"\b(ram|memory)\b", low) and not re.search(r"\bremember\b", low):
+        # These three are about the MACHINE. Bare words claimed "my memory is
+        # terrible these days", "in memory of my grandfather", "I need more
+        # space in my closet" and "we should give the team some space" — all
+        # answered with a system stat.
+        if self._MEMORY_STAT_RE.search(low) and not re.search(r"\bremember\b", low):
             return self._memory_status()
         if re.search(r"\bcpu\b|\bprocessor\s+usage\b", low):
             return self._cpu_status()
-        if re.search(r"\b(disk|storage|hard\s+drive|space)\b", low):
+        if self._DISK_STAT_RE.search(low):
             return self._disk_status()
         if re.search(r"\bsystem\s+stats?\b|\bhow.*\b(mac|computer)\b.*\bdoing\b", low):
             return self._all_stats()
@@ -229,7 +265,12 @@ class NovaTools:
             return self._running_apps()
 
         # ── 10. Screenshot ──────────────────────────────────────────────────
-        if any(p in low for p in ("take a screenshot", "screenshot", "capture the screen", "grab the screen")):
+        # Shaped like a request, not a substring. This matched a bare
+        # "screenshot" ANYWHERE, so "shove the old screenshots in the archive
+        # folder" took a fresh capture, dropped a PNG on his Desktop and
+        # reported success — a loud, file-creating side effect for a sentence
+        # that was asking Nova to tidy up.
+        if self._SCREENSHOT_RE.search(low):
             return self._screenshot()
 
         # ── 11. System info ─────────────────────────────────────────────────
@@ -255,10 +296,10 @@ class NovaTools:
 
         # ── 12. Minimize / restore windows ──────────────────────────────────
         m = re.search(r"\b(?:minimi[sz]e|hide)\s+(?:the\s+|my\s+)?(.*)", low)
-        if m:
+        if m and not self._NOT_AN_APP_RE.search(m.group(1).strip()):
             return self._minimize(m.group(1).strip().rstrip("."), minimize=True)
         m = re.search(r"\b(?:unminimi[sz]e|restore|bring\s+back|un-?hide)\s+(?:the\s+|my\s+)?(.*)", low)
-        if m:
+        if m and not self._NOT_AN_APP_RE.search(m.group(1).strip()):
             return self._minimize(m.group(1).strip().rstrip("."), minimize=False)
 
         # ── 13. Finder folders (BEFORE app launch: "open downloads" is a
@@ -295,7 +336,7 @@ class NovaTools:
         m = re.match(r"\s*(?:hey\s+|please\s+)?"
                      r"(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?"
                      r"(?:open|launch|start|run|fire\s+up|pull\s+up)\s+(.+)", low)
-        if m:
+        if m and not self._NOT_AN_APP_RE.search(m.group(1).strip()):
             resp = self._open_app(m.group(1).strip().rstrip("."))
             if resp is not None:   # None => not a real app; keep routing
                 return resp
@@ -572,13 +613,147 @@ class NovaTools:
     # ═══════════════════════════════════════════════════════════════════════
     # Battery + system stats
     # ═══════════════════════════════════════════════════════════════════════
+    # Structured readings. These exist because the same numbers now go two
+    # places — Nova SAYS them and the home screen SHOWS them — and a spoken
+    # sentence is a terrible thing to parse back into a percentage. The spoken
+    # versions below are built FROM these, so there is exactly one place where
+    # a reading is taken and one place where it could ever be wrong.
+    #
+    # Every one returns None rather than raising: an unreadable stat costs a
+    # segment of the status row, never the row and never the answer.
+
+    def battery_reading(self) -> Optional[dict]:
+        """{'level': 84, 'charging': True, 'ac': True} or None."""
+        try:
+            out = subprocess.run(["pmset", "-g", "batt"],
+                                 capture_output=True, text=True).stdout
+            m = re.search(r"(\d+)%", out)
+            if not m:
+                return None
+            level = int(m.group(1))
+            ac = "AC Power" in out
+            return {"level": level, "ac": ac, "charging": ac and level < 100}
+        except Exception as e:
+            log.warning(f"battery read failed: {e}")
+            return None
+
+    def memory_reading(self) -> Optional[dict]:
+        """{'used_gb', 'total_gb', 'free_gb', 'pct'} or None."""
+        try:
+            # Checked rather than assumed: under load these occasionally come
+            # back empty, and `int("")` turned a transient into a warning and a
+            # missing segment every few seconds once the row ran on a timer.
+            r = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                               capture_output=True, text=True)
+            raw = (r.stdout or "").strip()
+            if r.returncode != 0 or not raw.isdigit():
+                return None
+            total = int(raw)
+            vm = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+            if not vm:
+                return None
+            page = int(re.search(r"page size of (\d+) bytes", vm).group(1))
+
+            def pages(name):
+                m = re.search(rf"{name}:\s+(\d+)\.", vm)
+                return int(m.group(1)) if m else 0
+
+            free = (pages("Pages free") + pages("Pages inactive")) * page
+            used = total - free
+            gb = 1024 ** 3
+            return {"used_gb": used / gb, "total_gb": total / gb,
+                    "free_gb": free / gb, "pct": round(used / total * 100)}
+        except Exception as e:
+            log.warning(f"memory read failed: {e}")
+            return None
+
+    def cpu_reading(self) -> Optional[dict]:
+        """{'busy': 18, 'idle': 82} or None."""
+        try:
+            out = subprocess.run(["top", "-l", "1", "-n", "0"],
+                                 capture_output=True, text=True).stdout
+            m = re.search(r"CPU usage:\s+([\d.]+)%\s+user,\s+([\d.]+)%\s+sys,"
+                          r"\s+([\d.]+)%\s+idle", out)
+            if not m:
+                return None
+            user, sys_, idle = (float(m.group(i)) for i in (1, 2, 3))
+            return {"busy": round(user + sys_), "idle": round(idle)}
+        except Exception as e:
+            log.warning(f"cpu read failed: {e}")
+            return None
+
+    def status_row(self, max_age: float = 5.0) -> list[dict]:
+        """The bottom-left instrumentation line, ready for panels.metrics().
+
+        NEVER BLOCKS. Measured, `top -l 1` alone is 363ms of a 343ms row, and
+        home is re-rendered at startup, on every panel dismissal, and on every
+        tick of the now-playing poller — paying a third of a second each time
+        to redraw furniture is the wrong trade. So this returns the last
+        reading and refreshes behind it. The row is glanceable context; five
+        seconds of staleness is invisible, and a stalled pipeline is not.
+
+        The spoken answer does NOT come through here: "what's my CPU" calls
+        `cpu_reading` directly and gets a fresh number, because a question
+        deserves a real answer even if it costs 363ms.
+
+        Each reading that fails is simply absent. A row with two of three is
+        still useful; a row that refuses to render because the battery could
+        not be read is not.
+        """
+        now = time.time()
+        with self._status_lock:
+            fresh = (now - self._status_at) < max_age
+            busy = self._status_busy
+            cached = list(self._status_cache)
+            if not fresh and not busy:
+                self._status_busy = True
+                spawn = True
+            else:
+                spawn = False
+        if spawn:
+            t = threading.Thread(target=self._refresh_status,
+                                 name="nova-status", daemon=True)
+            t.start()
+        return cached
+
+    def _refresh_status(self) -> None:
+        """Take the readings and store them. Runs off the pipeline thread."""
+        try:
+            out: list[dict] = []
+            cpu = self.cpu_reading()
+            if cpu:
+                out.append({"label": "CPU", "value": f"{cpu['busy']}%",
+                            "pct": cpu["busy"] / 100.0,
+                            # The only reading that should ever catch his eye.
+                            "alert": cpu["busy"] >= 85})
+            mem = self.memory_reading()
+            if mem:
+                out.append({"label": "Memory", "value": f"{mem['used_gb']:.1f} GB",
+                            "pct": mem["pct"] / 100.0,
+                            "alert": mem["pct"] >= 90})
+            bat = self.battery_reading()
+            if bat:
+                out.append({"label": "Battery", "value": f"{bat['level']}%",
+                            "pct": bat["level"] / 100.0,
+                            "flag": "charging" if bat["charging"] else
+                                    ("plugged" if bat["ac"] else ""),
+                            "alert": bat["level"] <= 15 and not bat["ac"]})
+        except Exception as e:                       # never take the row down
+            log.warning(f"status refresh failed: {e}")
+            out = None
+        with self._status_lock:
+            if out is not None:
+                self._status_cache = out
+            self._status_at = time.time()
+            self._status_busy = False
+
     def _battery_status(self) -> str:
-        output = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
-        m = re.search(r"(\d+)%", output)
-        if not m:
+        self.showed_system = True
+        b = self.battery_reading()
+        if b is None:
             return "I couldn't read the battery level."
-        level = int(m.group(1))
-        if "AC Power" in output:
+        level = b["level"]
+        if b["ac"]:
             status = "and charging" if level < 100 else "and fully charged"
         elif level > 20:
             status = "on battery"
@@ -587,38 +762,23 @@ class NovaTools:
         return f"Battery is at {level} percent, {status}."
 
     def _memory_status(self) -> str:
-        """Free/used RAM from vm_stat (page counts) + total from sysctl."""
-        try:
-            total = int(subprocess.run(["sysctl", "-n", "hw.memsize"],
-                                       capture_output=True, text=True).stdout.strip())
-            vm = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
-            page = int(re.search(r"page size of (\d+) bytes", vm).group(1))
-            def pages(name):
-                m = re.search(rf"{name}:\s+(\d+)\.", vm)
-                return int(m.group(1)) if m else 0
-            free = (pages("Pages free") + pages("Pages inactive")) * page
-            used = total - free
-            gb = 1024 ** 3
-            pct = round(used / total * 100)
-            return (f"You're using about {used/gb:.1f} of {total/gb:.0f} gigabytes of memory, "
-                    f"roughly {pct} percent, with {free/gb:.1f} gigabytes free.")
-        except Exception as e:
-            log.warning(f"memory stat failed: {e}")
+        self.showed_system = True
+        m = self.memory_reading()
+        if m is None:
             return "I couldn't read the memory usage."
+        return (f"You're using about {m['used_gb']:.1f} of {m['total_gb']:.0f} "
+                f"gigabytes of memory, roughly {m['pct']} percent, with "
+                f"{m['free_gb']:.1f} gigabytes free.")
 
     def _cpu_status(self) -> str:
-        try:
-            out = subprocess.run(["top", "-l", "1", "-n", "0"], capture_output=True, text=True).stdout
-            m = re.search(r"CPU usage:\s+([\d.]+)%\s+user,\s+([\d.]+)%\s+sys,\s+([\d.]+)%\s+idle", out)
-            if not m:
-                return "I couldn't read the CPU usage."
-            user, sys_, idle = (float(m.group(i)) for i in (1, 2, 3))
-            busy = round(user + sys_)
-            mood = "mostly idle" if busy < 25 else "working steadily" if busy < 70 else "under heavy load"
-            return f"CPU is at about {busy} percent, {mood}. {round(idle)} percent idle."
-        except Exception as e:
-            log.warning(f"cpu stat failed: {e}")
+        self.showed_system = True
+        c = self.cpu_reading()
+        if c is None:
             return "I couldn't read the CPU usage."
+        busy = c["busy"]
+        mood = ("mostly idle" if busy < 25 else
+                "working steadily" if busy < 70 else "under heavy load")
+        return f"CPU is at about {busy} percent, {mood}. {c['idle']} percent idle."
 
     def _disk_status(self) -> str:
         try:
@@ -777,6 +937,10 @@ class NovaTools:
         resolved = self._resolve_app(name)
         target = resolved or name.title()
         was_running = self._app_running(target)
+        # Opening an app is Nova acting on his machine, which is what puts her
+        # in the corner so she is out of the way of the thing she just opened.
+        # Set BEFORE the launch: if it half-works he still wants her parked.
+        self.touched_mac = True
 
         # Unknown name => None, so the utterance keeps routing and ends up in
         # normal conversation instead of "I couldn't find an app called ...".
@@ -903,11 +1067,23 @@ class NovaTools:
             return bc.navigate_history("back")
         if re.search(r"\bgo\s+forward\b", low):
             return bc.navigate_history("forward")
-        if re.search(r"\b(reload|refresh)\s+(?:the\s+)?(?:page|tab|site)?\b", low):
+        # The object was OPTIONAL, so a bare "refresh" anywhere reloaded his
+        # browser — "refresh my memory on that" did it.
+        if re.search(r"\b(?:reload|refresh)\s+(?:the\s+|this\s+)?"
+                     r"(?:page|tab|site|website|browser)\b", low) \
+           or re.fullmatch(r"\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+                           r"(?:reload|refresh)\s*[.?!]*\s*", low):
             return bc.reload_page()
 
         # ── scrolling ───────────────────────────────────────────────────
-        if re.search(r"\bscroll\b", low):
+        # Anchored as a COMMAND. A bare \bscroll\b anywhere claimed ordinary
+        # sentences — "scroll through my photos sometime" was answered with
+        # "No browser is open right now." Same failure family as the launch
+        # verbs matching mid-sentence.
+        if re.match(r"^(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+                    r"(?:can you\s+)?scroll\b(?:\s+(?:up|down|to|back|"
+                    r"the\s+page|a\s+bit|more|further|down\s+more))?"
+                    r"[\s.?!]*$", low):
             if re.search(r"\b(top|beginning)\b", low):
                 return bc.scroll("top")
             if re.search(r"\b(bottom|end)\b", low):
@@ -934,7 +1110,10 @@ class NovaTools:
                 return f"Searching {label} for {query}."
 
         # ── search the web ──────────────────────────────────────────────
-        m = re.search(r"\b(?:search|google|look\s+up)\s+(?:the\s+web\s+)?(?:for\s+)?(.+)", low)
+        # Anchored at the head of the utterance. As a bare search it grabbed
+        # the "search" inside "job search", so "I'm resuming my job search next
+        # month" ACTIVATED the browser and searched for "next month".
+        m = self._WEB_SEARCH_RE.match(low)
         if m:
             q = re.sub(r"[?.!,]+$", "", m.group(1).strip())
             if q and q not in _FOLDERS:
@@ -1097,32 +1276,86 @@ class NovaTools:
     #   previous  — Music also has `back track` (restart-then-previous)
     _PLAYERS = ("Spotify", "Music")     # preference order
 
+    def any_player_running(self) -> bool:
+        """Cheap pre-check for the home screen's now-playing tile.
+
+        Asks the KERNEL, via pgrep. That detail is the whole point.
+
+        This was NSWorkspace.runningApplications() first, because it is a
+        memory read and costs nothing. It is also WRONG here, and wrong in the
+        worst way — it worked in every test and failed in use. That list is a
+        snapshot maintained by run-loop notifications, and the backend is
+        headless Python with no run loop to service them, so it only ever
+        knows what was running when the process started. Measured: with
+        Spotify launched by Nova mid-session, NSWorkspace said False while
+        AppleScript in the same process said "War Pigs, playing". Now Playing
+        therefore never appeared for any music Nova herself started, which is
+        exactly how Nicholas hit it.
+
+        Same family as the MapKit trap in maps_engine: a Cocoa API whose
+        answers arrive on a loop nobody is running.
+
+        pgrep is 13ms against 145ms for the AppleScript equivalent, needs no
+        run loop, and — unlike `tell application "Spotify"` — cannot start
+        anything by asking. On any doubt it returns True so the real check
+        still gets its say.
+        """
+        for app in self._PLAYERS:
+            try:
+                r = subprocess.run(["pgrep", "-x", app],
+                                   capture_output=True, timeout=4)
+            except Exception:
+                return True                 # cannot tell → let the real check run
+            if r.returncode == 0:
+                return True
+        return False
+
     def _running_player(self, launch_if_none: bool = False) -> Optional[str]:
         """Which music app is running (Spotify preferred). Never auto-launches
         unless asked — `tell application "X"` would otherwise silently start it."""
         for app in self._PLAYERS:
-            r = subprocess.run(
-                ["osascript", "-e",
-                 f'tell application "System Events" to (name of processes) contains "{app}"'],
-                capture_output=True, text=True)
+            try:
+                r = subprocess.run(
+                    ["osascript", "-e",
+                     f'tell application "System Events" to (name of processes) contains "{app}"'],
+                    capture_output=True, text=True, timeout=10)
+            except Exception:
+                continue
             if r.stdout.strip() == "true":
                 return app
         if launch_if_none:
             subprocess.run(["open", "-a", "Spotify"], capture_output=True)
             for _ in range(20):             # wait for it to accept AppleScript
                 time.sleep(0.5)
-                r = subprocess.run(
-                    ["osascript", "-e",
-                     'tell application "System Events" to (name of processes) contains "Spotify"'],
-                    capture_output=True, text=True)
+                try:
+                    r = subprocess.run(
+                        ["osascript", "-e",
+                         'tell application "System Events" to (name of processes) contains "Spotify"'],
+                        capture_output=True, text=True, timeout=10)
+                except Exception:
+                    continue
                 if r.stdout.strip() == "true":
                     time.sleep(1.0)
                     return "Spotify"
         return None
 
     @staticmethod
-    def _osa(script: str) -> tuple[bool, str]:
-        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    def _osa(script: str, timeout: float = 10.0) -> tuple[bool, str]:
+        """Run one AppleScript. ALWAYS bounded.
+
+        Without a timeout a wedged player hangs the caller forever, and the
+        home tiles run these on background threads that never come back — the
+        card simply stops updating for the life of the process, silently.
+        """
+        try:
+            r = subprocess.run(["osascript", "-e", script],
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log.warning("AppleScript timed out")
+            return False, ""
+        except Exception as exc:
+            log.warning(f"AppleScript failed: {exc}")
+            return False, ""
         return r.returncode == 0, (r.stdout or "").strip()
 
     def _player_get(self, app: str, prop: str) -> Optional[str]:
@@ -1141,6 +1374,28 @@ class NovaTools:
             return None
         name, artist, state = (out.split("||") + ["", "", ""])[:3]
         return name.strip(), artist.strip(), state.strip().lower()
+
+    def current_track_for_panel(self) -> Optional[tuple]:
+        """(title, artist) if music is ACTUALLY playing, else None.
+
+        For the home screen, where Now Playing appears only while something is
+        playing — a paused player is not something he wants staring at him.
+        Never launches a player: `_running_player` without launch_if_none, so
+        asking for home does not open Spotify.
+        """
+        # NSWorkspace first: 0.1ms against 289ms for the AppleScript path, and
+        # home asks this every couple of seconds forever. Almost every one of
+        # those asks happens with no player running at all, and that case is
+        # now free.
+        if not self.any_player_running():
+            return None
+        app = self._running_player(launch_if_none=False)
+        if not app:
+            return None
+        np = self._now_playing(app)
+        if not np or not np[0] or np[2] != "playing":
+            return None
+        return np[0], np[1]
 
     def _track_seconds(self, app: str) -> tuple:
         """(position, duration) in seconds — normalising Spotify's ms duration."""
@@ -1208,7 +1463,12 @@ class NovaTools:
             return f"{self._mmss(dur - pos)} left of {self._mmss(dur)}."
 
         # ── transport: next / previous / restart ────────────────────────
-        if re.search(r"\b(next|skip)\b(\s+(the\s+)?(song|track))?\b", low) \
+        # Shaped like a command. A bare \b(next|skip)\b matched "next month",
+        # "next week", "what's next" and "skip the meeting" — every one of them
+        # skipped his music. Third instance of this exact bug in this file,
+        # after "resume" and "screenshot": a transport word that is also an
+        # ordinary English word needs the utterance to be ABOUT it.
+        if self._SKIP_RE.search(low) \
            and not re.search(r"\bskip\s+(?:ahead|forward|back)\b", low):
             app = self._running_player()
             if not app:
@@ -1266,7 +1526,9 @@ class NovaTools:
             return f"{'Skipped ahead' if amt > 0 else 'Went back'} {self._mmss(abs(amt))}."
 
         # ── shuffle / repeat ────────────────────────────────────────────
-        m = re.search(r"\b(shuffle|repeat|loop)\b", low)
+        # "repeat after me", "shuffle the deck of cards" and "the loop of the
+        # rollercoaster" all changed his playback mode.
+        m = self._SHUFFLE_RE.search(low)
         if m:
             app = self._running_player()
             if not app:
@@ -1337,7 +1599,7 @@ class NovaTools:
         # these phrasings used to fall through to "I can't do that one yet",
         # which is the opposite of true.
         _ANY_MUSIC = r"(?:music|songs?|tunes?|something|anything|playback)"
-        if re.search(r"\b(resume|unpause|keep\s+playing)\b", low) \
+        if self._RESUME_RE.search(low) \
            or re.search(r"\b(play|start)\b.*" + MUSIC, low) \
            or re.fullmatch(r"\s*play\s*\.?\s*", low) \
            or re.search(r"\b(?:put|throw)\s+on\b.*" + _ANY_MUSIC, low) \
@@ -1392,6 +1654,90 @@ class NovaTools:
         r"(?:me\s+)?(?:(?:some|a|an|the)\s+)?(.+?)\s*[.?!]*\s*$",
         re.IGNORECASE,
     )
+    # An app name is a NAME. "your feelings", "faith in people", "to new ideas"
+    # are phrases, and treating them as app names produced "I couldn't find an
+    # app called your feelings" in the middle of a conversation. A leading
+    # function word or an embedded preposition is the tell.
+    _NOT_AN_APP_RE = re.compile(
+        r"^(?:to|of|for|with|from|about|your|his|her|their|our|out|up|down|"
+        r"in|on|at|into|onto|off|away|back|it|me|us|them|this|that)\b"
+        r"|\s+(?:in|of|for|with|from|about|into|onto)\s+",
+        re.IGNORECASE,
+    )
+
+    # System stats, asked about the MACHINE rather than mentioned in passing.
+    _MEMORY_STAT_RE = re.compile(
+        r"\bram\b"
+        r"|\bmemory\s+(?:usage|use|used|free|available|pressure|left)\b"
+        r"|\b(?:how\s+much|check|show|what(?:'?s| is))\b[^.?!]{0,24}\bmemory\b"
+        r"|\bmemory\s+(?:am\s+i|is)\s+(?:i\s+)?using\b",
+        re.IGNORECASE,
+    )
+    _DISK_STAT_RE = re.compile(
+        r"\bdisk\b|\bstorage\b|\bhard\s+drive\s+space\b"
+        r"|\b(?:free|disk|drive)\s+space\b"
+        r"|\bspace\s+(?:left|free|remaining|available|do\s+i\s+have)\b"
+        r"|\b(?:how\s+much)\b[^.?!]{0,20}\bspace\b",
+        re.IGNORECASE,
+    )
+    # Playback mode, as a command rather than a word in a sentence.
+    _SHUFFLE_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:turn|switch)\s+(?:on|off)\s+)?"
+        r"(shuffle|repeat|loop)\b"
+        r"(?:\s+(?:mode|on|off|this|it|the\s+(?:song|track|album|playlist)))?"
+        r"\s*[.?!]*\s*$"
+        r"|\b(?:turn|switch)\s+(?:on|off)\s+(shuffle|repeat|loop)\b"
+        r"|\b(shuffle|repeat|loop)\s+(?:this\s+|that\s+|the\s+|it\s+)?"
+        r"(?:music|song|songs|track|tracks|album|playlist|playback)\b"
+        r"|\b(?:music|playlist|album)\b[^.?!]{0,20}\b(shuffle|repeat|loop)\b",
+        re.IGNORECASE,
+    )
+    # A request to skip a track, as opposed to any sentence containing "next".
+    _SKIP_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+        r"(?:next|skip)(?:\s+(?:this|that|it))?"
+        r"(?:\s+(?:the\s+)?(?:song|track|one))?\s*[.?!]*\s*$"
+        r"|\b(?:next|skip)\s+(?:the\s+|this\s+|that\s+)?(?:song|track)\b"
+        r"|\bskip\s+(?:this|that|it)\b",
+        re.IGNORECASE,
+    )
+    # A request to TAKE a screenshot, as opposed to any sentence containing the
+    # word. See the call site for what the substring version did.
+    _SCREENSHOT_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+        r"(?:take|grab|get|capture|snap|make)\s+(?:me\s+)?"
+        r"(?:a|an|the)?\s*(?:screen\s?shot|screen\s+capture|"
+        r"(?:picture|shot)\s+of\s+(?:my\s+|the\s+)?screen)\b"
+        r"|^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?screen\s?shot"
+        r"(?:\s+(?:this|that|it|my\s+screen|the\s+screen))?\s*[.?!]*\s*$"
+        r"|\bcapture\s+(?:my|the)\s+screen\b|\bgrab\s+(?:my|the)\s+screen\b",
+        re.IGNORECASE,
+    )
+    # A request to SEARCH, as opposed to any sentence containing the word.
+    _WEB_SEARCH_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+        r"(?:search|google|look\s+up)\s+(?:the\s+web\s+)?(?:for\s+)?(.+)",
+        re.IGNORECASE,
+    )
+    # "Resume" is a TRANSPORT verb and also, far more often in this house, a
+    # noun: his resume is the worked example in the briefing. A bare
+    # \bresume\b meant every sentence containing the word started playing
+    # music — "is my resume up to date" launched Spotify and played AC/DC.
+    # So it has to be shaped like a command: the head of the utterance, or
+    # followed by the thing being resumed.
+    _RESUME_RE = re.compile(
+        r"\b(?:unpause|keep\s+playing)\b"
+        r"|^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+        r"resume\b(?:\s+(?:the\s+)?(?:music|song|track|playback|playing|it))?"
+        r"\s*[.?!]*\s*$"
+        r"|\bresume\s+(?:the\s+)?(?:music|song|track|playback|playing)\b",
+        re.IGNORECASE,
+    )
     # Phrases that are transport or state, never a thing to search for. If the
     # whole request reduces to one of these, it is not a named request.
     _NOT_A_NAME = re.compile(
@@ -1404,6 +1750,20 @@ class NovaTools:
     # refusal instead of quietly searching Spotify for a film. This phrase is in
     # the adversarial corpus, and adding named playback broke it — which is what
     # that corpus is for.
+    # "Play" heads a great many English idioms, and each one was becoming a
+    # Spotify search: "play it cool" opened a search for "it cool".
+    _PLAY_IDIOM_RE = re.compile(
+        r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?play\s+"
+        r"(?:it\s+(?:cool|safe|by\s+ear|down|again\s+sam)"
+        r"|devil'?s?\s+advocate|along|dumb|hardball|ball|dead|nice|house|"
+        r"hooky|catch(?:\s*-?\s*up)?|favou?rites|games|the\s+(?:field|victim|"
+        r"fool|part|role|odds|long\s+game)|both\s+sides|with\s+fire|"
+        r"a\s+(?:part|role|joke)|second\s+fiddle|hard\s+to\s+get"
+        # ...and actual games, which Nova cannot play either.
+        r"|chess|cards|poker|golf|tennis|soccer|football|basketball|"
+        r"a\s+game|the\s+game)\b",
+        re.IGNORECASE,
+    )
     _NOT_MUSIC_TARGET = re.compile(
         r"\b(netflix|hulu|disney|prime\s+video|max|peacock|youtube|tv|"
         r"television|movie|film|show|episode|series|trailer|game)\b",
@@ -1413,7 +1773,7 @@ class NovaTools:
     def _named_request(self, low: str):
         """(query, prefer) for "play X", or None. `prefer` is a Spotify search
         type when he said which kind of thing he wanted."""
-        if self._NOT_MUSIC_TARGET.search(low):
+        if self._NOT_MUSIC_TARGET.search(low) or self._PLAY_IDIOM_RE.match(low):
             return None
         m = self._NAMED_PLAY_RE.match(low)
         if not m:
@@ -1457,15 +1817,42 @@ class NovaTools:
     # The PLAYER's volume is ducked, never the system's — system volume would
     # take Nova's own voice down with it, which is the opposite of helpful.
     def duck_music(self) -> None:
-        """Lower the player while Nova listens. Cheap and safe to call often."""
+        """Lower the player while Nova listens, WITHOUT making him wait.
+
+        Measured on a real Spotify: the AppleScript round trip is 534ms. It sat
+        between the wake word firing and the microphone opening, and he only
+        gets about 700ms of head start before recording begins — so ducking ate
+        most of the window and the first word of his command was being clipped.
+        That is the likeliest reason Nova mis-heard him over music.
+
+        Off-thread instead. The volume drops a beat into the utterance rather
+        than before it, which is almost always still inside the VAD's wait for
+        speech onset, and the recording starts on time either way.
+        """
         if self._ducked is not None:
             return                      # already ducked; no AppleScript at all
+        threading.Thread(target=self._duck_music_now,
+                         name="nova-duck", daemon=True).start()
+
+    def _duck_music_now(self) -> None:
         try:
             app = self._running_player()          # never launches
             if not app:
                 return
             if (self._player_get(app, "player state") or "").lower() != "playing":
                 return                  # nothing audible to duck
+            # PAUSING beats ducking, and he asked for exactly this: with the
+            # music stopped there is nothing of it in the microphone at all.
+            # Measured, ducking to 20% still left Whisper mishearing him at his
+            # desk — 20% of loud is not quiet. The player is paused for the
+            # whole conversation and resumed on the single path back to wake
+            # mode, so it never stutters between turns.
+            if bool(self.config.get("music", {})
+                    .get("pause_while_listening", True)):
+                if self._player_do(app, "pause"):
+                    self._ducked = (app, None)   # None level => WE paused it
+                    log.info(f"paused {app} while listening")
+                return
             cur = self._player_get(app, "sound volume")
             level = int(float(cur))
             target = int(self.config.get("music", {}).get("duck_level", 20))
@@ -1486,6 +1873,10 @@ class NovaTools:
         app, level = state
         self._ducked = None             # cleared FIRST, so a failure cannot
         try:                            # wedge Nova into never ducking again
+            if level is None:           # we paused it, so we play it again
+                self._player_do(app, "play")
+                log.info(f"resumed {app} after listening")
+                return
             self._player_do(app, f"set sound volume to {level}")
             log.info(f"restored {app} volume to {level}")
         except Exception as exc:
@@ -1661,9 +2052,89 @@ class NovaTools:
         return f"Opening {path.name.replace('_', ' ')}."
 
     def _web_search(self, query: str) -> str:
+        """Search the web, and SHOW the work.
+
+        This used to be three lines: build a URL, `open` it, say "Searching for
+        X." Nova never looked at the page, so the one thing she could not tell
+        him about a search was what it found.
+
+        Two things changed. It goes through `browser_control` now, so the
+        search lands in whichever browser is ALREADY running rather than in
+        whatever macOS considers default — every other part of Nova works that
+        way and this was the odd one out. And it reads the results back off the
+        page she just opened, which costs no additional network call: the
+        browser already fetched it.
+
+        What it reads is deliberately narrow — titles and hostnames, nothing
+        else, and none of it reaches the LLM. A web page is untrusted text, and
+        this same Nova can type, click and move files. Body content in the
+        prompt would make any page she visits able to talk to her. So the
+        spoken answer is templated from titles here, in Python, the same way
+        every other number and fact she speaks is.
+        """
+        import panels as P
+        self.touched_mac = True
         url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
-        subprocess.run(["open", url], check=False)
-        return f"Searching for {query}."
+
+        try:
+            import browser_control as B
+        except Exception as exc:
+            log.warning(f"browser_control unavailable ({exc})")
+            subprocess.run(["open", url], check=False)
+            return f"Searching for {query}."
+
+        prog = P.Progress(self._on_progress, "Searching the web",
+                          ["Opening the browser", "Loading the page",
+                           "Reading the results"], detail=query)
+        prog.start()
+
+        opened = B.open_url(url, f"a search for {query}", new_tab=True)
+        if opened.startswith("I couldn't"):
+            prog.fail("The browser wouldn't open.")
+            return f"I couldn't open a search for {query}."
+        prog.advance()
+
+        ok, results, why = B.read_results(on_ready=prog.advance)
+        if not ok or not results:
+            # Honest degradation: the search DID happen and it is on his
+            # screen. Only the reading failed, and the difference matters.
+            prog.fail(why)
+            return (f"I searched for {query}. It's on your screen, but I "
+                    f"couldn't read the results off the page.")
+
+        prog.finish(P.items(
+            [{"title": r["title"][:90], "meta": r["host"]} for r in results[:6]],
+            title="What's on the page"))
+        return self._speak_results(query, results)
+
+    @staticmethod
+    def _speak_results(query: str, results: list) -> str:
+        """One sentence about what came back. Templated, never generated.
+
+        Hostnames are spoken as their name rather than their domain — "from
+        imdb", not "from imdb dot com" — because he is listening, not reading.
+        """
+        def site(host: str) -> str:
+            parts = [p for p in (host or "").split(".") if p]
+            return parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
+
+        def clean(title: str) -> str:
+            # A page title is untrusted text. It cannot do anything spoken
+            # aloud, but it can be enormous, so it gets cut to a sentence.
+            t = " ".join((title or "").split())
+            return t[:80].rstrip(" -|·") if len(t) > 80 else t
+
+        top = results[0]
+        where = site(top.get("host", ""))
+        line = f"Top result for {query} is {clean(top.get('title'))}"
+        line += f", from {where}." if where else "."
+        others = [site(r.get("host", "")) for r in results[1:3]]
+        others = [o for o in others if o and o != where]
+        if len(others) == 2:
+            line += f" There's also {others[0]} and {others[1]}."
+        elif len(others) == 1:
+            line += f" There's also {others[0]}."
+        return line
 
 
 def _which(cmd: str) -> bool:

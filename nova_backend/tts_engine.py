@@ -81,15 +81,35 @@ class SeamlessPlayer:
         self._done.wait()
         self._close()
 
-    def stop(self) -> None:
-        self._feeding = False
-        self._done.set()
-        self._close()
+    def stop(self, immediate: bool = False) -> None:
+        """Stop playing. `immediate` throws away what is already buffered.
 
-    def _close(self) -> None:
+        The difference is the whole of barge-in feeling right. Normal
+        completion must DRAIN — cutting the buffer there would clip the last
+        syllable off every sentence Nova says. An interruption must not:
+        measured, draining took 1.33s to go quiet after the wake word, and a
+        voice that keeps talking for a second after you speak over it does not
+        read as having been interrupted at all.
+        """
+        self._feeding = False
+        if immediate:
+            # Silence the callback FIRST. Aborting the stream is not enough on
+            # its own: the callback can still be handed a block between here
+            # and the abort landing, and it would play real audio.
+            with self._lock:
+                self._buf = np.empty(0, dtype=np.float32)
+        self._done.set()
+        self._close(immediate=immediate)
+
+    def _close(self, immediate: bool = False) -> None:
         if self._stream is not None:
             try:
-                self._stream.stop()
+                # abort() discards what PortAudio has already buffered;
+                # stop() waits for it to play out. That is the 1.33s.
+                if immediate:
+                    self._stream.abort()
+                else:
+                    self._stream.stop()
                 self._stream.close()
             except Exception:
                 pass
@@ -182,10 +202,26 @@ def _normalize_for_speech(text: str) -> str:
 
 
 class TTSEngine:
-    def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None) -> None:
+    def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None,
+                 echo=None) -> None:
+        # Optional EchoCanceller. TTS is the only thing that knows what is
+        # about to be played, so it is the only place the reference can come
+        # from. None means cancellation is off and nothing changes.
+        self._echo = echo
+        # Set by nova.py when the system tap is live. Kokoro's output is
+        # already IN the speaker mix, so feeding it here as well would hand
+        # the canceller two copies of the same sound a few milliseconds apart
+        # and ask it to cancel both.
+        self.suppress_reference = lambda: False
         self.config   = config
         self._queue   = queue.Queue()
         self._stop    = threading.Event()
+        # Raised by an interruption. The worker may be mid-Kokoro when he
+        # speaks over her — that call cannot be cancelled, but its RESULT can
+        # be thrown away instead of being handed to a fresh player, which is
+        # the difference between going quiet now and going quiet when the
+        # synthesis happens to finish.
+        self._interrupt = threading.Event()
         self._primary = None
 
         # Shared gate with the STT engine. Cleared while audio plays so the mic
@@ -251,12 +287,16 @@ class TTSEngine:
     def speak(self, text: str) -> None:
         """Queue a sentence for playback. Returns instantly.
 
+        Clears any standing interruption: he has been answered again, so the
+        last barge-in is history.
+
         Normalizes here, at the ONE choke point every response passes through.
         Only the LLM path was being cleaned, so deterministic replies reached
         Kokoro raw — including newlines, which made espeak report
         "words count mismatch on 200.0% of the lines (2/1)" and produced the
         stutter Nicholas heard on the screen-awareness and square-root replies.
         """
+        self._interrupt.clear()
         text = _normalize_for_speech(text)
         if not text:
             return
@@ -269,6 +309,11 @@ class TTSEngine:
         playback ever wedges, an unbounded wait would freeze the pipeline
         (status stuck on 'speaking'). With a timeout we give up and continue.
         """
+        # An interruption means there is nothing left worth waiting for; the
+        # queue was emptied and the player aborted. Waiting on the worker to
+        # notice added most of the delay he could hear.
+        if self._interrupt.is_set():
+            return
         if timeout is None:
             self._queue.join()
         else:
@@ -295,8 +340,9 @@ class TTSEngine:
                 self._queue.task_done()
             except queue.Empty:
                 break
+        self._interrupt.set()
         if self._player is not None:
-            self._player.stop()
+            self._player.stop(immediate=True)   # barge-in: do not drain
             self._player = None
         self._speaking = False
         self._mic_gate.set()
@@ -330,6 +376,11 @@ class TTSEngine:
     def _finish_player(self) -> None:
         """Called when a response's sentences are all queued: drain the player,
         settle briefly, then re-open the mic."""
+        # Nova stopped speaking: drop the echo reference so the next capture
+        # adapts against silence rather than audio that is no longer playing.
+        if self._echo is not None:
+            self._echo.reset()
+
         if self._player is not None:
             self._player.mark_done()
             self._player.wait()   # blocks until the buffer empties
@@ -353,6 +404,12 @@ class TTSEngine:
             lang="en-us",
         )
         audio = np.array(samples, dtype=np.float32)
+        # Hand the SAME samples to the echo canceller before they are played.
+        # This is the whole reason cancellation is tractable for Nova: she
+        # knows exactly what is about to come out of the speakers.
+        if self._echo is not None:
+            if not self.suppress_reference():
+                self._echo.feed_far(audio, sample_rate)
         if self._player is not None:
             self._player.feed(audio)
 

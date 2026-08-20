@@ -7,7 +7,7 @@ Nova test runner — one command, for Nicholas or for Claude.
     python nova_backend/tests/run_tests.py --routing    # phrases that broke it before
     python nova_backend/tests/run_tests.py --loop       # conversation state machine
     python nova_backend/tests/run_tests.py --full       # everything, incl. real system
-    python nova_backend/tests/run_tests.py --quick      # env + routing + loop + wake + cache + rag + tts + weather + music (no audio)
+    python nova_backend/tests/run_tests.py --quick      # every fast suite (no audio)
 
 Each suite prints its own detail; this prints the summary and, importantly, a
 list of what could NOT be verified — the microphone-dependent behaviour that no
@@ -116,6 +116,21 @@ SUITES = {
                 "weather answers are real numbers, and steal nothing else", False, False),
     "music":   ("test_music.py",
                 "play-by-name works and shadows no transport command", False, False),
+    "views":   ("test_views.py",
+                "voice navigation reaches the right screen and fakes nothing", False, False),
+    "home":    ("test_home.py",
+                "home shows what belongs and hides what doesn't", False, False),
+    "sounds":  ("test_sounds.py",
+                "the cues are short, clean, and never load-bearing", False, False),
+    "market":  ("test_market.py",
+                "market answers are real numbers, and never advice", False, False),
+    "act":     ("test_actuation.py",
+                "Nova types and clicks, and refuses to do either carelessly",
+                False, False),
+    "conf":    ("test_confidence.py",
+                "Nova acts only when sure enough for what it costs", False, False),
+    "echo":    ("test_echo_cancellation.py",
+                "Nova's own voice is removed from the mic, his is not", False, False),
     "smoke":   ("smoke_launch.py",
                 "the REAL process starts and answers a turn", True, True),
     "full":    ("test_full_sweep.py",
@@ -128,10 +143,13 @@ CANNOT_VERIFY = [
     "wake-word detection with Nicholas's actual voice "
     "(macOS synthetic speech does not drive the model)",
     "speech quality — whether Nova sounds right through the speakers",
-    "barge-in over speakers (needs acoustic echo cancellation; parked)",
+    "barge-in over speakers with REAL speakers in a real room — the echo "
+    "suite measures the canceller against a simulated speaker path, not his desk",
     "music transport unless a player is already running",
-    "anything TCC-gated inside NovaOS.app — screen recording and location are "
-    "granted to the app bundle, not to this interpreter",
+    "anything TCC-gated inside NovaOS.app — screen recording, location and "
+    "ACCESSIBILITY are granted to the app bundle, not to this interpreter",
+    "that a click lands on the right pixels in a real app — the Vision "
+    "bottom-left to screen top-left flip needs a real window and his eyes",
 ]
 
 
@@ -152,14 +170,16 @@ def main() -> int:
     for key in SUITES:
         ap.add_argument(f"--{key}", action="store_true", help=SUITES[key][1])
     ap.add_argument("--quick", action="store_true",
-                    help="env + routing + loop + wake + cache + rag + tts + weather + music (fast, no audio)")
+                    help="every fast suite: env, routing, loop, wake, cache, rag, tts, weather, music, views, home, echo (no audio)")
     ap.add_argument("--all", action="store_true", help="every suite")
     args = ap.parse_args()
 
     if args.all:
         chosen = list(SUITES)
     elif args.quick:
-        chosen = ["env", "routing", "loop", "wake", "cache", "rag", "tts", "weather", "music"]
+        chosen = ["env", "routing", "loop", "wake", "cache", "rag", "tts",
+                  "weather", "music", "views", "home", "sounds", "market",
+                  "act", "conf", "echo"]
     else:
         chosen = [k for k in SUITES if getattr(args, k)]
     if not chosen:

@@ -64,6 +64,11 @@ LONG_SPEECH_THRESHOLD_MS = 2500   # switch to the long cutoff after 2.5s of spee
 MAX_RECORDING_MS         = 15000  # hard safety cap on one utterance
 NOISE_FLOOR_RMS          = 150    # below this RMS, treat the buffer as silence
 
+# How long a run of EXACTLY-zero frames means the input is broken rather than
+# quiet. 5s: long enough that a brief device switch does not cry wolf, short
+# enough that he is told before he has repeated himself twice.
+_SILENT_FRAMES_TO_ALARM  = int(5000 / FRAME_MS)
+
 # How much audio to keep from BEFORE speech was detected. webrtcvad triggers a
 # little late, especially on soft onsets ("what", "set", "how"), and losing the
 # first syllable is the single most damaging thing that can happen to a
@@ -84,8 +89,20 @@ PRE_ROLL_MS_DEFAULT      = 480
 
 class STTEngine:
     def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None,
-                 wake_config: Optional[dict] = None) -> None:
+                 wake_config: Optional[dict] = None, echo=None) -> None:
         self.config = config
+        # Optional EchoCanceller. When present, every mic frame is cleaned of
+        # Nova's own voice before wake detection or capture sees it — which is
+        # what makes being interrupted over speakers possible at all.
+        self._echo = echo
+        # Barge-in: keep a wake-only ear open while Nova speaks. Needs a
+        # canceller with a real reference, so it is off unless both are.
+        self.barge_in = bool(config.get("barge_in", False)) and echo is not None
+        # Called when the wake word fires WHILE Nova is talking. nova.py points
+        # this at tts.stop_and_flush; None means barge-in stops at detection.
+        self.on_barge_in = None
+        self._barge_thread = None
+        self._closing = threading.Event()
         # Wake-word settings (engine choice + OpenWakeWord tuning). Kept separate
         # from the stt block so the wake engine can be swapped without touching
         # STT. Defaults keep the legacy transcript engine if unspecified.
@@ -99,6 +116,11 @@ class STTEngine:
         # user stayed quiet — a real timeout) or "too_quiet" (audio WAS captured
         # but was unusable). The caller must not confuse the last two.
         self.last_capture_reason = "ok"
+        # Whisper's own confidence for the last transcription (duration-weighted
+        # mean avg_logprob), or None when it could not be computed. Nova has no
+        # transcript on screen any more, so this is what decides whether she
+        # acts — see confidence.py for the measured thresholds.
+        self.last_confidence: Optional[float] = None
         self._mic_gate = mic_gate if mic_gate is not None else threading.Event()
         if mic_gate is None:
             self._mic_gate.set()
@@ -122,7 +144,34 @@ class STTEngine:
         # scoring audio from seconds ago — Nicholas said "Nova" and it fired
         # twelve seconds later. Live audio is only useful while it is live, so
         # on overflow we drop the OLDEST frame and stay near realtime.
+        # Digital silence detection. An input device can deliver frames of
+        # EXACTLY zero — AirPods that connected but never negotiated a mic path
+        # do this — and Nova cannot tell that from a quiet room. Measured on his
+        # Mac: AirPods Pro as the default input gave RMS 0.0 and peak 0, while
+        # the built-in mic in the same silent room gave RMS 29 and peak 442.
+        # Room tone is never exactly zero, so exactly zero is a broken input.
+        #
+        # Without this Nova sits in the wake loop indefinitely, scoring 0.000
+        # forever, looking completely healthy and hearing nothing.
+        self._zero_frames = 0
+        self._mic_silent = False
         self._audio_q: "queue.Queue[bytes]" = queue.Queue(maxsize=_AUDIO_Q_MAXLEN)
+        # A SECOND queue, for the wake word only.
+        #
+        # This is the piece barge-in was actually missing. The first attempt
+        # simply held the gate open whenever cancellation was on, which fed
+        # Nova's own audio into the same queue the COMMAND recorder reads —
+        # and its VAD then never saw a quiet frame, so every turn ran to the
+        # 15s cap instead of ending when he stopped talking. One queue cannot
+        # serve both: the command recorder needs silence to be real, and the
+        # wake detector needs to keep listening through Nova's voice.
+        #
+        # So they are split. `_audio_q` stays exactly as it was — gated shut
+        # while Nova speaks, which is what makes end-of-speech detection work.
+        # `_wake_q` gets the echo-cancelled frames continuously, and only the
+        # wake detector reads it. Interrupting Nova becomes possible without
+        # anything else in the pipeline having to change its assumptions.
+        self._wake_q: "queue.Queue[bytes]" = queue.Queue(maxsize=_AUDIO_Q_MAXLEN)
         self._stream: Optional[sd.RawInputStream] = None
         # Rolling pre-wake buffer; on a wake hit its contents prime the command
         # recording so a single-breath "Nova, <command>" is fully captured.
@@ -131,7 +180,169 @@ class STTEngine:
 
         log.info("STT ready.")
 
+    @property
+    def mic_is_silent(self) -> bool:
+        """True when the input has been delivering exactly-zero samples.
+
+        Deliberately not "quiet": the check is for digital silence, which a
+        real microphone in a real room never produces.
+        """
+        return self._mic_silent
+
+    def reopen_stream(self) -> bool:
+        """Tear down and reopen the mic, picking up the CURRENT default device.
+
+        The stream is opened once at startup and bound to whatever was default
+        then. When his AirPods connect, macOS moves the default input and the
+        old stream keeps running against a device that returns nothing — so
+        recovery has to actually reopen, not just wait.
+        """
+        try:
+            if self._stream is not None:
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except Exception:
+                    pass
+                self._stream = None
+            self._zero_frames = 0
+            self._mic_silent = False
+            self._drain_audio_q()
+            self._ensure_stream()
+            log.info("Microphone stream reopened on the current default device.")
+            return True
+        except Exception as exc:
+            log.error(f"could not reopen the microphone: {exc}")
+            return False
+
     # ── Persistent audio stream ────────────────────────────────────────────────────
+    def _make_wake_detector(self):
+        """A FRESH OpenWakeWord instance, separate from the main one.
+
+        OWW is a streaming model with internal state, so the barge-in watcher
+        cannot share `self._oww` with `record_wake` — they would corrupt each
+        other's windows, which is the same mistake that made an earlier
+        instrumentation attempt read 0.000 for every score.
+        """
+        try:
+            from pathlib import Path as _Path
+            from wake_openwakeword import OpenWakeWordDetector
+            model_path = self._wake_config.get("oww_model_path", "")
+            if model_path and not _Path(model_path).is_absolute():
+                model_path = str(_Path(__file__).parent / model_path)
+            return OpenWakeWordDetector(
+                model_path=model_path,
+                # A LOWER bar than ordinary wake, for two reasons that
+                # compound: his voice reaches this detector already attenuated
+                # by the canceller (1.5-3.9 dB measured), and it is competing
+                # with Nova's own speech rather than with silence. At the
+                # normal 0.5 he had to shout to be heard.
+                #
+                # Cheap to be wrong this way: a false fire only stops her
+                # talking. The same mistake in record_wake would start a whole
+                # conversation out of nowhere.
+                threshold=float(self._wake_config.get("barge_threshold", 0.30)),
+                # One window, not two. A false fire here only stops Nova
+                # talking, which is cheap and instantly correctable; the same
+                # mistake in record_wake would start a whole conversation.
+                trigger_level=int(self._wake_config.get(
+                    "barge_trigger_level", 1)),
+                vad_threshold=float(self._wake_config.get("oww_vad_threshold", 0.5)),
+            )
+        except Exception as exc:
+            log.warning(f"barge-in detector unavailable ({exc})")
+            return None
+
+    def start_barge_watch(self) -> None:
+        """Listen for the wake word WHILE Nova is speaking, on its own thread.
+
+        This is the piece that was missing, and its absence made everything
+        else look broken. `record_wake` only runs at the top of the main loop —
+        while Nova is talking that loop is blocked inside
+        `tts.wait_until_done()`, so nothing was reading `_wake_q` at all. The
+        queue filled with perfectly good cancelled audio and no detector ever
+        saw a frame of it.
+
+        So the watcher owns its own OpenWakeWord instance and runs
+        independently. It only looks while the mic gate is SHUT — that is
+        precisely the window the main loop cannot cover — and it stays out of
+        the way entirely the rest of the time, so ordinary wake detection is
+        untouched.
+        """
+        if not self.barge_in or self._barge_thread is not None:
+            return
+
+        def _watch() -> None:
+            detector = None
+            while not self._closing.is_set():
+                if self._mic_gate.is_set():          # Nova is silent
+                    if detector is not None:
+                        detector.reset()             # do not carry her voice
+                    self._drain_wake_q()
+                    time.sleep(0.05)
+                    continue
+                if detector is None:
+                    detector = self._make_wake_detector()
+                    if detector is None:
+                        return                       # no OWW; nothing to do
+                try:
+                    frame = self._wake_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if len(frame) != FRAME_BYTES:
+                    continue
+                try:
+                    if detector.process(frame):
+                        self._fire_barge_in()
+                        detector.reset()
+                        self._drain_wake_q()
+                except Exception as exc:
+                    log.debug(f"barge-in detector failed: {exc}")
+
+        self._barge_thread = threading.Thread(target=_watch, daemon=True,
+                                              name="nova-barge-watch")
+        self._barge_thread.start()
+        log.info("barge-in watcher running (wake word can interrupt)")
+
+    def _drain_wake_q(self) -> None:
+        while True:
+            try:
+                self._wake_q.get_nowait()
+            except queue.Empty:
+                return
+
+    def _wake_frame(self, timeout: float) -> Optional[bytes]:
+        """One frame for the WAKE detector.
+
+        While Nova is silent this is the ordinary queue, exactly as before.
+        While she is speaking that queue is shut — which is what keeps
+        end-of-speech detection honest — so the frame comes from `_wake_q`,
+        which carries echo-cancelled audio continuously. The wake detector is
+        the only thing in Nova allowed to listen through her own voice.
+        """
+        if self.barge_in and not self._mic_gate.is_set():
+            try:
+                return self._wake_q.get(timeout=timeout)
+            except queue.Empty:
+                return None
+        try:
+            return self._audio_q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def _fire_barge_in(self) -> None:
+        """He said "Nova" over the top of her. Stop talking."""
+        if not self.barge_in or self._mic_gate.is_set():
+            return                      # she was not speaking; nothing to cut
+        cb = self.on_barge_in
+        if cb is None:
+            return
+        try:
+            log.info("wake word heard while speaking — interrupting")
+            cb()
+        except Exception as exc:
+            log.warning(f"could not interrupt playback: {exc}")
+
     def _drain_audio_q(self) -> int:
         """Throw away buffered audio. Returns how many frames were dropped."""
         dropped = 0
@@ -151,11 +362,53 @@ class STTEngine:
         if self._stream is not None:
             return
 
+        def _feed_wake(raw: bytes) -> None:
+            """Every frame, cancelled, whether or not Nova is speaking.
+
+            Bounded and lossy on purpose: the wake detector wants the NEWEST
+            audio, and a backlog would have it firing on something he said
+            seconds ago.
+            """
+            if not self.barge_in or self._echo is None or not self._echo.enabled:
+                return
+            try:
+                # Linear cancellation only — the residual suppressor removes
+                # his voice along with hers. See EchoCanceller.process.
+                self._wake_q.put_nowait(self._echo.process(raw, residual=False))
+            except queue.Full:
+                try:
+                    self._wake_q.get_nowait()
+                    self._wake_q.put_nowait(raw)
+                except queue.Empty:
+                    pass
+
         def _cb(indata, frames, time_info, status):  # noqa: ANN001
             # Runs on PortAudio's thread. Drop frames while Nova is speaking so
             # its own TTS never enters the queue.
-            if self._mic_gate.is_set():
+            # With echo cancellation on, frames are kept even while Nova
+            # speaks — that is the point. Without it, the gate still drops
+            # them, exactly as before.
+            _feed_wake(bytes(indata))
+            gate_open = self._mic_gate.is_set()
+            # NOT forced open when cancellation is on any more — see _wake_q.
+            if gate_open:
                 data = bytes(indata)
+                # Cheap: only the max magnitude, on the audio thread.
+                if not any(data):
+                    self._zero_frames += 1
+                    if (self._zero_frames >= _SILENT_FRAMES_TO_ALARM
+                            and not self._mic_silent):
+                        self._mic_silent = True
+                        log.error(
+                            "Microphone is delivering DIGITAL SILENCE "
+                            f"({_SILENT_FRAMES_TO_ALARM * FRAME_MS / 1000:.0f}s "
+                            "of exactly-zero samples). The input device is not "
+                            "actually capturing.")
+                else:
+                    self._zero_frames = 0
+                    self._mic_silent = False
+                if self._echo is not None and self._echo.enabled:
+                    data = self._echo.process(data)
                 try:
                     self._audio_q.put_nowait(data)
                 except queue.Full:
@@ -228,14 +481,14 @@ class STTEngine:
         self._drain_audio_q()
         start = time.time()
         while time.time() - start < timeout_s:
-            try:
-                frame = self._audio_q.get(timeout=0.1)
-            except queue.Empty:
+            frame = self._wake_frame(0.1)
+            if frame is None:
                 continue
             if len(frame) != FRAME_BYTES:
                 continue
             self._pre_wake_buf.append(frame)
             if detector.process(frame):
+                self._fire_barge_in()
                 self._pending_pre_wake = b"".join(self._pre_wake_buf)
                 self._pre_wake_buf.clear()
                 return True
@@ -258,9 +511,8 @@ class STTEngine:
         window: "collections.deque[bytes]" = collections.deque(maxlen=WAKE_WINDOW_FRAMES)
 
         while time.time() - start < timeout_s:
-            try:
-                frame = self._audio_q.get(timeout=0.1)
-            except queue.Empty:
+            frame = self._wake_frame(0.1)
+            if frame is None:
                 continue
 
             window.append(frame)
@@ -413,6 +665,17 @@ class STTEngine:
                 pre_roll.append(frame)
 
             if speaking and total_ms >= hard_cap_ms:
+                # Hitting the CAP means the VAD never saw him stop — silence
+                # detection failed, it did not merely take a while. That is a
+                # different fault from a long sentence and it is invisible from
+                # the outside: every turn just feels sluggish. It cost a whole
+                # test session to find, from timestamps, when echo cancellation
+                # held the mic gate permanently open and the VAD never got a
+                # quiet frame. Say so, loudly, once per turn.
+                log.warning(
+                    f"Recording hit the {max_duration_s:.0f}s cap without ever "
+                    "detecting silence — end-of-speech detection is not working. "
+                    "Every turn will feel slow until this is fixed.")
                 break
 
         audio = np.frombuffer(buf, dtype=np.int16)
@@ -427,6 +690,11 @@ class STTEngine:
             self.last_capture_reason = "too_quiet"
             return None
         self.last_capture_reason = "ok"
+        # Whisper's own confidence for the last transcription (duration-weighted
+        # mean avg_logprob), or None when it could not be computed. Nova has no
+        # transcript on screen any more, so this is what decides whether she
+        # acts — see confidence.py for the measured thresholds.
+        self.last_confidence: Optional[float] = None
         return audio
 
     # ── Transcription ─────────────────────────────────────────────────────────────
@@ -480,6 +748,17 @@ class STTEngine:
                 "what is the date, open, play, search, tell me."
             ),
         )
+
+        # Weighted by segment duration: a half-second of certainty should not
+        # outvote three seconds of guessing.
+        segments = list(segments)
+        if segments:
+            total = sum(max(0.01, s.end - s.start) for s in segments)
+            self.last_confidence = sum(
+                s.avg_logprob * max(0.01, s.end - s.start)
+                for s in segments) / total
+        else:
+            self.last_confidence = None
 
         text = " ".join(seg.text for seg in segments).strip()
         # Strip leading filler words.

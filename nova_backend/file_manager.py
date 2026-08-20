@@ -157,6 +157,10 @@ _QUERY_STOPWORDS = frozenset({
     "show", "summarize", "summarise", "summary", "describe", "read", "open",
     "put", "send", "transfer", "copy", "copied", "duplicate", "get", "grab",
     "pull", "bring", "tell", "about", "inside", "contents", "content",
+    # "take" belongs with grab/pull/bring and was simply missing: "take the
+    # invoice in Downloads and put it in Documents" searched for take AND
+    # invoice.
+    "take", "takes", "taking", "took",
     # Nova's own vocabulary — never let Nova search for itself
     "nova", "memory", "config", "settings", "database", "log", "logs", "db",
 })

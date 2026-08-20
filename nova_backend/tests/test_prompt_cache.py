@@ -273,7 +273,14 @@ avg = lambda x: sum(x) / len(x)
 print(f"  time to first token, cache OFF : {avg(base_ttft):.3f}s")
 print(f"  time to first token, cache ON  : {avg(cached_ttft):.3f}s")
 print(f"  saved                          : {avg(base_ttft) - avg(cached_ttft):.3f}s per turn")
-check(avg(cached_ttft) < avg(base_ttft),
+# A WALL-CLOCK comparison, so it is the one check here that can flake: it
+# failed twice inside a full sweep and passed every time standalone, which is
+# thermal and memory pressure rather than a regression. Rule 4 applies — do not
+# trust a single run of anything that varies. The correctness checks above are
+# the actual guarantee; this one only has to be directionally true, so it is
+# allowed a small margin rather than demanding a strict win on one sample.
+_margin = 0.98      # cached must be at least 2% faster, not merely faster
+check(avg(cached_ttft) < avg(base_ttft) * _margin,
       "the cache is actually faster than no cache",
       f"{avg(base_ttft):.3f}s -> {avg(cached_ttft):.3f}s")
 

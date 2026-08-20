@@ -32,8 +32,42 @@ import re
 from typing import Optional
 
 import calendar_reminders as cal
+import panels as P
 
 log = logging.getLogger("nova.calendar.intents")
+
+
+def build_events_panel(events: list, subtitle: str) -> dict:
+    """Turn engine event records into a panel.
+
+    Module-level so the home screen can build the same panel without going
+    through an intent — home shows today's events, and it should be the exact
+    same rendering he sees when he asks for them.
+    """
+    rows = []
+    for e in events:
+        start = str(e.get("start") or "")
+        # Engine records carry a long formatted date ("Monday, August 16, 2026
+        # at 3:00:00 PM"). Only the time is useful on a panel already titled
+        # with the day.
+        when = ""
+        if " at " in start:
+            when = start.split(" at ", 1)[1].strip()
+            when = re.sub(r":00\s*(AM|PM)$", r" \1", when, flags=re.I)
+        rows.append({
+            "title": e.get("title") or "Untitled",
+            "detail": when,
+            "meta": e.get("location") or "",
+        })
+
+    return P.panel(
+        title="Calendar",
+        subtitle=subtitle,
+        blocks=[
+            P.items(rows) if rows
+            else P.note("Nothing on the calendar."),
+        ],
+    )
 
 
 # Words that mean "this is about a file on disk" and words that mean "this is
@@ -41,9 +75,27 @@ log = logging.getLogger("nova.calendar.intents")
 # authoritative file vocabulary lives in file_intents.py.
 _FILE_WORD_RE = re.compile(
     r"\b(?:file|files|folder|document|documents|doc|docs|pdf|pdfs|"
-    r"spreadsheet|screenshot|screenshots)\b"
+    # "resume" and "cv" are documents, and their absence here was destructive:
+    # calendar has a bare "rename X to Y" rule with no calendar word of its
+    # own, so "rename my resume to resume final draft" reached the reminder
+    # editor. Fuzzy matching then dropped words of two characters or fewer, so
+    # "my resume" reduced to "resume" and ANY open reminder containing that
+    # word was silently retitled — no confirmation, and the file never renamed.
+    r"resume|resumes|cv|"
+    r"spreadsheet|spreadsheets|presentation|slides|note|notes|"
+    r"screenshot|screenshots|photo|photos|image|images)\b"
     r"|\.(?:pdf|docx?|txt|md|png|jpe?g|csv|xlsx?|pptx?)\b"
 )
+# A calendar word directly modifying a file noun — "the reminder pdf", "my
+# calendar spreadsheet". The thing is a file; the calendar word only names it.
+_CAL_ADJECTIVE_RE = re.compile(
+    r"\b(?:calendar|schedule|reminder|reminders|event|events|meeting|"
+    r"meetings|appointment|appointments|agenda)\s+"
+    r"(?:file|files|pdf|pdfs|doc|docs|document|documents|spreadsheet|"
+    r"screenshot|screenshots|note|notes|photo|photos|image|images)\b"
+)
+_FILE_EXT_RE = re.compile(r"\.(?:pdf|docx?|txt|md|png|jpe?g|csv|xlsx?|pptx?)\b")
+
 _CALENDAR_WORD_RE = re.compile(
     r"\b(?:calendar|schedule|scheduled|reminder|reminders|remind|event|events|"
     r"appointment|appointments|meeting|meetings|agenda|shift|shifts)\b"
@@ -99,6 +151,10 @@ class NovaCalendar:
         self.config = config
         self.llm = llm
         self.memory = memory
+        # (view_name, payload) for the panel; nova.py collects it after the
+        # spoken answer. Built from the SAME event records the summary reads,
+        # so the screen can never disagree with the voice.
+        self.last_panel = None
         self.name = config["user"]["address_as"]
         cal_cfg = config.get("calendar", {})
         # Template confirmations are ~4-6s faster than an extra LLM round-trip
@@ -151,6 +207,13 @@ class NovaCalendar:
         # keeps both words, so it still lands here.
         if _FILE_WORD_RE.search(t) and not _CALENDAR_WORD_RE.search(t):
             return None
+        # ...and "both words present" is not enough on its own. In "move the
+        # reminder pdf to Documents" the calendar word is an ADJECTIVE naming
+        # a file, and the update-reminder rule below claimed it — so a file
+        # move was answered by the reminder editor. A file extension is
+        # decisive for the same reason.
+        if _CAL_ADJECTIVE_RE.search(t) or _FILE_EXT_RE.search(t):
+            return None
 
         # ── Read reminders ───────────────────────────────────────────────
         # Broad READ phrasings only (kept clear of the delete/complete/update
@@ -186,7 +249,9 @@ class NovaCalendar:
            re.search(r"\bwhat\s+do\s+i\s+have\s+(?:on\s+)?today\b", t) or \
            re.search(r"\banything\s+on\s+(?:my\s+)?calendar\b", t) or \
            re.search(r"\bwhat(?:'?s|\s+is)\s+on\s+(?:my\s+)?calendar\b", t) or \
-           re.search(r"\bwhat(?:'?s|\s+is)\s+my\s+schedule\b", t):
+           re.search(r"\bwhat(?:'?s|\s+is)\s+my\s+schedule\b", t) or \
+           re.search(r"\b(?:show|read|list|tell|give|check|pull\s+up)\s+(?:me\s+)?"
+                     r"(?:all\s+)?my\s+(?:calendar|schedule|agenda)\b", t):
             return "read_today"
 
         # ── Create reminder ──────────────────────────────────────────────
@@ -195,9 +260,22 @@ class NovaCalendar:
         # five to call mom" was missed when we required "set a reminder TO").
         # For the bare "remind me" verb we still require "to" so "remind me IN
         # five minutes" (a timer) doesn't route here.
-        if re.search(r"\b(?:set|create|add|make|new)\s+(?:a\s+|an\s+|another\s+)?reminder\b", t) or \
+        # put/stick/throw join set/create/add: "put a reminder in for 6pm" is
+        # ordinary phrasing and reached nobody, so a supported action was
+        # answered by the model as though Nova could not do it.
+        if re.search(r"\b(?:set|create|add|make|new|put|stick|throw)\s+"
+                     r"(?:a\s+|an\s+|another\s+)?reminder\b", t) or \
+           re.search(r"\b(?:put|stick|throw)\s+in\s+(?:a\s+|an\s+)?reminder\b", t) or \
            re.search(r"\bremind\s+me\s+to\b", t):
             return "create_reminder"
+
+        # ── Copy a reminder: honestly, no ────────────────────────────────
+        # Claimed here rather than left to fall through, because falling
+        # through meant a file search for the reminder's name. Nova can move a
+        # reminder; she cannot duplicate one, and saying so is the answer.
+        if re.search(r"\b(?:copy|duplicate|clone)\b[^.?!]*?\breminder\b", t) or \
+           re.search(r"\breminder\b[^.?!]*?\b(?:copy|duplicate|clone)\b", t):
+            return "copy_reminder"
 
         # ── Complete a reminder (before delete: distinct verb) ───────────
         if re.search(r"\b(?:complete|finish|check\s+off|mark\s+(?:as\s+)?(?:done|complete|completed|finished))\b[^.?!]*\breminder\b", t) or \
@@ -289,6 +367,12 @@ class NovaCalendar:
                 return self._create_event(text)
             if intent == "create_reminder":
                 return self._create_reminder(text)
+            if intent == "copy_reminder":
+                # Deterministic and honest. EventKit can create and it can
+                # update; there is no duplicate, and guessing which he meant
+                # would either lose the original or make one he did not ask for.
+                return ("I can move a reminder to a new time, but I can't make "
+                        "a copy of one. Want me to move it instead?")
             if intent == "complete_reminder":
                 return self._complete_reminder(text)
             if intent == "delete_reminder":
@@ -671,6 +755,9 @@ class NovaCalendar:
         """Read TODAY's events, then softly offer the rest of the week. The
         default is always today; the user opts into 'what's coming up'."""
         events = cal.get_today_events()
+        # The panel shows every event with its real time; the spoken summary
+        # stays short. Same data, two channels.
+        self.last_panel = ("calendar", build_events_panel(events, "Today"))
         today_txt = self._summarize_today(events)
 
         rest = self._rest_of_week_events()

@@ -12,6 +12,9 @@
 #   files       file or folder handler
 #   calendar    calendar or reminders handler
 #   screen      screen awareness
+#   view        navigation to a UI destination (home / menu / a named panel)
+#   market      stock quotes, indices, analyst ratings, company news
+#   actuation   typing / clicking / keys / scrolling (work mode only)
 #   memory      memory recall/store/forget
 #   fastpath    greeting / date / time / repeat
 #   unsupported an action Nova cannot perform; must be refused, never faked
@@ -113,3 +116,310 @@ play a movie  ==>  unsupported
 play the office on netflix  ==>  unsupported
 play a show on hulu  ==>  unsupported
 play a youtube video  ==>  unsupported
+
+# ── UI navigation (Phase 1 of the overhaul) ─────────────────────────────────
+# Nova is navigated BY VOICE now: no sidebar, no clicking. These must reach the
+# view router. Written BEFORE views.py existed, per the regression-first rule.
+go home  ==>  view
+nova go home  ==>  view
+return home  ==>  view
+take me home  ==>  view
+go back home  ==>  view
+home screen  ==>  view
+show me the menu  ==>  view
+show the menu  ==>  view
+open the menu  ==>  view
+what can you do  ==>  view
+what can you show me  ==>  view
+go to finance  ==>  view
+take me to finance  ==>  view
+# Weather is reached through its HANDLER, never as an empty panel: navigation
+# used to claim this and answer with the word "Weather." over a blank screen.
+go to the weather  ==>  weather
+show me the weather  ==>  weather
+show me the finance screen  ==>  view
+open the memory panel  ==>  view
+
+# ── The home surface: clearing it, restoring it, rearranging it ─────────────
+# Written BEFORE the code, per the regression-first rule. The near-misses
+# below matter more than the hits: "move X to Y" is the shape of a FILE move,
+# and views runs at stage 2c, five stages before file intents ever see it.
+clear home  ==>  view
+nova clear home  ==>  view
+clear the home screen  ==>  view
+clear my screen  ==>  view
+restore home  ==>  view
+bring back the cards  ==>  view
+put back everything  ==>  view
+move the now playing to the bottom right  ==>  view
+move now playing bottom right  ==>  view
+put markets top left  ==>  view
+move music to the left  ==>  view
+stick the weather in the bottom left  ==>  view
+send the stocks to the middle right  ==>  view
+
+# ...and the file moves that share the exact same verb and must never be
+#    claimed by the home grid.
+move my resume to Downloads  ==>  files
+move the report to Documents  ==>  files
+clear my calendar  ==>  llm
+clear the table  ==>  llm
+#    "that file" has no searchable token, so file_intents declines it on
+#    purpose and the refusal is the right answer. "move over" is conversation.
+move that file to the desktop  ==>  unsupported
+move over  ==>  unsupported
+
+# ── "put X in Y" is a file move too ─────────────────────────────────────────
+# The destination preposition was to/into/onto only, so the single most
+# natural way to say this fell through to the model. Every one of these names
+# a REAL folder, which is what separates them from the block below.
+put the invoice in Documents  ==>  files
+put my resume in Downloads  ==>  files
+put the budget spreadsheet in Documents  ==>  files
+stick that report in the desktop folder  ==>  files
+drop the receipt in Downloads  ==>  files
+
+# ...and the sentences that share the shape but name no folder at all. None of
+#    them may become a file move. "send the report in an email" reaches the
+#    honest refusal rather than the model, which is BETTER than either: Nova
+#    cannot send email, and that guard exists precisely so the 3B never claims
+#    she did.
+send the report in an email  ==>  unsupported
+put that in an email to Mom  ==>  llm
+put the invoice in the mail  ==>  llm
+
+# ── "resume" is a noun in this house ────────────────────────────────────────
+# A bare \bresume\b in the music transport matcher meant every sentence
+# containing the word started playing. Verified before the fix: "put my resume
+# in Downloads" launched Spotify and played AC/DC.
+is my resume up to date  ==>  llm
+I need to resume work on that  ==>  llm
+resume  ==>  tools
+nova resume  ==>  tools
+resume the music  ==>  tools
+unpause  ==>  tools
+
+# ── Widening the file-move destination: the collateral it must NOT claim ────
+# "in <folder>" is a destination only when the folder ENDS the sentence. When
+# somebody names a place to put a thing, they stop talking. When "in the X"
+# describes the thing itself, more words follow — and every one of these was
+# claimed as a file move by the first version of that widening.
+put a warning in the docs for the new API  ==>  llm
+put Sarah in the picture too  ==>  llm
+put a caption in the photos from the party  ==>  llm
+drop a footnote in the document Chris shared with me  ==>  llm
+put my notes in the desktop version of the app  ==>  llm
+put my old band photos in the music video Jake is editing  ==>  llm
+put my name in the document I'm looking at  ==>  llm
+
+# ...and remembering something ABOUT a folder is not a request to move
+#    anything. This one is a real regression the widening caused: it routed to
+#    memory before and to files after, so the fact was silently never stored.
+remember that I put my tax documents in Documents every April  ==>  memory
+remember I put the budget spreadsheet in Downloads  ==>  memory
+forget that I put my resume in Downloads  ==>  memory
+
+# ── Move verbs that were simply missing ─────────────────────────────────────
+# Each of these names a real folder in the form the guard already accepts; only
+# the verb was absent from _MOVE_VERB_RE.
+file this receipt in the taxes folder  ==>  files
+drag the upcoming events doc into my Documents folder  ==>  files
+shove the old screenshots in the archive folder  ==>  files
+
+# ── "screenshot" is a NOUN as often as a command ────────────────────────────
+# tools matched the bare substring anywhere in the utterance, so asking Nova to
+# FILE existing screenshots took a fresh one and dropped a PNG on his Desktop,
+# then reported success. Verified before the fix.
+#    These two reach the model rather than the honest refusal, because "stick"
+#    is not in _ACTION_REQUEST_RE and "screenshots" is too generic a noun to
+#    survive the file token guard. Recorded as they behave. The point of these
+#    lines is that NO SCREENSHOT IS TAKEN, which is what used to happen.
+stick the screenshot in Slack for the team  ==>  llm
+where are my screenshots  ==>  llm
+find the screenshot from yesterday  ==>  files
+take a screenshot  ==>  tools
+grab a screenshot of this  ==>  tools
+
+# ── "search" inside a noun phrase is not a web search ───────────────────────
+# The matcher took \bsearch\b anywhere and grabbed everything after it, so
+# "I'm resuming my job search next month" ACTIVATED the browser and searched
+# for "next month". Verified before the fix.
+I'm resuming my job search next month  ==>  llm
+my job search is going well  ==>  llm
+the search committee got back to me  ==>  llm
+search for the best laptop stand  ==>  tools
+google the weather in Denver  ==>  tools
+look up who won the game  ==>  tools
+
+# ── "next" and "skip" are ordinary words ────────────────────────────────────
+# A bare \b(next|skip)\b in the transport matcher meant every one of these
+# skipped his music. Third instance of the same bug family in tools.py, after
+# "resume" and "screenshot".
+next month  ==>  llm
+what's next  ==>  llm
+# (an imperative Nova cannot perform, so the honest refusal is the right answer)
+skip the meeting  ==>  unsupported
+my next meeting is at three  ==>  llm
+next  ==>  tools
+next song  ==>  tools
+skip this song  ==>  tools
+
+# ── weather runs one stage ahead of files ───────────────────────────────────
+# A file command that merely mentions weather was answered with the current
+# temperature while the file sat where it was.
+put my weather report in Documents  ==>  files
+copy the weather forecast spreadsheet to Documents  ==>  files
+move the weather notes to the desktop  ==>  files
+what's the weather  ==>  weather
+weather in Boston  ==>  weather
+
+# ── a web search is not a file search ───────────────────────────────────────
+# "search for X" IS a file find, so only the unambiguous web forms are
+# declined by file_intents. Both readings have to keep working.
+search the web for how to move photos into Documents  ==>  tools
+search the web for spider-man  ==>  tools
+search for my resume  ==>  files
+
+# ── Three phrasing gaps: a real capability answered by the wrong handler ────
+# Each of these is something Nova CAN do, reaching either the model or a file
+# search instead. Found by routing 117 generated utterances through the real
+# pipeline.
+put a reminder in for 6pm  ==>  calendar
+put in a reminder for six  ==>  calendar
+stick a reminder in for tomorrow morning  ==>  calendar
+copy my receipts reminder to next Monday  ==>  calendar
+duplicate the dentist reminder  ==>  calendar
+read me the notes on my screen  ==>  screen
+read the notes on my screen  ==>  screen
+what are the errors on my screen  ==>  screen
+tell me what the code on my screen says  ==>  screen
+
+# ...and the file commands that mention a screen or a reminder and must NOT be
+#    stolen by the widened matchers above.
+move the reminder pdf to Documents  ==>  files
+put the budget pdf on my desktop  ==>  files
+find the notes file  ==>  files
+
+# ── The audit: command words that are also ordinary English ─────────────────
+# The resume/screenshot/next/search family turned out to be nine matchers, not
+# four. Found by routing 65 innocent sentences through the real pipeline; every
+# one below was claimed by a handler, several of them loudly. The positive
+# controls underneath matter just as much — the fix must not make the real
+# command unreachable.
+I need more space in my closet  ==>  llm
+we should give the team some space  ==>  llm
+that hard drive of a movie was long  ==>  llm
+my memory is terrible these days  ==>  llm
+in memory of my grandfather  ==>  llm
+do you have a good memory  ==>  llm
+refresh my memory on that  ==>  llm
+the volume of work is insane  ==>  llm
+volume two of the series was better  ==>  llm
+brighter days ahead  ==>  llm
+the loop of the rollercoaster  ==>  llm
+repeat after me  ==>  llm
+shuffle the deck of cards  ==>  llm
+hide your feelings  ==>  llm
+restore my faith in people  ==>  llm
+# These reach the honest refusal rather than the model, because "play" heads
+# _ACTION_REQUEST_RE. For "play chess with me" that is exactly right; for the
+# idioms it is a slightly stiff answer to a turn of phrase. Both beat opening a
+# Spotify search for "it cool", which is what used to happen.
+play it cool  ==>  unsupported
+play devil's advocate  ==>  unsupported
+play chess with me  ==>  unsupported
+
+# ...and the commands those fixes must not break.
+how much disk space do I have  ==>  tools
+how much space is left  ==>  tools
+check my storage  ==>  tools
+how much memory am I using  ==>  tools
+what's my memory usage  ==>  tools
+how much ram do I have  ==>  tools
+turn the volume up  ==>  tools
+set the volume to 40  ==>  tools
+what's the volume  ==>  tools
+make the screen brighter  ==>  tools
+dim the screen  ==>  tools
+set brightness to 50  ==>  tools
+shuffle  ==>  tools
+turn on shuffle  ==>  tools
+shuffle the music  ==>  tools
+turn off repeat  ==>  tools
+repeat this song  ==>  tools
+reload the page  ==>  tools
+refresh  ==>  tools
+minimize Xcode  ==>  tools
+play some jazz  ==>  tools
+
+# ── A file rename is not a reminder edit ────────────────────────────────────
+# calendar_intents has a bare "rename X to Y" rule and a file-word guard meant
+# to stop it claiming file renames — but the guard did not list "resume", so
+# "rename my resume" silently RETITLED a real reminder, with no confirmation.
+rename my resume to resume final draft  ==>  files
+rename my resume file  ==>  files
+rename the budget spreadsheet to budget final  ==>  files
+
+# ── ...and the collisions a loose navigation regex would cause. Every one of
+#    these contains a navigation word and must NOT be stolen. This is the same
+#    failure family as the memory regex eating "what's my calendar". ─────────
+I'm going home at five  ==>  llm
+I go home every friday  ==>  llm
+what's on the menu for dinner  ==>  llm
+the menu at that place is huge  ==>  llm
+I want to go to italy someday  ==>  llm
+home is where the heart is  ==>  llm
+open my home folder  ==>  tools
+find the menu pdf  ==>  files
+remind me to call mom when I get home  ==>  calendar
+show me my calendar  ==>  calendar
+what's my schedule at home tomorrow  ==>  calendar
+what's the weather at home  ==>  weather
+
+# ── Work mode (Phase 3): Nova parks in the corner and works alongside him ───
+nova work with me  ==>  view
+work with me  ==>  view
+take over  ==>  view
+work mode  ==>  view
+minimize  ==>  view
+# ...and the sentences that must NOT park her
+let's work on this budget together tomorrow  ==>  llm
+I have to work with my team on that  ==>  llm
+he took over the project last year  ==>  llm
+I work on my mac all day  ==>  llm
+
+# ── Market data (Phase 6). Real money rides on these, so the guards below
+#    matter more than the positives. ─────────────────────────────────────────
+how is the market doing  ==>  market
+how's the stock market today  ==>  market
+how is SpaceX stock doing  ==>  market
+what is Apple stock trading at  ==>  market
+what do analysts say about Tesla  ==>  market
+what are the analyst ratings for Nvidia  ==>  market
+what's the price of Microsoft stock  ==>  market
+
+# ...and the conversation a loose finance regex would eat.
+how are you doing  ==>  llm
+how's it going  ==>  llm
+how's the weather  ==>  weather
+how's my day looking  ==>  llm
+I had apple pie for dessert  ==>  llm
+can you share that with me  ==>  llm
+the price of gas is insane  ==>  llm
+my apple watch died  ==>  llm
+
+# ── Actuation (Phase 7). Nova types and clicks. The guards matter most:
+#    every one of these verbs appears constantly in ordinary speech. ─────────
+type hello there  ==>  actuation
+click the send button  ==>  actuation
+press enter  ==>  actuation
+scroll down  ==>  actuation
+send it  ==>  actuation
+
+# ...and the conversation that must never move his mouse.
+what type of music do you like  ==>  llm
+that's my type of movie  ==>  llm
+I press my shirts on sundays  ==>  llm
+the press has been brutal lately  ==>  llm
+scroll through my photos sometime  ==>  llm
+send a text to mom  ==>  unsupported
