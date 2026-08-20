@@ -770,6 +770,24 @@ class VoiceAssistant:
         except Exception as exc:
             log.warning(f"could not show home at startup: {exc}")
         self._start_home_ticker()
+        self._start_proactive()
+
+    def _start_proactive(self) -> None:
+        """Let Nova speak first, occasionally.
+
+        Deliberately started LAST, after every engine exists, because the
+        monitor reads the calendar and the reminders and asks the assistant
+        whether it is a good moment — all of which have to be there before it
+        wakes up. Best effort: nothing about volunteering information should be
+        able to stop Nova answering questions.
+        """
+        try:
+            from proactive import ProactiveMonitor
+            self.proactive = ProactiveMonitor(self.config, self, self._announce)
+            self.proactive.start()
+        except Exception as exc:
+            log.warning(f"proactive monitor unavailable: {exc}")
+            self.proactive = None
 
     def _start_home_ticker(self) -> None:
         """Keep home honest about the world while he is looking at it.

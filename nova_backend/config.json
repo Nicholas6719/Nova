@@ -154,5 +154,12 @@
       "enabled": false,
       "_note": "OFF because it does not work yet, not because it is unwanted. He asked twice for his music to keep playing while Nova stops hearing it. The tap delivers the speaker mix reliably, but cancellation of it currently measures 2.8-5.4 dB, which leaves Nova effectively deaf to him over music \u2014 worse in daily use than pausing the music, which works. Set true to try it; the blocker is the lag estimator never locking on music, which starves the residual suppressor of the aligned reference it needs (it reached ~19 dB when it had one)."
     }
+  },
+  "proactive": {
+    "enabled": true,
+    "lead_minutes": 10,
+    "min_gap_seconds": 600,
+    "poll_seconds": 60,
+    "_note": "Nova speaking FIRST: an event about to start, a reminder just gone overdue. The restraint is the feature \u2014 she never interrupts a turn, never says the same thing twice, never volunteers anything that is not time-bound, never speaks twice inside min_gap_seconds, and stays silent while muted, asleep, or in work mode. lead_minutes is how far ahead an event counts as imminent. enabled false makes her purely reactive again."
   }
 }
