@@ -300,5 +300,27 @@ def main() -> int:
     return 1 if FAIL else 0
 
 
+
+# ── Target matching: the fragment bug ────────────────────────────────────────
+# "click the File menu" matched a folder called Coding_Files, because "file" is
+# inside it. Same disease as the routing audit — a match on a fragment rather
+# than on the thing named — except the consequence here is a click he never
+# asked for.
+import re as _re
+import actuation as _A
+
+for _said, _want in (("the File menu", "file"), ("the send button", "send"),
+                     ("File", "file"), ("the Save As item", "save as")):
+    check(_A._normalise_label(_said) == _want,
+          f"{_said!r} is asking for {_want!r}", _A._normalise_label(_said))
+
+_w = _A._normalise_label("the File menu")
+_pat = _re.compile(rf"(?<![\w]){_re.escape(_w)}(?![\w])")
+for _text, _should in (("coding_files", False), ("my files", False),
+                       ("profile", False), ("file", True),
+                       ("File Edit View", True)):
+    check(bool(_pat.search(_text.lower())) is _should,
+          f"{_text!r} {'matches' if _should else 'does NOT match'} {_w!r}")
+
 if __name__ == "__main__":
     sys.exit(main())

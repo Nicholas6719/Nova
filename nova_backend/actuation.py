@@ -118,6 +118,28 @@ class Target:
         return f"<Target {self.label!r} at ({self.x:.0f},{self.y:.0f}) via {self.source}>"
 
 
+# Words that describe WHAT KIND of thing it is, not which one. He says "click
+# the File menu"; the control is named "File". Left in, they turn every exact
+# match into a miss and every miss into a substring gamble.
+_LABEL_NOISE = re.compile(
+    r"^\s*(?:the|a|an|that|this)\s+|"
+    r"\s+(?:menu|button|tab|field|box|icon|link|item|option|control)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _normalise_label(label: str) -> str:
+    """"the File menu" -> "file". Applied until it stops shrinking, so
+    "the send button" loses both ends."""
+    t = (label or "").strip()
+    while True:
+        stripped = _LABEL_NOISE.sub("", t).strip()
+        if stripped == t:
+            break
+        t = stripped
+    return t.lower()
+
+
 def find_by_accessibility(label: str) -> Optional[Target]:
     """A real control with that name in the frontmost app.
 
@@ -177,17 +199,34 @@ def find_by_ocr(label: str) -> Optional[Target]:
         # call, on any path.
         _delete(path)
 
-    wanted = label.strip().lower()
-    best = None
-    for text, bx, by, bw, bh in boxes:
-        t = text.strip().lower()
-        if t == wanted:
-            best = (text, bx, by, bw, bh)
-            break
-        if best is None and wanted in t:
-            best = (text, bx, by, bw, bh)
-    if best is None:
+    wanted = _normalise_label(label)
+    if not wanted:
         return None
+
+    # Exact first, then WHOLE-WORD. Never a bare substring: "the File menu"
+    # matched a folder called Coding_Files, because "file" is inside it. That
+    # is the routing bug all over again — a match on a fragment rather than on
+    # the thing named — except here the consequence is a click he did not ask
+    # for, on something he did not name.
+    exact, worded = [], []
+    pattern = re.compile(rf"(?<![\w]){re.escape(wanted)}(?![\w])")
+    for box in boxes:
+        t = box[0].strip().lower()
+        if t == wanted:
+            exact.append(box)
+        elif pattern.search(t):
+            worded.append(box)
+
+    hits = exact or worded
+    if not hits:
+        return None
+    if len(hits) > 1 and not exact:
+        # Several things on screen could be it. Guessing which one is exactly
+        # the behaviour the "found by name or not at all" rule exists to
+        # prevent, so this is a miss and the caller asks him.
+        log.info(f"actuation: {label!r} is ambiguous ({len(hits)} matches)")
+        return None
+    best = hits[0]
 
     _, bx, by, bw, bh = best
     # Vision is normalized with the origin at the BOTTOM left; the screen's
