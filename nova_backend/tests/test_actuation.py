@@ -167,7 +167,23 @@ def test_typing_free() -> None:
     out = act.handle("type", 'say "okay thank you see you soon"')
     check(("type", "okay thank you see you soon") in A._did,
           "his exact example types the quoted words", str(A._did))
-    check("send" in out.lower(), "…and offers to send, rather than sending", out)
+    # The OFFER depends on the app. In Messages, Return is send, so Nova has
+    # to ask. In TextEdit it is a newline and there is no recipient — offering
+    # there is noise, and an offer that makes no sense where he is looking is
+    # how a confirmation stops being read.
+    import actuation as _A
+    _real = _A.return_sends
+    try:
+        _A.return_sends = lambda: True
+        out_chat = act.handle("type", 'say "okay thank you see you soon"')
+        check("send" in out_chat.lower(),
+              "in a chat app it offers to send, rather than sending", out_chat)
+        _A.return_sends = lambda: False
+        out_doc = act.handle("type", 'say "okay thank you see you soon"')
+        check("send" not in out_doc.lower(),
+              "in a text editor it just types, and offers nothing", out_doc)
+    finally:
+        _A.return_sends = _real
     check(not check_spoken(out), "fit to speak", out)
 
     A._did.clear()

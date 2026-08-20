@@ -155,8 +155,15 @@ class NovaActuation:
             return "What should I type?"
         if not A.type_text(body):
             return "I couldn't type that."
-        # Says what it did and STOPS. Sending is a separate, gated step.
-        return f"Typed it. Want me to send it?"
+        # Says what it did and STOPS. Sending is a separate, gated step — but
+        # only OFFERED where there is something to send. `return_sends` already
+        # knew the difference and this line never asked it: Nova offered to
+        # send a paragraph typed into TextEdit, where Return is just a newline
+        # and there is no recipient. An offer that makes no sense in the app he
+        # is looking at is how a confirmation stops being read.
+        if A.return_sends():
+            return "Typed it. Want me to send it?"
+        return "Typed it."
 
     # ── Keys: Return is the ambiguous one ─────────────────────────────────────
     def _key(self, text: str) -> str:
