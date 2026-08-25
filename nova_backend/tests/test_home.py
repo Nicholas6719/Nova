@@ -466,6 +466,259 @@ def test_search_readback():
           "a result with no host still produces a sentence")
 
 
+def test_awareness():
+    print("\n9. THE SCREEN AWARENESS CARD OFFERS ONLY WHAT NOVA CAN DO")
+    import screen_awareness as sa
+    from screen_awareness import NovaScreen
+    from views import DEFAULT_SLOTS as V_DEFAULT_SLOTS
+
+    # Rule 2: the OS lookups are stubbed, every verdict is the shipping code.
+    real_app, real_win, real_perm = (sa.frontmost_app, sa.visible_windows,
+                                     sa.has_permission)
+    real_exist = sa.existing_windows
+    app = ["Safari"]
+    win = ["Spider-Man (2002) - Wikipedia"]
+    sa.frontmost_app = lambda: app[0]
+    # He is IN this app — which is the only moment the card learns its
+    # subject. Behind Nova's window the stack order is not stable.
+    sa.visible_windows = lambda: [(app[0], win[0]), ("NovaOS", "Nova")]
+    sa.existing_windows = lambda: sa.visible_windows()
+    sa.has_permission = lambda: True
+    try:
+        # THE PROMISE. An offer whose command routes nowhere is a button that
+        # does nothing, and the first draft of the table shipped exactly that.
+        screen = NovaScreen({}, llm=None)
+        from views import NovaViews
+        for _apps, offer, say in NovaViews._OFFERS:
+            phrase = say.format(app="TextEdit")
+            check(screen.detect_intent(phrase) is not None,
+                  f"the offer command {phrase!r} reaches a real handler",
+                  f"{offer!r} would have done nothing")
+            # And it must name the window, or the handler reads whatever
+            # happens to be on top by the time he clicks.
+            check("TextEdit" in phrase,
+                  "the offer command names the window the card is about",
+                  phrase)
+
+        # The window server is the source of truth for what he is looking at,
+        # NOT NSWorkspace — which has no run loop behind it here and froze on
+        # whatever was frontmost at boot. Measured: TextEdit to Finder, and
+        # NSWorkspace still said TextEdit for the life of the process.
+        sa.visible_windows = lambda: [("Finder", "Downloads")]
+        check(real_app() == "Finder",
+              "frontmost app follows the live window list, not a cached one",
+              f"got {real_app()!r}")
+        sa.visible_windows = lambda: [(app[0], win[0]), ("NovaOS", "Nova")]
+
+        # Anything a capture can be NAMED, discard() has to be able to delete.
+        # It is a silent whitelist: a nova_win_ file was handed to it, matched
+        # nothing, and stayed on disk with a picture of his screen in it.
+        import os
+        import tempfile
+        for prefix in sa._CAPTURE_PREFIXES:
+            fd, junk = tempfile.mkstemp(prefix=prefix, suffix=".png")
+            os.close(fd)
+            sa.discard(junk)
+            check(not os.path.exists(junk),
+                  f"discard() deletes a {prefix}* capture",
+                  "a screenshot that outlives the call is the one rule here")
+
+        views, ws, _tools = build()
+        views._home_is_showing = lambda: True
+        # build() primes the tiles and pushes home once, which legitimately
+        # spends the first offer. Start from a clean slate, and from the
+        # default layout — an earlier test in this file moves cards, and the
+        # layout it saved would otherwise decide where this one's cards sit.
+        views.slots = dict(V_DEFAULT_SLOTS)
+
+        def row():
+            views._tiles["awareness"]._at = 0
+            views._home_payload()
+            time.sleep(0.6)                 # the tile refreshes off-thread
+            block = next((b for b in views._home_payload()["blocks"]
+                          if b.get("card") == "awareness"), None)
+            return (block["items"][0] if block else {})
+
+        first = row()
+        check(first.get("accent", "").startswith("read the Safari"),
+              "the command carries the app the card named", str(first))
+        check(first.get("title") == "Safari" and first.get("meta"),
+              "the card names the app and offers one thing", str(first))
+        check(first.get("detail") == win[0],
+              "the window title is the context line", str(first))
+        check(row().get("meta"),
+              "the offer STANDS until he answers it",
+              "rationing it at render time spent it on cards he never saw")
+        app[0], win[0] = "TextEdit", "notes.txt"
+        second = row()
+        check(second.get("meta") == "Want me to read this back to you?",
+              "a different app gets the offer that fits it", str(second))
+
+        # An offer spent while he was looking at something else is an offer he
+        # never saw. This is the bug that would have made the card look broken.
+        # Nothing offered without the grant it needs.
+        sa.has_permission = lambda: False
+        app[0], win[0] = "Safari", "Wikipedia"
+        check(not row().get("meta"),
+              "no offer without Screen Recording",
+              "clicking it could only ever produce a refusal")
+        check(row().get("title") == "Safari",
+              "the context line survives without the grant",
+              "naming the front app needs no permission at all")
+
+        # The subject holds still while Nova is in front. It used to follow
+        # the top of a stack that reorders on its own, so the card changed its
+        # mind about what he was looking at and the button moved.
+        sa.has_permission = lambda: True
+        sa.visible_windows = lambda: [("TextEdit", "notes.txt"),
+                                      ("Finder", "Downloads"),
+                                      ("NovaOS", "Nova")]
+        check(row().get("title") == "TextEdit", "he is working in TextEdit")
+        sa.visible_windows = lambda: [("NovaOS", "Nova"),
+                                      ("Finder", "Downloads"),
+                                      ("TextEdit", "notes.txt")]
+        check(row().get("title") == "TextEdit",
+              "the subject holds while Nova is the front window",
+              "it followed a shuffling stack and churned")
+        sa.visible_windows = lambda: [("NovaOS", "Nova"),
+                                      ("TextEdit", "notes.txt"),
+                                      ("Finder", "Downloads")]
+        check(row().get("title") == "TextEdit",
+              "and holds when that stack reorders behind her")
+        sa.visible_windows = lambda: [("Finder", "Downloads"), ("NovaOS", "Nova")]
+        check(row().get("title") == "Finder",
+              "but follows him the moment he actually uses another app")
+
+        # OCCLUDED IS NOT CLOSED. Nova's window covers the display, so macOS
+        # drops everything behind it from the on-screen list — and the card
+        # concluded his browser had been closed every time he looked at her.
+        sa.visible_windows = lambda: [("NovaOS", "Nova")]
+        sa.existing_windows = lambda: [("NovaOS", "Nova"),
+                                       ("Finder", "Downloads")]
+        check(row().get("title") == "Finder",
+              "a window merely hidden behind Nova is still his window",
+              "she forgot what he was doing the moment she came to the front")
+
+        # Stubborn is not stable. A remembered window that has since closed is
+        # a name for something that is not there, and the card went on offering
+        # to read a TextEdit dialog that had already gone.
+        sa.visible_windows = lambda: [("NovaOS", "Nova"), ("Safari", "Wiki")]
+        sa.existing_windows = lambda: sa.visible_windows()
+        check(row().get("title") == "Safari",
+              "a remembered window that has closed is dropped",
+              "it kept offering to read a window Nova then could not find")
+        sa.visible_windows = lambda: [(app[0], win[0]), ("NovaOS", "Nova")]
+
+        # A heads up outranks a note about what app he is in.
+        sa.has_permission = lambda: True
+        views._notice = "Standup in ten minutes."
+        views._notice_until = time.time() + 30
+        cards = views._home_payload()["blocks"]
+        slots = [(b.get("card"), b.get("slot")) for b in cards]
+        check(("notice", "R3") in slots and ("awareness", "R3") not in slots,
+              "a live notice takes R3 and awareness steps aside", str(slots))
+    finally:
+        sa.frontmost_app, sa.visible_windows = real_app, real_win
+        sa.has_permission, sa.existing_windows = real_perm, real_exist
+
+
+def test_history():
+    print("\n10. THE HISTORY LOGS WHAT HAPPENED, INCLUDING WHAT FAILED")
+    import views as V
+    views, _ws, _tools = build()
+    views.assistant.activity_log = [
+        {"time": "2:41 PM", "text": "Searched the web for spider-man",
+         "failed": False, "kind": "browser"},
+        {"time": "2:43 PM", "text": "Typed it.", "failed": False,
+         "kind": "automation"},
+        {"time": "2:44 PM", "text": "I couldn't click Send.", "failed": True,
+         "kind": "automation"},
+    ]
+    browser = views._payload(V.VIEWS["browser"])
+    rows = browser["blocks"][0]["items"]
+    check(len(rows) == 1 and "spider-man" in rows[0]["title"],
+          "browser history shows only browser runs", str(rows))
+    check(browser["blocks"][0].get("card") == "history",
+          "the block is stamped so the client finds it by name")
+
+    auto = views._payload(V.VIEWS["automation"])["blocks"][0]["items"]
+    check([r["title"] for r in auto] ==
+          ["I couldn't click Send.", "Typed it."],
+          "automation history is newest first", str(auto))
+    check(auto[0].get("accent") == "failed" and not auto[1].get("accent"),
+          "a failure stays in the log and stays marked",
+          "a log that only remembers successes is worse than no log")
+
+    views.assistant.activity_log = []
+    empty = views._payload(V.VIEWS["automation"])["blocks"][0]
+    check(empty.get("kind") == "note",
+          "an empty log says so rather than showing an empty box", str(empty))
+
+
+def test_actuation_log():
+    print("\n11. WHAT NOVA SAYS AND WHAT SHE LOGS ARE THE SAME SENTENCE")
+    import actuation as A
+    import actuation_intents as AI
+    import nova as nova_mod
+
+    class Recorder:
+        work_mode = True
+
+        def __init__(self):
+            self.rows = []
+
+        def record_activity(self, text, failed=False, kind="browser"):
+            self.rows.append((text, failed, kind))
+
+    saved = (A.has_accessibility, A.type_text, A.return_sends, A.find,
+             A.needs_confirmation, A.click)
+    who = Recorder()
+    act = AI.NovaActuation(nova_mod.load_config(), assistant=who)
+    try:
+        A.has_accessibility = lambda: True
+        A.type_text = lambda body: True
+        A.return_sends = lambda: True
+
+        spoken = act.handle("type", 'type "hello there"')
+        check(spoken == "Typed it. Want me to send it?",
+              "the offer still reaches his ear intact", spoken)
+        check(who.rows[-1][0] == "Typed: hello there",
+              "the log records WHAT was typed, not just that it was",
+              f'"Typed it." is right in the ear and useless a day later '
+              f'({who.rows[-1]})')
+
+        class Target:
+            label = "Send"
+
+        A.find = lambda label: Target()
+        A.needs_confirmation = lambda label: True
+        A.click = lambda t: True
+        before = len(who.rows)
+        act.handle("click", "click Send")
+        check(len(who.rows) == before,
+              "an unanswered offer is not history",
+              "nothing has happened to his Mac yet")
+        act.resolve_pending("yes")
+        check(who.rows[-1] == ("Clicked Send.", False, "automation"),
+              "the confirmed click lands in the log", str(who.rows[-1]))
+
+        act.handle("click", "click Send")
+        cancelled = act.resolve_pending("no")
+        check(cancelled == "Okay, I won't.",
+              "cancelling says what it always said", cancelled)
+        check(who.rows[-1][0] == "Cancelled the pending action.",
+              "and the log says it in words that survive a day",
+              str(who.rows[-1]))
+
+        A.find = lambda label: None
+        act.handle("click", "click Publish")
+        check(who.rows[-1][1] is True,
+              "a thing Nova could not do is marked failed", str(who.rows[-1]))
+    finally:
+        (A.has_accessibility, A.type_text, A.return_sends, A.find,
+         A.needs_confirmation, A.click) = saved
+
+
 def main() -> int:
     print("=" * 72)
     print("HOME SURFACE — what appears, what leaves, and where it sits")
@@ -479,6 +732,9 @@ def main() -> int:
     test_render_cost()
     test_progress()
     test_search_readback()
+    test_awareness()
+    test_history()
+    test_actuation_log()
 
     print(f"\n  {PASS}/{PASS + FAIL} checks passed")
     if FAILURES:

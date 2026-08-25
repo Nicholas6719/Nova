@@ -49,6 +49,17 @@ struct ShellView: View {
                 fullShell
             }
         }
+        // On the ROOT, not on HomeScreen. Nova answering swaps the layout, so
+        // a modifier attached inside the screen switch is torn out of the
+        // hierarchy at exactly the moment the answer arrives — the card asked
+        // its question, went to Checking, and then quietly lost the reply.
+        .onChange(of: vm.lastAnswer) { _, answer in
+            guard awarenessRunning, !answer.isEmpty else { return }
+            awarenessRunning = false
+            // Shown in full rather than summarised. Nova already wrote it for
+            // an ear, and rewriting it here would be a second voice.
+            awarenessResult = answer
+        }
         .onAppear {
             WindowChrome.makeFrameless()
             // Again on the next runloop: window restoration applies its saved
@@ -139,11 +150,11 @@ struct ShellView: View {
                               onRange: { financeRange = $0 })
             case "browser":
                 BrowserScreen(steps: liveSteps, query: panel.title == "Searching the web"
-                              ? stepDetail : "", result: nil, history: [],
+                              ? stepDetail : "", result: nil, history: history,
                               tint: vm.state.tint)
             case "automation":
                 AutomationScreen(workMode: vm.isPuck, steps: liveSteps,
-                                 pendingConfirmation: nil, history: [],
+                                 pendingConfirmation: nil, history: history,
                                  state: vm.state,
                                  onToggleWorkMode: { vm.setPuck($0) },
                                  onConfirm: {}, onCancel: {})
@@ -158,9 +169,15 @@ struct ShellView: View {
                     weather: homeWeather, nowPlaying: homeNowPlaying,
                     notice: homeNotice,
                     markets: homeMarkets, upcoming: homeUpcoming,
-                    awarenessApp: nil, awarenessContext: nil, awareness: .idle,
+                    awarenessApp: awarenessApp,
+                    awarenessContext: awarenessContext,
+                    awareness: awarenessStage,
                     metrics: panel.statusReadings,
-                    onAwarenessYes: {}, onAwarenessNo: {})
+                    onAwarenessYes: acceptAwareness,
+                    onAwarenessNo: {
+                        awarenessDismissed.insert(awarenessApp ?? "")
+                        awarenessAsked = nil
+                    })
             }
         }
     }
@@ -171,6 +188,86 @@ struct ShellView: View {
     // real, templated values and the cards only reshape them. Nothing here
     // invents a number, and a card whose block is missing simply does not
     // appear, which is the same rule the payload itself follows.
+
+    // MARK: - Screen awareness
+    //
+    // The card is backend-built like every other one: the app, the window and
+    // the OFFER all arrive templated. Only the three UI stages live here,
+    // because they are about what he clicked, not about what Nova can see.
+
+    // Answered offers, by app. The BACKEND deliberately does not ration these
+    // — it cannot tell a render he read from one that happened at boot or
+    // behind another window, and every attempt to guess spent the offer on a
+    // card he never saw. Here the signal is unambiguous: he clicked something.
+    @State private var awarenessDismissed: Set<String> = []
+    @State private var awarenessRunning = false
+    @State private var awarenessResult = ""
+    /// The window the question was asked ABOUT, held for as long as its answer
+    /// is on screen. Without this the card kept following the front window
+    /// while Nova was reading a different one, and the result landed under
+    /// whatever app happened to be in front by the time she finished.
+    @State private var awarenessAsked: (app: String, context: String)?
+
+    private var awarenessRow: PanelItem? {
+        guard case let .items(_, rows)? = block(card: "awareness") else { return nil }
+        return rows.first
+    }
+
+    private var awarenessApp: String? {
+        if let asked = awarenessAsked { return asked.app }
+        guard let row = awarenessRow, !row.title.isEmpty else { return nil }
+        return row.title
+    }
+
+    private var awarenessContext: String? {
+        if let asked = awarenessAsked {
+            return asked.context.isEmpty ? nil : asked.context
+        }
+        guard let row = awarenessRow, !row.detail.isEmpty else { return nil }
+        return row.detail
+    }
+
+    /// Openers Nova uses when she could NOT do the thing. Only ever decides
+    /// whether the result gets a checkmark or an exclamation — it never
+    /// changes a word of what she said.
+    private static let refusals = ["i can't", "i couldn't", "i wasn't able",
+                                   "i'm not able", "something went wrong",
+                                   "i need "]
+
+    private var awarenessStage: AwarenessStage {
+        if !awarenessResult.isEmpty {
+            let low = awarenessResult.lowercased()
+            let ok = !Self.refusals.contains { low.hasPrefix($0) }
+            return .done(awarenessResult, ok: ok)
+        }
+        if awarenessRunning { return .checking }
+        guard let row = awarenessRow, !row.meta.isEmpty,
+              !awarenessDismissed.contains(row.title) else { return .idle }
+        return .suggesting(row.meta)
+    }
+
+    /// Yes runs the offer through the SAME path speech uses. Nothing here is a
+    /// second implementation of a feature: the card says the words, and the
+    /// real handler answers them, so a click and a sentence cannot drift.
+    private func acceptAwareness() {
+        guard let row = awarenessRow, !row.accent.isEmpty else { return }
+        awarenessRunning = true
+        awarenessResult = ""
+        awarenessAsked = (row.title, row.detail)
+        awarenessDismissed.insert(row.title)   // asked and answered
+        vm.send(row.accent, silent: false)
+    }
+
+    // MARK: - History
+    //
+    // What Nova actually did, after the fact. Empty is a real answer and the
+    // screens render their own note for it.
+
+    private var history: [ActivityEvent] {
+        guard case let .items(_, rows)? = block(card: "history") else { return [] }
+        return rows.map { ActivityEvent(time: $0.meta, text: $0.title,
+                                        failed: $0.accent == "failed") }
+    }
 
     private func block(card: String) -> PanelContent? {
         panel.blocks.first { $0.card == card }?.content

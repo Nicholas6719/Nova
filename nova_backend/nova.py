@@ -25,6 +25,7 @@ import queue
 import re
 import threading
 import time
+import collections
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -256,6 +257,10 @@ class VoiceAssistant:
         # `_last_response` because that only becomes true after she ANSWERS,
         # which is a beat too late to be a greeting.
         self._conversation_started = False
+        # What Nova has DONE, newest last. Small on purpose: this is a log he
+        # glances at after the fact, not an audit trail, and an unbounded one
+        # would be a memory leak with a screen attached.
+        self.activity_log: "collections.deque" = collections.deque(maxlen=40)
         # A harness builds the assistant through _init_state alone, so the
         # cues have to exist here too — silent by default in that case, since
         # nothing has configured or started them.
@@ -565,7 +570,8 @@ class VoiceAssistant:
         # on_announce lets a timer speak when it fires — nothing is asking at
         # that moment, so it needs its own safe path to the floor.
         self.tools = NovaTools(self.config, on_announce=self._announce,
-                               on_progress=self._show_work)
+                               on_progress=self._show_work,
+                               on_activity=self.record_activity)
 
     def _init_calendar(self) -> None:
         # NovaCalendar's LLM extraction/summarize calls run on the nova-llm
@@ -846,6 +852,17 @@ class VoiceAssistant:
         except Exception as exc:
             # A panel failing must never cost him the spoken answer.
             log.warning(f"could not send panel: {exc}")
+
+    def record_activity(self, summary: str, failed: bool = False,
+                        kind: str = "browser") -> None:
+        """One line in the history, stamped when it happened."""
+        try:
+            self.activity_log.append({
+                "time": datetime.now().strftime("%-I:%M %p"),
+                "text": summary, "failed": bool(failed), "kind": kind})
+            self.views.refresh_home()
+        except Exception as exc:
+            log.debug(f"could not record activity: {exc}")
 
     def _show_work(self, payload: dict) -> None:
         """Put a live step list on screen while a handler is working.

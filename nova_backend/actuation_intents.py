@@ -74,6 +74,12 @@ _SCROLL_RE = re.compile(
 _SEND_RE = re.compile(_LEAD + r"send\s+it\s*[.?!]?$", re.I)
 
 
+def _short(text: str, limit: int = 60) -> str:
+    """One line of what he had Nova type, fit for a list."""
+    one = " ".join((text or "").split())
+    return one if len(one) <= limit else one[:limit - 1].rstrip() + "\u2026"
+
+
 class NovaActuation:
     """Typing and clicking, gated on work mode."""
 
@@ -85,6 +91,11 @@ class NovaActuation:
         # shape as the file confirmation: anything that is not a clear yes
         # cancels it.
         self.pending: Optional[Callable[[], str]] = None
+        # Set by the individual actions, read by handle(). A flag rather than
+        # parsing the spoken line back: the history has to know whether the
+        # click LANDED, and "I couldn't click Send" and "Clicked Send" are the
+        # same shape of English.
+        self._failed = False
 
     # ── Detection ─────────────────────────────────────────────────────────────
     def detect_intent(self, text: str) -> Optional[str]:
@@ -120,6 +131,9 @@ class NovaActuation:
         # GATE 1: work mode. Nova does not drive his Mac while she is sitting
         # in the middle of the screen being a voice assistant.
         if not getattr(self.assistant, "work_mode", False):
+            # Not logged. Nova declining to be in work mode is not something
+            # she did on his Mac, and a history full of refusals would bury
+            # the entries that record real actions.
             return ("I only type and click while we're working together. "
                     "Say work with me first.")
 
@@ -128,19 +142,50 @@ class NovaActuation:
             return ("I need Accessibility permission to do that. You can grant "
                     "it under Privacy and Security, Accessibility.")
 
+        self._failed = False
+        self._log_text = ""
         try:
             if intent == "type":
-                return self._type(text)
+                return self._log(self._type(text))
             if intent == "key":
-                return self._key(text)
+                return self._log(self._key(text))
             if intent == "scroll":
-                return self._scroll(text)
+                return self._log(self._scroll(text))
             if intent == "click":
-                return self._click(text)
+                return self._log(self._click(text))
         except Exception as exc:
             log.exception(f"actuation failed: {exc}")
-            return "Something went wrong doing that."
+            return self._log("Something went wrong doing that.", failed=True)
         return "I'm not sure what to do there."
+
+    def _log(self, line: str, failed: bool = None) -> str:
+        """One history line per action, and the line is what she SAID.
+
+        Nothing is rephrased for the log. The sentence he heard and the row he
+        reads afterwards being the same string is the whole point — it is how
+        he matches a line in the history to a moment he remembers.
+        """
+        # An OFFER is not an act, and it belongs in the log only once he has
+        # answered it — from resolve_pending. The signal is a pending action,
+        # not the shape of the sentence: "Typed it. Want me to send it?" ends
+        # in a question and the typing still happened, and dropping it lost a
+        # real change to his document from the history.
+        if self.pending is not None:
+            return line
+        # The offer clause goes from the LOG, never from the line she speaks.
+        # "Want me to send it?" is a thing Nova said in the moment, not a thing
+        # she did.
+        logged = self._log_text or re.sub(
+            r"\s*(?:Want me to[^.?!]*\?|Should I[^.?!]*\?)\s*$",
+            "", line).strip() or line
+        record = getattr(self.assistant, "record_activity", None)
+        if record is not None:
+            try:
+                record(logged, self._failed if failed is None else failed,
+                       "automation")
+            except Exception as exc:
+                log.debug(f"could not log actuation: {exc}")
+        return line
 
     # ── Typing: free, by design ───────────────────────────────────────────────
     def _type(self, text: str) -> str:
@@ -154,7 +199,10 @@ class NovaActuation:
         if not body:
             return "What should I type?"
         if not A.type_text(body):
+            self._failed = True
+            self._log_text = f"Couldn't type: {_short(body)}"
             return "I couldn't type that."
+        self._log_text = f"Typed: {_short(body)}"
         # Says what it did and STOPS. Sending is a separate, gated step — but
         # only OFFERED where there is something to send. `return_sends` already
         # knew the difference and this line never asked it: Nova offered to
@@ -183,6 +231,7 @@ class NovaActuation:
         elif key == "backspace":
             key = "delete"
         if not A.press_key(key):
+            self._failed = True
             return f"I can't press {key}."
         return f"Pressed {key}."
 
@@ -190,6 +239,7 @@ class NovaActuation:
         m = _SCROLL_RE.match(text.strip())
         direction = (m.group("dir") if m else "down").lower()
         if not A.scroll(direction):
+            self._failed = True
             return "I couldn't scroll."
         return f"Scrolled {direction}."
 
@@ -212,6 +262,7 @@ class NovaActuation:
         if target is None:
             # Never falls back to a guessed coordinate. Not finding it is the
             # honest answer, and the whole difference from clicking blind.
+            self._failed = True
             return f"I can't find anything called {label} on screen."
 
         if A.needs_confirmation(target.label):
@@ -221,6 +272,7 @@ class NovaActuation:
             return f"That would click {target.label}. Want me to?"
 
         if not A.click(target):
+            self._failed = True
             return f"I couldn't click {target.label}."
         return f"Clicked {target.label}."
 
@@ -234,5 +286,11 @@ class NovaActuation:
         self.pending = None
         if re.match(r"^\s*(yes|yeah|yep|yup|sure|do it|go ahead|please|"
                     r"confirm|send it)\b", text.strip(), re.I):
-            return action()
+            line = action()
+            return self._log(line, failed=line.lower().startswith("i couldn't"))
+        # Logged, and deliberately. A thing Nova nearly did to his Mac and then
+        # did not is exactly what he would go looking for afterwards. The LOG
+        # line and the SPOKEN line differ here, and only here: "Okay, I won't"
+        # is right in the ear and useless in a list a day later.
+        self._log("Cancelled the pending action.", failed=False)
         return "Okay, I won't."

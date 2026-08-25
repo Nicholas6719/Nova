@@ -142,16 +142,27 @@ def capture_screen() -> Optional[str]:
     return path
 
 
+# Every prefix capture_screen / capture_window can create. discard() will not
+# delete a file that is not named with one of these.
+_CAPTURE_PREFIXES = ("nova_screen_", "nova_win_")
+
+
 def discard(path: Optional[str]) -> None:
     """Delete a captured screenshot. Always safe to call; never raises.
 
     Defensive: only removes files this module created, so a bad caller can
     never turn cleanup into data loss.
+
+    Every prefix this module can produce must be listed here. It is a whitelist
+    and it fails SILENTLY when it misses one — a capture_window() file named
+    nova_win_ was passed to discard(), matched nothing, and stayed on disk with
+    a picture of his screen in it. Nothing raised and nothing logged.
     """
     if not path:
         return
     try:
-        if os.path.basename(path).startswith("nova_screen_") and os.path.isfile(path):
+        if (os.path.basename(path).startswith(_CAPTURE_PREFIXES)
+                and os.path.isfile(path)):
             os.remove(path)
     except Exception as exc:
         log.warning(f"screenshot cleanup failed: {exc}")
@@ -167,20 +178,34 @@ def frontmost_app() -> Optional[str]:
     banner made Nova answer "you're in UserNotificationCenter", which is
     literally true and completely useless. When focus is on system chrome we
     fall back to the frontmost REAL window instead.
+
+    THE ORDER HERE IS LOAD-BEARING, and it used to be the other way round.
+
+    `NSWorkspace.frontmostApplication()` is maintained by run-loop
+    notifications, and the backend has no run loop — so it reports whatever was
+    frontmost when the process STARTED and never updates. Measured: after
+    switching TextEdit to Finder, NSWorkspace still said TextEdit while the
+    window server said Finder, and it stayed wrong for the life of the process.
+    Nova answered "you're in TextEdit" for hours. Same family as the
+    NSWorkspace.runningApplications() trap in views.py, and it failed the same
+    way: perfectly in a short-lived test, never in use.
+
+    So the WINDOW SERVER is asked first — CGWindowListCopyWindowInfo is a live
+    query with nothing cached behind it — and NSWorkspace is the fallback for
+    the one case the window list cannot answer: an app that is frontmost with
+    no ordinary window of its own.
     """
-    name = None
+    for owner, _ in visible_windows():
+        return owner
+
     try:
         from AppKit import NSWorkspace
         app = NSWorkspace.sharedWorkspace().frontmostApplication()
         name = str(app.localizedName()) if app else None
     except Exception as exc:
         log.warning(f"frontmost app lookup failed: {exc}")
-
-    if name and name not in _CHROME_OWNERS:
-        return name
-    for owner, _ in visible_windows():
-        return owner
-    return name
+        return None
+    return name if name and name not in _CHROME_OWNERS else None
 
 
 # Owners that are always on screen but are never what the user means.
@@ -190,6 +215,100 @@ _CHROME_OWNERS = {
     "Spotlight", "TextInputMenuAgent", "universalaccessd", "loginwindow",
     "Screenshot", "CoreServicesUIAgent", "AirPlayUIAgent",
 }
+
+
+def _window_rows(on_screen_only: bool) -> list:
+    """Raw layer-0 application windows, big enough to be real.
+
+    `on_screen_only` is the difference between "what he can SEE" and "what
+    EXISTS". macOS drops fully occluded windows from the on-screen list, and
+    Nova's own window covers the whole display — so from Nova's point of view
+    every other window he has open has just vanished. That is correct for
+    "what's on my screen" and completely wrong for "read that window", which
+    is asked precisely when Nova is the thing in front.
+    """
+    try:
+        from Quartz import (CGWindowListCopyWindowInfo, kCGNullWindowID,
+                            kCGWindowListOptionOnScreenOnly,
+                            kCGWindowListOptionAll,
+                            kCGWindowListExcludeDesktopElements)
+        option = (kCGWindowListOptionOnScreenOnly if on_screen_only
+                  else kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements)
+        raw = CGWindowListCopyWindowInfo(option, kCGNullWindowID) or []
+    except Exception as exc:
+        log.warning(f"window list failed: {exc}")
+        return []
+
+    out = []
+    for w in raw:
+        try:
+            if w.get("kCGWindowLayer", 99) != 0:
+                continue
+            owner = str(w.get("kCGWindowOwnerName") or "").strip()
+            if not owner or owner in _CHROME_OWNERS:
+                continue
+            bounds = w.get("kCGWindowBounds") or {}
+            # Skip slivers — tooltips, shadows, 1px helper windows.
+            if int(bounds.get("Width", 0)) < 120 or int(bounds.get("Height", 0)) < 90:
+                continue
+            out.append(w)
+        except Exception:
+            continue
+    return out
+
+
+def existing_windows() -> list[tuple[str, str]]:
+    """(owner, title) for every real window, INCLUDING ones behind Nova's own.
+
+    Use this to answer "is that window still there" and "read that window".
+    Use visible_windows() to answer "what is on his screen".
+    """
+    return [(str(w.get("kCGWindowOwnerName") or "").strip(),
+             str(w.get("kCGWindowName") or "").strip())
+            for w in _window_rows(on_screen_only=False)]
+
+
+def capture_window(owner: str) -> Optional[str]:
+    """A PNG of one app's window, wherever it sits in the stack.
+
+    `screencapture -l<id>` takes the window itself rather than the region of
+    screen it occupies, so a window sitting BEHIND Nova's own is captured
+    intact and his focus is never disturbed. That is the whole reason the
+    screen-awareness card can offer to read the page he was just on: the
+    alternative was activating his browser to look at it, which is a side
+    effect he did not ask for on top of the one he did.
+
+    Same permission rules as a full capture, and the same honesty about them:
+    without Screen Recording macOS returns a valid PNG of the desktop picture
+    rather than failing, so callers must preflight.
+    """
+    # The ALL list, not the on-screen one: this is called when Nova is in
+    # front, which is exactly when the window being asked about is occluded.
+    wid = None
+    for w in _window_rows(on_screen_only=False):
+        if str(w.get("kCGWindowOwnerName") or "") == owner:
+            wid = w.get("kCGWindowNumber")
+            break
+    if wid is None:
+        return None
+
+    fd, path = tempfile.mkstemp(prefix="nova_win_", suffix=".png")
+    os.close(fd)
+    try:
+        os.remove(path)  # so a failed capture can't be mistaken for a success
+    except OSError:
+        pass
+    try:
+        subprocess.run(["screencapture", "-x", "-o", f"-l{wid}", path],
+                       check=False, timeout=15)
+    except Exception as exc:
+        log.warning(f"window capture failed: {exc}")
+        discard(path)
+        return None
+    if not os.path.isfile(path) or os.path.getsize(path) < 1024:
+        discard(path)
+        return None
+    return path
 
 
 def visible_windows() -> list[tuple[str, str]]:
@@ -314,6 +433,12 @@ _DESCRIBE_RE = re.compile(
     re.I,
 )
 
+_THAT_WINDOW_RE = re.compile(
+    r"^\s*(?:read|describe)\s+the\s+(?P<app>.+?)\s+window\s+behind\s+you"
+    r"\s*[.?!]*\s*$",
+    re.I,
+)
+
 _CONTEXT_RE = re.compile(
     r"\b(?:"
     r"what\s+app\s+am\s+i\s+(?:in|using|on)"
@@ -390,6 +515,13 @@ class NovaScreen:
             return "context"
         if _DESCRIBE_RE.search(t):
             return "describe"
+        # Only ever reached from the screen-awareness card's Yes button, which
+        # sends this exact phrase. Not something he would say out loud — "that
+        # page" has no referent in speech — so it is kept narrow rather than
+        # widened into the describe rules, where it would start claiming
+        # sentences that mean something else.
+        if _THAT_WINDOW_RE.search(t):
+            return "describe_window"
         return None
 
     # ── Handling ─────────────────────────────────────────────────────────
@@ -398,6 +530,8 @@ class NovaScreen:
         try:
             if intent == "context":
                 return self._context()
+            if intent == "describe_window":
+                return self._describe_window(text)
             return self._describe()
         except Exception as exc:
             log.exception(f"screen handling failed: {exc}")
@@ -435,6 +569,74 @@ class NovaScreen:
         if others:
             return f"{lead} You've also got {_spoken_list(others[:4])} open."
         return lead
+
+    def _describe_window(self, text: str) -> str:
+        """Read the frontmost window that is NOT Nova's own.
+
+        The card promises to tell him what is on the page he was just looking
+        at, and a plain screen capture cannot keep that promise: home is only
+        on screen when Nova is in front, so "what's on my screen" answered
+        "you're in NovaOS" and described Nova's own cards back to him. Measured
+        on the real card, and it is the reason this exists.
+        """
+        if not has_permission():
+            request_permission()
+            return PERMISSION_HELP
+
+        # The card NAMES the window, and that name is carried in the phrase.
+        #
+        # It has to be: behind Nova's own window the stack order is unstable,
+        # so "the frontmost window that is not Nova" is a different answer here
+        # than it was when the card was built a few seconds earlier. Reading
+        # one window and captioning it with another's name is the single worst
+        # thing this feature could do, and it is exactly what happened.
+        m = _THAT_WINDOW_RE.match((text or "").strip())
+        wanted = (m.group("app") if m else "").strip()
+
+        target, title = "", ""
+        for owner, wtitle in existing_windows():
+            if owner in ("NovaOS", "Nova"):
+                continue
+            if wanted and owner.lower() != wanted.lower():
+                continue
+            target, title = owner, wtitle
+            break
+        if not target:
+            return (f"I can't see the {wanted} window any more." if wanted
+                    else "I can't see another window to read.")
+
+        path = capture_window(target)
+        if not path:
+            return f"I wasn't able to capture the {target} window."
+        try:
+            lines = ocr(path, min_confidence=self.min_confidence,
+                        max_lines=self.max_ocr_lines)
+        finally:
+            discard(path)
+
+        lead = f"On {title}." if title else f"In {target}."
+        if not lines:
+            return f"{lead} I couldn't make out any text on it."
+        log.info(f"[screen] window {target}: {len(lines)} text lines")
+
+        prompt = (
+            f"TEXT READ OFF THE SCREEN:\n" + "\n".join(lines) + "\n\n"
+            "In ONE short sentence, say what this content is about. Start "
+            "directly with the subject, not with 'this text' or 'the screen "
+            "shows'. Describe only what the text shows. Do not name windows or "
+            "applications unless the name appears in the text itself. Do not "
+            "mention the menu bar, the clock, the battery, or the weather."
+        )
+        try:
+            summary = self.llm.generate(self._SYSTEM, [], prompt,
+                                        temperature=0.0,
+                                        max_tokens=self.max_tokens).strip()
+        except Exception as exc:
+            log.warning(f"window summary failed: {exc}")
+            summary = ""
+        if not summary:
+            return f"{lead} I could read it but couldn't summarise it."
+        return f"{lead} {_clean_spoken(summary)}"
 
     def _describe(self) -> str:
         """Capture, OCR, summarize. The screenshot never outlives this call."""

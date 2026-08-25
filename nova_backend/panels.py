@@ -179,8 +179,14 @@ class Progress:
     """
 
     def __init__(self, sink: Optional[Callable[[dict], None]],
-                 title: str, labels: list[str], detail: str = "") -> None:
+                 title: str, labels: list[str], detail: str = "",
+                 on_done: Optional[Callable[[str, bool], None]] = None) -> None:
         self._sink = sink
+        # Called once when the run ends, with (summary, failed). The live list
+        # answers "what is she doing"; this is how the HISTORY gets written,
+        # which is the question he actually has afterwards.
+        self._on_done = on_done
+        self._ended = False
         self._title = title
         self._detail = detail
         self._labels = list(labels)
@@ -208,6 +214,7 @@ class Progress:
         if why:
             self._extra.append(note(why))
         self._push()
+        self._finished(why or f"{self._detail or self._title} failed", failed=True)
 
     def show(self, *blocks: Optional[dict]) -> None:
         """Attach findings under the steps as they arrive."""
@@ -224,6 +231,17 @@ class Progress:
                 self._states[i] = "done"
         self._extra.extend(b for b in blocks if b)
         self._push()
+        self._finished(self._detail or self._title, failed=False)
+
+    def _finished(self, summary: str, failed: bool) -> None:
+        """Once, and only once. finish() after fail() must not log twice."""
+        if self._ended or self._on_done is None:
+            return
+        self._ended = True
+        try:
+            self._on_done(summary, failed)
+        except Exception:
+            pass
 
     # ── Internals ─────────────────────────────────────────────────────────────
     def _advance_to(self, index: int) -> None:

@@ -110,7 +110,8 @@ _APP_ALIASES: dict[str, str] = {
 class NovaTools:
     def __init__(self, config: dict,
                  on_announce: Optional[Callable[[str], None]] = None,
-                 on_progress: Optional[Callable[[dict], None]] = None) -> None:
+                 on_progress: Optional[Callable[[dict], None]] = None,
+                 on_activity: Optional[Callable[[str, bool], None]] = None) -> None:
         self.config = config
         # Called by a timer/short-reminder when it fires. nova.py supplies a
         # callback that speaks safely (never on top of an in-flight response).
@@ -118,6 +119,10 @@ class NovaTools:
         # Pushes a live step list to the screen while a handler works. None in
         # the routing harness, where Progress simply becomes a no-op.
         self._on_progress = on_progress
+        # Writes one line to the history when a run ends. Separate from
+        # on_progress because the live list and the log answer different
+        # questions and have different lifetimes.
+        self._on_activity = on_activity
         # True when this turn actually manipulated his Mac (launched an app,
         # drove the browser). nova.py reads it to park Nova in the corner, so
         # she gets out of the way of whatever she just opened. One-shot.
@@ -1118,11 +1123,20 @@ class NovaTools:
             q = re.sub(r"[?.!,]+$", "", m.group(1).strip())
             if q and q not in _FOLDERS:
                 url, label = bc.resolve_target(q)
-                resp = bc.open_url(url, label)
-                # "Searching for X" reads better aloud than "Opening a search for X".
-                if resp.startswith("Opening") and label.startswith("a search"):
-                    return f"Searching for {q}."
-                return resp
+                # A NAMED SITE goes straight there; a plain query goes to the
+                # real search, which reads the results back.
+                #
+                # This block used to open the URL and say "Searching for X" —
+                # the behaviour _web_search was written to replace. Because
+                # _match_browser runs first, that made the reading path dead
+                # code for every phrasing that reaches here, which is most of
+                # them: "search the web for X" was answered without Nova ever
+                # looking at the page, with no step list and nothing in the
+                # history. The regex stays (it is the anchored one that keeps
+                # "job search" out); only the destination changes.
+                if label.startswith("a search"):
+                    return self._web_search(q)
+                return bc.open_url(url, label)
 
         # ── navigate to a site ──────────────────────────────────────────
         m = (re.search(r"\b(?:go\s+to|pull\s+up|bring\s+up|visit|browse\s+to)\s+(.+)", low)
@@ -2085,7 +2099,8 @@ class NovaTools:
 
         prog = P.Progress(self._on_progress, "Searching the web",
                           ["Opening the browser", "Loading the page",
-                           "Reading the results"], detail=query)
+                           "Reading the results"], detail=query,
+                          on_done=self._log_activity("Searched the web for"))
         prog.start()
 
         opened = B.open_url(url, f"a search for {query}", new_tab=True)
@@ -2106,6 +2121,13 @@ class NovaTools:
             [{"title": r["title"][:90], "meta": r["host"]} for r in results[:6]],
             title="What's on the page"))
         return self._speak_results(query, results)
+
+    def _log_activity(self, prefix: str, kind: str = "browser"):
+        """A closure that writes one history line when a run ends."""
+        def done(summary: str, failed: bool) -> None:
+            if self._on_activity:
+                self._on_activity(f"{prefix} {summary}".strip(), failed, kind)
+        return done
 
     @staticmethod
     def _speak_results(query: str, results: list) -> str:
