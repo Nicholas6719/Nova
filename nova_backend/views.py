@@ -80,6 +80,19 @@ _VIEW_DEFS: tuple[tuple, ...] = (
     # panel, because _payload has no case for it and never did. A destination
     # whose screen is produced by a handler should be reached THROUGH that
     # handler, not around it.
+    # Calendar IS navigable again, now that _payload actually builds it. The
+    # reason it was pulled — "show me the weather" answered with the word
+    # "Weather." over an empty screen — was never about navigation being wrong,
+    # it was about a destination with no payload behind it. Content questions
+    # still reach the calendar HANDLER: _GOTO_RE has no "my" in it, so "show me
+    # my calendar" goes to the engine that reads his events and "go to calendar"
+    # comes here.
+    ("calendar",      "Your calendar.",           ("calendar", "schedule")),
+    ("automation",    "Automation.",              ("automation", "work log")),
+    ("browser",       "Browser activity.",        ("browser", "browser activity",
+                                                   "web activity")),
+    ("system",        "System.",                  ("system", "system screen",
+                                                   "diagnostics")),
     ("files",         "Files.",                   ("files", "file")),
     ("memory",        "Here's what I remember.",  ("memory", "memories",
                                                    "what you remember")),
@@ -809,7 +822,102 @@ class NovaViews:
             return self._memory_payload()
         if view.name == "finance":
             return self._finance_payload()
+        if view.name == "calendar":
+            return self._calendar_payload()
+        if view.name == "system":
+            return self._system_payload()
         return {}
+
+    def _calendar_payload(self) -> dict:
+        """Today, as one list. Events and reminders together, marked apart.
+
+        Reuses the same tile the home screen reads, so the two can never
+        disagree about what today looks like — and it costs nothing, because
+        that tile is already warm.
+        """
+        import panels as P
+        block = self._tiles["upcoming"].get()
+        return P.panel(title="Calendar", subtitle=_today_line(),
+                       blocks=[block or P.note("Nothing on your calendar today.")])
+
+    def _system_payload(self) -> dict:
+        """What Nova is made of, and what she is allowed to do.
+
+        Every permission is CHECKED, never assumed. An optimistic default here
+        would be worse than showing nothing: his most confusing failures have
+        all been permission failures wearing a feature's costume, and the whole
+        value of this screen is turning that into a glance.
+        """
+        import panels as P
+        cfg = self.config
+        models = [
+            ("Language", cfg.get("llm", {}).get("model", "—")),
+            ("Speech to text", f"faster-whisper {cfg.get('stt', {}).get('model', '')}".strip()),
+            ("Text to speech", "Kokoro ONNX"),
+            ("Wake word", cfg.get("wake_word", {}).get("engine", "—")),
+        ]
+        counts: list[tuple[str, str]] = []
+        try:
+            memory = getattr(self.assistant, "memory", None)
+            if memory is not None:
+                counts.append(("Facts", str(len(memory.all_facts()))))
+        except Exception as exc:
+            log.debug(f"system: memory unavailable ({exc})")
+        try:
+            rag = getattr(self.assistant, "_rag", None)
+            if rag is not None and hasattr(rag, "count"):
+                counts.append(("Indexed documents", str(rag.count())))
+        except Exception as exc:
+            log.debug(f"system: rag unavailable ({exc})")
+
+        perms: list[dict] = []
+        for name, checker in (("Microphone", self._mic_ok),
+                              ("Accessibility", self._accessibility_ok),
+                              ("Screen Recording", self._screen_ok),
+                              ("Location", self._location_ok)):
+            state = checker()
+            perms.append({"title": name,
+                          "meta": "granted" if state else
+                                  ("not granted" if state is False else "unknown"),
+                          "accent": "ok" if state else ("bad" if state is False else "")})
+
+        return P.panel(
+            title="System", subtitle="Everything runs on this Mac",
+            blocks=[
+                P.rows([("HTTP", ":5001"), ("WebSocket", ":8766")], title="Connections"),
+                P.rows(models, title="On-device models"),
+                P.rows(counts, title="Memory") if counts else None,
+                P.items(perms, title="Permissions"),
+            ])
+
+    # Each returns True / False / None, and None means NOBODY ASKED — which is
+    # a different thing from denied and must never be shown as granted.
+    def _mic_ok(self):
+        stt = getattr(self.assistant, "stt", None)
+        if stt is None:
+            return None
+        return not getattr(stt, "_mic_silent", False)
+
+    def _accessibility_ok(self):
+        try:
+            import actuation
+            return bool(actuation.has_accessibility())
+        except Exception:
+            return None
+
+    def _screen_ok(self):
+        try:
+            import screen_awareness as sa
+            return bool(sa.has_permission())
+        except Exception:
+            return None
+
+    def _location_ok(self):
+        try:
+            import maps_engine
+            return maps_engine.current_location() is not None
+        except Exception:
+            return None
 
     def _finance_payload(self) -> dict:
         """The indices and his watchlist. Built by market_intents so the screen

@@ -97,6 +97,11 @@ struct NovaStrip: View {
                                      : state.tint.opacity(0.75))
             }
             Spacer()
+            // The DATE, always. It used to take the panel's subtitle, which
+            // was fine when home was the only screen setting one — now every
+            // screen sets its own and the strip was reading "EVERYTHING RUNS
+            // ON THIS MAC" where the date belongs. Chrome is chrome: it says
+            // the same thing wherever you are.
             Text(subtitle.uppercased())
                 .foregroundStyle(.white.opacity(0.28))
         }

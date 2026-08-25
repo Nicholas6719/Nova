@@ -27,6 +27,7 @@ struct ShellView: View {
     /// push from the backend, so voice and clicking converge on one state.
     @State private var activeScreen = "home"
     @State private var financeRange = "1D"
+    @State private var selectedSymbol: String? = nil
 
     init() {
         _vm = StateObject(wrappedValue: ShellViewModel())
@@ -98,7 +99,7 @@ struct ShellView: View {
                 vm.send("go to \(dest.id)", silent: true)
             }
             VStack(spacing: 0) {
-                NovaStrip(state: vm.state, subtitle: panel.subtitle)
+                NovaStrip(state: vm.state, subtitle: todayLine)
                 screen
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if typing { composer.padding(.horizontal, 32).padding(.bottom, 20) }
@@ -126,18 +127,22 @@ struct ShellView: View {
         } else {
             switch activeScreen {
             case "calendar":
-                CalendarScreen(entries: [], monthDays: monthDays, today: todayNumber,
-                               subtitle: panel.subtitle, tint: vm.state.tint)
+                CalendarScreen(entries: calendarEntries, monthDays: monthDays,
+                               today: todayNumber, subtitle: panel.subtitle,
+                               tint: vm.state.tint)
             case "finance":
-                FinanceScreen(indices: [], watchlist: [], selected: nil, news: [],
-                              analysts: nil, fundamentals: [], range: financeRange,
+                FinanceScreen(indices: financeIndices, watchlist: financeWatchlist,
+                              selected: selectedQuote, news: [], analysts: nil,
+                              fundamentals: [], range: financeRange,
                               ranges: ["1D", "1W", "1M", "1Y"], tint: vm.state.tint,
-                              onSelect: { _ in }, onRange: { financeRange = $0 })
+                              onSelect: { selectedSymbol = $0.symbol },
+                              onRange: { financeRange = $0 })
             case "browser":
-                BrowserScreen(steps: [], query: "", result: nil, history: [],
+                BrowserScreen(steps: liveSteps, query: panel.title == "Searching the web"
+                              ? stepDetail : "", result: nil, history: [],
                               tint: vm.state.tint)
             case "automation":
-                AutomationScreen(workMode: vm.isPuck, steps: [],
+                AutomationScreen(workMode: vm.isPuck, steps: liveSteps,
                                  pendingConfirmation: nil, history: [],
                                  state: vm.state,
                                  onToggleWorkMode: { vm.setPuck($0) },
@@ -221,9 +226,125 @@ struct ShellView: View {
     }
     private var todayNumber: Int { Calendar.current.component(.day, from: Date()) }
 
-    /// Ports are known; everything else waits to be told rather than guessing.
+    /// The strip's date. Computed here rather than taken from a payload so it
+    /// is right on every screen, including ones the backend never sent.
+    private var todayLine: String {
+        let f = DateFormatter()
+        f.dateFormat = "EEEE, MMMM d"
+        return f.string(from: Date())
+    }
+
+    // MARK: - Screen data
+    //
+    // Every screen reads the payload the backend sent for it, and only when
+    // that payload IS for it: `showing` guards each mapping so a stale panel
+    // from another screen can never be drawn as this one's data. Empty is a
+    // legitimate answer — a screen he has not navigated to yet has nothing to
+    // show, and inventing something would be worse than a blank card.
+
+    private func showing(_ name: String) -> Bool { vm.view == name }
+
+    private func rows(_ title: String) -> [(String, String)] {
+        for b in panel.blocks {
+            if case let .rows(t, pairs) = b.content, t.caseInsensitiveCompare(title) == .orderedSame {
+                return pairs
+            }
+        }
+        return []
+    }
+
+    private func items(_ title: String) -> [PanelItem] {
+        for b in panel.blocks {
+            if case let .items(t, list) = b.content, t.caseInsensitiveCompare(title) == .orderedSame {
+                return list
+            }
+        }
+        return []
+    }
+
+    /// Ports are known; everything else is read from the payload, and anything
+    /// the backend could not determine stays nil so the screen says UNKNOWN
+    /// rather than claiming a permission Nova does not have.
     private var systemInfo: SystemInfo {
-        SystemInfo(connected: vm.state != .sleeping)
+        var info = SystemInfo(connected: vm.state != .sleeping)
+        guard showing("system") else { return info }
+        let models = Dictionary(uniqueKeysWithValues: rows("On-device models"))
+        info.llm = models["Language"]
+        info.stt = models["Speech to text"]
+        info.tts = models["Text to speech"]
+        info.wake = models["Wake word"]
+        let mem = Dictionary(uniqueKeysWithValues: rows("Memory"))
+        info.facts = mem["Facts"].flatMap { Int($0) }
+        info.ragDocs = mem["Indexed documents"].flatMap { Int($0) }
+        for row in items("Permissions") {
+            let granted: Bool? = row.meta == "granted" ? true
+                : (row.meta == "not granted" ? false : nil)
+            switch row.title {
+            case "Microphone":       info.microphone = granted
+            case "Accessibility":    info.accessibility = granted
+            case "Screen Recording": info.screenRecording = granted
+            case "Location":         info.location = granted
+            default: break
+            }
+        }
+        return info
+    }
+
+    private var calendarEntries: [CalendarEntry] {
+        guard showing("calendar") else { return [] }
+        return items("Upcoming").map {
+            CalendarEntry(time: $0.detail, title: $0.title,
+                          isReminder: $0.accent == "reminder")
+        }
+    }
+
+    private var financeIndices: [Quote] { showing("finance") ? quotes(items("Indices")) : [] }
+    private var financeWatchlist: [Quote] { showing("finance") ? quotes(items("Watchlist")) : [] }
+
+    /// The engine sends a templated price and a templated move. Both are drawn
+    /// as sent; the numbers are parsed back ONLY to choose a colour, so a parse
+    /// that fails costs the green or red and never the figure itself.
+    private func quotes(_ rows: [PanelItem]) -> [Quote] {
+        rows.map { row in
+            let parts = row.meta.split(separator: " ").map(String.init)
+            let pctText = parts.last ?? ""
+            let pct = Double(pctText.replacingOccurrences(of: "%", with: "")
+                .replacingOccurrences(of: "+", with: "")) ?? 0
+            let priceText = parts.count > 1 ? parts[0] : row.detail
+            // Indices put the price in `detail` and the NAME in `title`;
+            // watchlist rows put the company in `detail`. Telling them apart
+            // by whether `detail` parses as a number keeps one mapping for
+            // both, instead of two that can disagree.
+            let detailIsPrice = Double(row.detail.replacingOccurrences(of: ",", with: "")) != nil
+            return Quote(symbol: row.title,
+                         name: detailIsPrice ? row.title : row.detail,
+                         price: Double(priceText.replacingOccurrences(of: ",", with: "")) ?? 0,
+                         changePct: pct, series: row.series)
+        }
+    }
+
+    private var selectedQuote: Quote? {
+        let all = financeWatchlist
+        if let symbol = selectedSymbol, let hit = all.first(where: { $0.symbol == symbol }) {
+            return hit
+        }
+        return all.first
+    }
+
+    /// A live step list, wherever it came from. Both activity screens read the
+    /// same `steps` block, because the backend only ever pushes one at a time.
+    private var liveSteps: [PanelStep] {
+        for b in panel.blocks {
+            if case let .steps(_, _, entries) = b.content { return entries }
+        }
+        return []
+    }
+
+    private var stepDetail: String {
+        for b in panel.blocks {
+            if case let .steps(_, detail, _) = b.content { return detail }
+        }
+        return ""
     }
 
     /// The five destinations, and which one you are looking at.

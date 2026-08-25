@@ -119,8 +119,13 @@ def quote(symbol: str) -> dict:
     if not sym:
         return {"ok": False, "error": "no symbol"}
 
+    # 5m over one day: enough points to draw a line, one request, and the
+    # same endpoint the price already comes from. The series was always in
+    # this response and was being thrown away — a chart that costs no extra
+    # network call is the only kind worth having on a screen Nova redraws
+    # whenever he looks at it.
     res = _get("https://query1.finance.yahoo.com/v8/finance/chart/"
-               f"{urllib.parse.quote(sym)}?interval=1d&range=1d")
+               f"{urllib.parse.quote(sym)}?interval=5m&range=1d")
     if not res["ok"]:
         if res.get("error") == "not found":
             return {"ok": False, "error": "not found", "symbol": sym}
@@ -142,7 +147,22 @@ def quote(symbol: str) -> dict:
         change = price - prev
         pct = change / prev * 100
 
-    return {"ok": True, "symbol": meta.get("symbol", sym),
+    # The closes, thinned to something a sparkline can use. Gaps are real —
+    # Yahoo returns null for minutes with no trade — and are dropped rather
+    # than interpolated, because a drawn line between two real points is a
+    # shape and a line through an invented one is a claim.
+    series: list[float] = []
+    try:
+        closes = res["data"]["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        clean = [c for c in closes if isinstance(c, (int, float))]
+        if len(clean) > 120:
+            step = len(clean) / 120
+            clean = [clean[int(i * step)] for i in range(120)]
+        series = clean
+    except (KeyError, IndexError, TypeError):
+        series = []
+
+    return {"ok": True, "symbol": meta.get("symbol", sym), "series": series,
             "name": " ".join((meta.get("shortName")
                               or meta.get("longName") or sym).split()),
             "price": price, "prev_close": prev,

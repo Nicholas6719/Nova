@@ -53,6 +53,14 @@ def items(entries: list[dict], title: str = "") -> dict:
     for e in entries:
         row = {k: str(v) for k, v in e.items()
                if k in ("title", "detail", "meta", "accent") and v not in (None, "")}
+        # `series` is the one non-string a row may carry: a list of numbers for
+        # a sparkline. Kept numeric rather than templated, because unlike every
+        # other value on a panel it is never READ — it is drawn, and a shape
+        # cannot mislead the way a mis-rounded price can.
+        pts = e.get("series")
+        if isinstance(pts, (list, tuple)) and pts:
+            row["series"] = [float(x) for x in pts
+                             if isinstance(x, (int, float))]
         if row:
             clean.append(row)
     return {"kind": "items", "title": title, "items": clean}

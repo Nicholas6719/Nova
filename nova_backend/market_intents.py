@@ -82,6 +82,10 @@ _SUBJECT_RE = re.compile(
 )
 
 
+# What an index is CALLED on screen, as opposed to how it is said aloud.
+_INDEX_DISPLAY = {"^GSPC": "S&P 500", "^IXIC": "Nasdaq", "^DJI": "Dow Jones"}
+
+
 class NovaMarket:
     """Market questions. Never touches the LLM."""
 
@@ -155,7 +159,11 @@ class NovaMarket:
             title="Markets",
             subtitle="Today",
             blocks=[P.items([{
-                "title": q["spoken_name"].replace("the ", "").title(),
+                # The spoken name is shaped for the EAR — "the S and P 500" —
+                # and reads badly on screen as "S And P 500". The symbol's own
+                # display name is what belongs on a card.
+                "title": _INDEX_DISPLAY.get(q.get("symbol", ""),
+                                            q["spoken_name"].replace("the ", "").title()),
                 "detail": f"{q['price']:,.2f}",
                 "meta": self._move(q),
             } for q in rows])] + self._watchlist_blocks()))
@@ -251,7 +259,8 @@ class NovaMarket:
             q = M.quote(sym)
             if q.get("ok"):
                 rows.append({"title": q["symbol"], "detail": q["name"][:30],
-                             "meta": f"{q['price']:,.2f}   {self._move(q)}"})
+                             "meta": f"{q['price']:,.2f}   {self._move(q)}",
+                             "series": q.get("series") or []})
         return [P.items(rows, title="Watchlist")] if rows else []
 
     # ── The home card ─────────────────────────────────────────────────────────
@@ -283,7 +292,8 @@ class NovaMarket:
             blocks.append(P.items([{
                 "title": q["spoken_name"].replace("the ", "").title(),
                 "detail": f"{q['price']:,.2f}",
-                "meta": self._move(q)} for q in rows], title="Indices"))
+                "meta": self._move(q),
+                "series": q.get("series") or []} for q in rows], title="Indices"))
         else:
             blocks.append(P.note("I couldn't reach market data just now."))
         blocks += self._watchlist_blocks()

@@ -298,6 +298,20 @@ struct Sparkline: Shape {
     }
 }
 
+/// The same line, closed down to the baseline so it can be filled.
+struct AreaUnder: Shape {
+    let points: [Double]
+
+    func path(in rect: CGRect) -> Path {
+        var p = Sparkline(points: points).path(in: rect)
+        guard points.count > 1 else { return p }
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        p.closeSubpath()
+        return p
+    }
+}
+
 /// The hero chart: three grid lines, a gradient fill, and the line itself.
 struct PriceChart: View {
     let points: [Double]
@@ -311,7 +325,11 @@ struct PriceChart: View {
                     Spacer(minLength: 0)
                 }
             }
-            Sparkline(points: points)
+            // Filled from a CLOSED path. Filling the line itself fills the
+            // region the open stroke happens to enclose, which is a wedge
+            // between the first and last point and reads as a trend that is
+            // not there.
+            AreaUnder(points: points)
                 .fill(LinearGradient(colors: [tint.opacity(0.22), .clear],
                                      startPoint: .top, endPoint: .bottom))
             Sparkline(points: points)

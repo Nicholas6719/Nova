@@ -85,6 +85,9 @@ struct PanelItem: Identifiable {
     /// marks the reminders mixed into Upcoming, so calendar and reminders stay
     /// tellable apart without needing two cards.
     var accent = ""
+    /// Numbers for a sparkline. The only non-string a row carries, because
+    /// unlike everything else on a panel it is never read aloud — it is drawn.
+    var series: [Double] = []
 
     nonisolated init(_ d: [String: Any]) {
         title = d["title"] as? String ?? d["name"] as? String ?? ""
@@ -93,6 +96,9 @@ struct PanelItem: Identifiable {
         available = d["available"] as? Bool ?? true
         note = d["note"] as? String ?? ""
         accent = d["accent"] as? String ?? ""
+        series = (d["series"] as? [Any] ?? []).compactMap {
+            ($0 as? Double) ?? ($0 as? NSNumber)?.doubleValue
+        }
     }
 }
 
