@@ -23,6 +23,10 @@ struct ShellView: View {
     /// Cards keep their identity across slots, so moving one by voice makes it
     /// FLY there rather than blink out of one place and into another.
     @Namespace private var cardSpace
+    /// Which of the eight screens is showing. Set by the rail or by a `view`
+    /// push from the backend, so voice and clicking converge on one state.
+    @State private var activeScreen = "home"
+    @State private var financeRange = "1D"
 
     init() {
         _vm = StateObject(wrappedValue: ShellViewModel())
@@ -37,8 +41,8 @@ struct ShellView: View {
                 // load-bearing: .hiddenTitleBar still reserves the titlebar
                 // inset, and without this the orb sits measurably below centre
                 // (13pt, in a 130pt window).
-                OrbView(state: vm.state, density: .array)
-                    .padding(2)
+                PuckView(state: vm.state, workMode: true,
+                         hasUpcoming: !panel.blocks.isEmpty)
                     .ignoresSafeArea()
             } else {
                 fullShell
@@ -86,31 +90,90 @@ struct ShellView: View {
     /// nowhere to render at all.
     private var fullShell: some View {
         HStack(spacing: 0) {
-            iconRail
+            NovaRail(active: activeScreen, tint: vm.state.tint) { dest in
+                // Clicking is a shortcut, not a replacement: the backend is
+                // still told, so a screen reached by hand and one reached by
+                // voice end up in the same state rather than two.
+                withAnimation(.easeOut(duration: 0.24)) { activeScreen = dest.id }
+                vm.send("go to \(dest.id)", silent: true)
+            }
             VStack(spacing: 0) {
-                statusStrip
-                VStack(spacing: 0) {
-                    if isWorking {
-                        workLayout
-                    } else if isHome {
-                        homeLayout
-                    } else {
-                        answerLayout
-                    }
-                    if typing { composer.padding(.top, 20) }
-                }
-                .padding(24)
+                NovaStrip(state: vm.state, subtitle: panel.subtitle)
+                screen
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if typing { composer.padding(.horizontal, 32).padding(.bottom, 20) }
             }
         }
-        .animation(.easeOut(duration: 0.24), value: vm.view)
+        .background(NovaBackdrop(tint: vm.state.tint))
+        .animation(.easeOut(duration: 0.24), value: activeScreen)
         .animation(.easeOut(duration: 0.30), value: panel.title)
-        .animation(.easeOut(duration: 0.22), value: panel.isEmpty)
-        .animation(.spring(response: 0.5, dampingFraction: 0.82), value: isWorking)
-        // Cards rearrange on a spring rather than a fade: a card that MOVES
-        // reads as the same card in a new place, which is the whole point of
-        // being able to move one.
-        .animation(.spring(response: 0.46, dampingFraction: 0.84),
-                   value: slotSignature)
+        .onChange(of: vm.view) { _, newValue in
+            // A voice command that lands on a screen moves the shell there.
+            if NovaDestination.rail.contains(where: { $0.id == newValue }) {
+                withAnimation(.easeOut(duration: 0.24)) { activeScreen = newValue }
+            }
+        }
+    }
+
+    /// Whichever screen the rail or the backend last selected.
+    ///
+    /// `answer` and `work` are not rail destinations — they are what home
+    /// becomes while Nova is replying — so they keep the shipped layouts and
+    /// everything else routes to a redesign screen.
+    @ViewBuilder private var screen: some View {
+        if isWorking {
+            workLayout.padding(.horizontal, 32).padding(.vertical, 28)
+        } else {
+            switch activeScreen {
+            case "calendar":
+                CalendarScreen(entries: [], monthDays: monthDays, today: todayNumber,
+                               subtitle: panel.subtitle, tint: vm.state.tint)
+            case "finance":
+                FinanceScreen(indices: [], watchlist: [], selected: nil, news: [],
+                              analysts: nil, fundamentals: [], range: financeRange,
+                              ranges: ["1D", "1W", "1M", "1Y"], tint: vm.state.tint,
+                              onSelect: { _ in }, onRange: { financeRange = $0 })
+            case "browser":
+                BrowserScreen(steps: [], query: "", result: nil, history: [],
+                              tint: vm.state.tint)
+            case "automation":
+                AutomationScreen(workMode: vm.isPuck, steps: [],
+                                 pendingConfirmation: nil, history: [],
+                                 state: vm.state,
+                                 onToggleWorkMode: { vm.setPuck($0) },
+                                 onConfirm: {}, onCancel: {})
+            case "health":
+                HealthScreen(tint: vm.state.tint)
+            case "system":
+                SystemScreen(info: systemInfo, tint: vm.state.tint)
+            default:
+                HomeScreen(
+                    state: vm.state, greeting: panel.title.isEmpty ? "" : panel.title,
+                    name: panel.title.isEmpty ? "" : userName,
+                    weather: nil, nowPlaying: nil, notice: nil,
+                    markets: [], upcoming: [],
+                    awarenessApp: nil, awarenessContext: nil, awareness: .idle,
+                    metrics: panel.statusReadings,
+                    onAwarenessYes: {}, onAwarenessNo: {})
+            }
+        }
+    }
+
+    /// The month, as a 7-column grid with leading blanks.
+    private var monthDays: [Int] {
+        let cal = Calendar.current
+        let now = Date()
+        guard let range = cal.range(of: .day, in: .month, for: now),
+              let first = cal.date(from: cal.dateComponents([.year, .month], from: now))
+        else { return [] }
+        let lead = cal.component(.weekday, from: first) - 1
+        return Array(repeating: 0, count: lead) + Array(range)
+    }
+    private var todayNumber: Int { Calendar.current.component(.day, from: Date()) }
+
+    /// Ports are known; everything else waits to be told rather than guessing.
+    private var systemInfo: SystemInfo {
+        SystemInfo(connected: vm.state != .sleeping)
     }
 
     /// The five destinations, and which one you are looking at.
