@@ -150,12 +150,62 @@ struct ShellView: View {
                 HomeScreen(
                     state: vm.state, greeting: panel.title.isEmpty ? "" : panel.title,
                     name: panel.title.isEmpty ? "" : userName,
-                    weather: nil, nowPlaying: nil, notice: nil,
-                    markets: [], upcoming: [],
+                    weather: homeWeather, nowPlaying: homeNowPlaying,
+                    notice: homeNotice,
+                    markets: homeMarkets, upcoming: homeUpcoming,
                     awarenessApp: nil, awarenessContext: nil, awareness: .idle,
                     metrics: panel.statusReadings,
                     onAwarenessYes: {}, onAwarenessNo: {})
             }
+        }
+    }
+
+    // MARK: - Home data
+    //
+    // The backend already built all of this — the panel vocabulary carries
+    // real, templated values and the cards only reshape them. Nothing here
+    // invents a number, and a card whose block is missing simply does not
+    // appear, which is the same rule the payload itself follows.
+
+    private func block(card: String) -> PanelContent? {
+        panel.blocks.first { $0.card == card }?.content
+    }
+
+    private var homeWeather: (value: String, detail: String)? {
+        guard case let .stat(value, _, detail)? = block(card: "weather") else { return nil }
+        return (value, detail)
+    }
+
+    private var homeNowPlaying: (title: String, artist: String)? {
+        guard case let .items(_, rows)? = block(card: "playing"), let row = rows.first
+        else { return nil }
+        return (row.title, row.detail)
+    }
+
+    private var homeNotice: String? {
+        guard case let .items(_, rows)? = block(card: "notice") else { return nil }
+        return rows.first?.title
+    }
+
+    /// Markets arrive as templated strings, so the numbers are parsed back only
+    /// to decide a COLOUR. The text shown is always the string the engine sent;
+    /// a parse that fails costs the tint and never the price.
+    private var homeMarkets: [Quote] {
+        guard case let .items(_, rows)? = block(card: "market") else { return [] }
+        return rows.map { row in
+            let pct = Double(row.meta.replacingOccurrences(of: "%", with: "")
+                .replacingOccurrences(of: "+", with: "")) ?? 0
+            return Quote(symbol: row.title, name: "",
+                         price: Double(row.detail.replacingOccurrences(of: ",", with: "")) ?? 0,
+                         changePct: pct)
+        }
+    }
+
+    private var homeUpcoming: [CalendarEntry] {
+        guard case let .items(_, rows)? = block(card: "upcoming") else { return [] }
+        return rows.map {
+            CalendarEntry(time: $0.detail, title: $0.title,
+                          isReminder: $0.accent == "reminder")
         }
     }
 
