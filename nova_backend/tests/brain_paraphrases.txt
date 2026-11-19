@@ -1,0 +1,194 @@
+# Held-out paraphrases for the brain (Stage 1, written 2026-11-19 BEFORE any
+# skill or seed existed, so nothing here was tuned to pass).
+#
+# The routing corpus (adversarial_phrases.txt) is where the brain's SEEDS come
+# from, so scoring the brain on it proves only that the seeds are spelled
+# right. These are new sentences, phrased the way he talks, never copied from
+# the corpus: the test of whether the router UNDERSTANDS or merely remembers.
+#
+# Same format and labels as adversarial_phrases.txt:   <phrase>  ==>  <stage>
+# Never add a line here to make a number go up. Add his real misroutes to the
+# corpus instead (regression-first), and keep this file as the yardstick.
+
+# ── calendar ────────────────────────────────────────────────────────────────
+anything going on today  ==>  calendar
+what does my day look like  ==>  calendar
+am I free this afternoon  ==>  calendar
+what have I got on this week  ==>  calendar
+any meetings tomorrow  ==>  calendar
+put a dentist appointment on my calendar for friday at 3  ==>  calendar
+add lunch with Sarah to my calendar tomorrow at noon  ==>  calendar
+remind me to take the trash out tonight at 8  ==>  calendar
+don't let me forget to call the bank tomorrow morning  ==>  calendar
+mark the grocery reminder as done  ==>  calendar
+I finished the call mom reminder  ==>  calendar
+get rid of the dentist event  ==>  calendar
+move my dentist appointment to 4  ==>  calendar
+what's on my to do list  ==>  calendar
+
+# ── weather ─────────────────────────────────────────────────────────────────
+how's it looking outside  ==>  weather
+do I need a jacket today  ==>  weather
+should I bring an umbrella  ==>  weather
+how cold is it  ==>  weather
+what's the forecast for the weekend  ==>  weather
+will it snow tomorrow  ==>  weather
+what's it like in Chicago right now  ==>  weather
+is it hot in Miami  ==>  weather
+
+# ── market ──────────────────────────────────────────────────────────────────
+how's Tesla trading  ==>  market
+what's Nvidia at right now  ==>  market
+give me a quote on Microsoft  ==>  market
+how did the market do today  ==>  market
+what are analysts saying about Apple  ==>  market
+any news on Amazon stock  ==>  market
+is the Dow up or down  ==>  market
+
+# ── files ───────────────────────────────────────────────────────────────────
+where did I save my tax return  ==>  files
+find the spreadsheet called budget  ==>  files
+pull up my cover letter document  ==>  files
+what's in my Desktop folder  ==>  files
+read me the notes file  ==>  files
+move the budget spreadsheet to Documents  ==>  files
+copy my resume to the Desktop  ==>  files
+rename the invoice file to invoice paid  ==>  files
+open the lease PDF  ==>  files
+what's in my documents  ==>  files
+
+# ── screen ──────────────────────────────────────────────────────────────────
+what am I looking at  ==>  screen
+which app is in front  ==>  screen
+can you see my screen  ==>  screen
+read what's on my screen  ==>  screen
+what window am I in  ==>  screen
+
+# ── memory ──────────────────────────────────────────────────────────────────
+remember that my brother's birthday is in June  ==>  memory
+remember my car is a Honda Civic  ==>  memory
+when is my brother's birthday  ==>  memory
+who's my dentist  ==>  memory
+forget my car  ==>  memory
+actually my favorite color is green  ==>  memory
+what have I told you about myself  ==>  memory
+
+# ── fastpath ────────────────────────────────────────────────────────────────
+hello there  ==>  fastpath
+good morning Nova  ==>  fastpath
+what's today's date  ==>  fastpath
+what time do you have  ==>  fastpath
+what day of the week is it  ==>  fastpath
+can you repeat that  ==>  fastpath
+sorry what did you say  ==>  fastpath
+
+# ── tools: system ───────────────────────────────────────────────────────────
+how much battery do I have left  ==>  tools
+is my laptop charged  ==>  tools
+how hard is my processor working  ==>  tools
+how much RAM am I using  ==>  tools
+how much storage do I have left  ==>  tools
+turn it up  ==>  tools
+make it louder  ==>  tools
+turn the volume down a bit  ==>  tools
+set volume to 30  ==>  tools
+mute the sound  ==>  tools
+turn the brightness up  ==>  tools
+dim the display  ==>  tools
+screenshot my screen  ==>  tools
+lock my computer  ==>  tools
+restart the computer  ==>  tools
+what programs are running  ==>  tools
+set a timer for five minutes  ==>  tools
+how long is left on my timer  ==>  tools
+cancel the timer  ==>  tools
+
+# ── tools: apps ─────────────────────────────────────────────────────────────
+launch Safari  ==>  tools
+fire up Xcode  ==>  tools
+open notes  ==>  tools
+quit Spotify  ==>  tools
+close Xcode  ==>  tools
+minimize Safari  ==>  tools
+open my desktop folder  ==>  tools
+
+# ── tools: music ────────────────────────────────────────────────────────────
+put some music on  ==>  tools
+pause the song  ==>  tools
+skip to the next track  ==>  tools
+go back a song  ==>  tools
+what song is this  ==>  tools
+who sings this  ==>  tools
+play Back in Black  ==>  tools
+play some Taylor Swift  ==>  tools
+turn the music down  ==>  tools
+start the music back up  ==>  tools
+shuffle my music  ==>  tools
+
+# ── tools: browser and web ──────────────────────────────────────────────────
+google the best pizza near me  ==>  tools
+look up how tall Mount Everest is  ==>  tools
+search for flights to Denver  ==>  tools
+go back a page  ==>  tools
+scroll down a bit  ==>  actuation
+refresh this page  ==>  tools
+open a new tab  ==>  tools
+close the tab  ==>  tools
+go to reddit dot com  ==>  tools
+search YouTube for lofi beats  ==>  tools
+
+# ── tools: maps ─────────────────────────────────────────────────────────────
+how far is the closest gas station  ==>  tools
+how long to drive to Boston  ==>  tools
+where's the nearest pharmacy  ==>  tools
+give me directions to Target  ==>  tools
+
+# ── view ────────────────────────────────────────────────────────────────────
+bring me back to the home screen  ==>  view
+back to home  ==>  view
+show me what you can do  ==>  view
+open the finance screen  ==>  view
+go to my memories  ==>  view
+show the system screen  ==>  view
+let's work together  ==>  view
+empty out the home screen  ==>  view
+put the home screen back  ==>  view
+move the calendar card to the top left  ==>  view
+
+# ── actuation (work mode) ───────────────────────────────────────────────────
+type good morning everyone  ==>  actuation
+click the Save button  ==>  actuation
+press the return key  ==>  actuation
+hit escape  ==>  actuation
+
+# ── llm: conversation, including sentences that LOOK like commands ──────────
+I had a great day today  ==>  llm
+what should I make for dinner  ==>  llm
+I need to call my mom later  ==>  llm
+my calendar has been crazy lately  ==>  llm
+the weather has been so weird this year  ==>  llm
+I don't trust the stock market  ==>  llm
+I lost my keys again  ==>  llm
+my screen time is way too high  ==>  llm
+I keep forgetting things  ==>  llm
+what's the best way to learn piano  ==>  llm
+how do airplanes stay in the air  ==>  llm
+give me a fun fact  ==>  llm
+I just got back from the gym  ==>  llm
+should I buy a new laptop  ==>  llm
+what's your favorite movie  ==>  llm
+tell me a story  ==>  llm
+I'm going to play basketball later  ==>  llm
+I'd rather go home early today  ==>  llm
+let's talk about space  ==>  llm
+I opened a new bank account today  ==>  llm
+the music at the party was too loud  ==>  llm
+time flies when you're having fun  ==>  llm
+who won the world series in 2016  ==>  llm
+what does a CPU actually do  ==>  llm
+I'm thinking about moving to Denver  ==>  llm
+do you like music  ==>  llm
+how was your day  ==>  llm
+what is a stock split  ==>  llm
+I need a break  ==>  llm
+remind me why we started this  ==>  llm

@@ -20,6 +20,7 @@ def build_system_prompt(
     config: dict,
     memory_context: str = "",
     rag_context: str = "",
+    reference_context: str = "",
 ) -> str:
     """
     Build the full system prompt for the current turn.
@@ -87,6 +88,18 @@ Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"""
         prompt += (
             f"\n\nRelevant content from {user_name}'s personal documents "
             f"(use this to inform your response if applicable):\n{rag_context}"
+        )
+
+    # ── Inject reference sentences (world_facts.py, from Wikipedia) ──────────
+    # Last, after everything that stays the same between turns, so the prompt
+    # cache still reuses the whole head of the prompt.
+    if reference_context:
+        prompt += (
+            "\n\nReference sentences for his question, looked up just now:\n"
+            f"{reference_context}\n"
+            "Answer from these sentences. Give names, dates and numbers exactly as they "
+            "appear here. If they do not answer his question, say you're not sure rather "
+            "than guess. Do not mention where the information came from unless he asks."
         )
 
     return prompt

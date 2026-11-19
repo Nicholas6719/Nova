@@ -41,7 +41,8 @@ log = logging.getLogger("nova.proactive")
 class ProactiveMonitor:
     """Watches the day and occasionally says something about it."""
 
-    def __init__(self, config: dict, assistant, announce: Callable[[str], None]) -> None:
+    def __init__(self, config: dict, assistant, announce: Callable[..., None],
+                 claim: Optional[Callable[[str, str, str], bool]] = None) -> None:
         cfg = (config or {}).get("proactive", {})
         self.enabled = bool(cfg.get("enabled", True))
         self.lead_minutes = int(cfg.get("lead_minutes", 10))
@@ -50,6 +51,12 @@ class ProactiveMonitor:
         self._assistant = assistant
         self._announce = announce
         self._said: set[str] = set()
+        # "Never twice" across RESTARTS. The in-memory set above forgot on
+        # every launch, so restarting inside the lead window announced the same
+        # meeting again — this docstring said it would not. With a claim
+        # function (delivery.Delivery.claim, a UNIQUE row committed before a
+        # word is said) the promise is kept. The set stays as the fallback.
+        self._claim = claim
         self._last_spoke = 0.0
         self._thread: Optional[threading.Thread] = None
 
@@ -66,9 +73,13 @@ class ProactiveMonitor:
         while True:
             time.sleep(self.poll_s)
             try:
-                line = self.next_announcement()
-                if line:
-                    self._announce(line)
+                got = self.next_announcement(with_key=True)
+                if got:
+                    key, kind, line = got
+                    if self._claim is not None:
+                        self._announce(line, key=key, kind=kind)
+                    else:
+                        self._announce(line)
             except Exception as exc:
                 log.warning(f"proactive check failed: {exc}")
 
@@ -98,8 +109,10 @@ class ProactiveMonitor:
             return "too soon after the last one"
         return None
 
-    def next_announcement(self, now: Optional[datetime.datetime] = None) -> Optional[str]:
-        """The one thing worth saying, or None. Marks it said."""
+    def next_announcement(self, now: Optional[datetime.datetime] = None,
+                          with_key: bool = False):
+        """The one thing worth saying, or None. Marks it said (claims it).
+        With with_key, returns (key, kind, line)."""
         reason = self.quiet_reason()
         if reason:
             log.debug(f"proactive: staying quiet ({reason})")
@@ -107,6 +120,10 @@ class ProactiveMonitor:
         now = now or datetime.datetime.now()
         for key, line in self._candidates(now):
             if key in self._said:
+                continue
+            kind = "event_soon" if key.startswith("event:") else "reminder"
+            if self._claim is not None and not self._claim(key, kind, line):
+                self._said.add(key)           # said before this process started
                 continue
             self._said.add(key)
             # Stamped HERE, where the decision is made, not in the loop.
@@ -116,7 +133,7 @@ class ProactiveMonitor:
             # depends on who happens to call it is not a rule. Caught by the
             # test: with a ten-minute floor it announced twice in a row.
             self._last_spoke = time.time()
-            return line
+            return (key, kind, line) if with_key else line
         return None
 
     def _candidates(self, now: datetime.datetime) -> list[tuple[str, str]]:

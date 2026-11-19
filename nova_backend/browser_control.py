@@ -59,6 +59,13 @@ SITES: dict[str, str] = {
     "apple": "https://www.apple.com", "zillow": "https://www.zillow.com",
     "yelp": "https://www.yelp.com", "imdb": "https://www.imdb.com",
     "paypal": "https://www.paypal.com", "venmo": "https://venmo.com",
+    # Asked for in his real turns ("Open AMC in the browser", "tickets to
+    # Spider-Man"). Each URL checked to answer (2026-11-19).
+    "amc": "https://www.amctheatres.com", "amc theatres": "https://www.amctheatres.com",
+    "amc theaters": "https://www.amctheatres.com", "fandango": "https://www.fandango.com",
+    "hbo max": "https://www.hbomax.com", "peacock": "https://www.peacocktv.com",
+    "paramount plus": "https://www.paramountplus.com",
+    "prime video": "https://www.amazon.com/gp/video/storefront",
 }
 
 # Proper display names where .title() gets it wrong (spoken aloud).
@@ -71,7 +78,13 @@ DISPLAY: dict[str, str] = {
     "cnn": "CNN", "bbc": "the BBC", "ebay": "eBay", "paypal": "PayPal",
     "disney plus": "Disney Plus", "google drive": "Google Drive",
     "google docs": "Google Docs", "google calendar": "Google Calendar",
+    "amc": "AMC", "amc theatres": "AMC Theatres", "amc theaters": "AMC Theatres",
+    "hbo max": "HBO Max",
 }
+
+# "open AMC in the browser": where to open it, not part of its name.
+_IN_BROWSER = re.compile(r"\s+(?:in|on|with)\s+(?:the\s+|my\s+)?(?:browser|web\s+browser|web|"
+                         r"brave|chrome|safari|internet)$", re.I)
 
 _DOMAIN_RE = re.compile(
     r"^[\w-]+(\.[\w-]+)+(/\S*)?$|^https?://\S+$", re.I)
@@ -154,6 +167,7 @@ _SITE_SEARCH: dict[str, str] = {
     "best buy":   "https://www.bestbuy.com/site/searchpage.jsp?st={q}",
     "home depot": "https://www.homedepot.com/s/{q}",
     "etsy":       "https://www.etsy.com/search?q={q}",
+    "fandango":   "https://www.fandango.com/search?q={q}",
 }
 
 
@@ -179,6 +193,7 @@ def resolve_target(raw: str) -> tuple[str, str]:
     s = re.sub(r"[?.!,]+$", "", (raw or "").strip())
     s = re.sub(r"^(the|a|an)\s+", "", s, flags=re.I)
     s = re.sub(r"\s+(website|site|page|dot com)$", "", s, flags=re.I).strip()
+    s = _IN_BROWSER.sub("", s).strip()
     key = s.lower()
     if key in SITES:
         return SITES[key], DISPLAY.get(key, s.title())

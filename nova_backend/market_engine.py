@@ -297,6 +297,14 @@ def money(v, currency: str = "USD") -> str:
     return f"{v:,.2f} dollars" if currency == "USD" else f"{v:,.2f}"
 
 
+def _moved(pct: float) -> str:
+    """"up 1.2 percent" / "down 0.4 percent" / "flat". A move that rounds to
+    0.0 was spoken as "the Dow is up 0.0 percent" (heard 2026-11-19)."""
+    if abs(pct) < 0.05:
+        return "flat"
+    return f"{'up' if pct > 0 else 'down'} {abs(pct):.1f} percent"
+
+
 def say_quote(q: dict) -> str:
     if not q.get("ok"):
         return ""
@@ -304,8 +312,7 @@ def say_quote(q: dict) -> str:
     parts = [f"{name} is at {money(q['price'], q.get('currency','USD'))}"]
     pct = q.get("change_pct")
     if isinstance(pct, (int, float)):
-        direction = "up" if pct >= 0 else "down"
-        parts.append(f", {direction} {abs(pct):.1f} percent today")
+        parts.append(f", {_moved(pct)} today")
     return "".join(parts) + "."
 
 
@@ -336,8 +343,7 @@ def say_indices(rows: list[dict]) -> str:
     for q in rows:
         pct = q.get("change_pct")
         if isinstance(pct, (int, float)):
-            direction = "up" if pct >= 0 else "down"
-            parts.append(f"{q['spoken_name']} is {direction} {abs(pct):.1f} percent")
+            parts.append(f"{q['spoken_name']} is {_moved(pct)}")
         else:
             parts.append(f"{q['spoken_name']} is at {q['price']:,.0f}")
     sentence = (", ".join(parts[:-1]) + ", and " + parts[-1]

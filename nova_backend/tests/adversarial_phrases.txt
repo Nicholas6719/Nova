@@ -17,6 +17,8 @@
 #   actuation   typing / clicking / keys / scrolling (work mode only)
 #   memory      memory recall/store/forget
 #   fastpath    greeting / date / time / repeat
+#   math        arithmetic, percentages, tips, unit conversion — done in code
+#   watch       "tell me when ..." standing watches, and listing/cancelling them
 #   unsupported an action Nova cannot perform; must be refused, never faked
 #   signoff     ends the conversation
 #   no-signoff  mentions sleep words but is NOT a sign-off
@@ -40,9 +42,12 @@ what do you think about jazz  ==>  llm
 explain how photosynthesis works  ==>  llm
 
 # ── Substring collisions in the fast path ───────────────────────────────────
-# "10 TIMES 10" contains "time", so this was answered with the clock.
-what's 10 times 10 minus 4  ==>  llm
-what's the square root of 10  ==>  llm
+# "10 TIMES 10" contains "time", so this was answered with the clock. They are
+# arithmetic, and since 2026-11-19 arithmetic is done in CODE (mathskill.py),
+# never by the model — the label was "llm" only because that was the best
+# place available for them then.
+what's 10 times 10 minus 4  ==>  math
+what's the square root of 10  ==>  math
 how many times did I ask  ==>  llm
 
 # ── Compound requests (only the first half was answered) ────────────────────
@@ -423,3 +428,127 @@ I press my shirts on sundays  ==>  llm
 the press has been brutal lately  ==>  llm
 scroll through my photos sometime  ==>  llm
 send a text to mom  ==>  unsupported
+
+# ── Memory keys with an apostrophe were never stored or recalled (found
+#    2026-11-19 when the harness began running the REAL memory stage instead
+#    of approximating it). "[\w ]" cannot match the ' in "sister's", so the save
+#    regex failed, the sentence went to the LLM, and the LLM said "got it".
+remember that my sister's name is Emma  ==>  memory
+what's my sister's name  ==>  memory
+forget my sister's name  ==>  memory
+
+# ── Whisper puts commas where he pauses (his real turns, Aug 2026). "close\s+"
+#    cannot match "close, brave", so these were refused as unsupported actions.
+Nova, open, brave, browser  ==>  tools
+Close, brave  ==>  tools
+Nova, close, brave  ==>  tools
+# ...and it hears "iMessage" as "eye message"
+Nova, open eye message  ==>  tools
+# ── "is music playing?" reached the LLM, which answered "No, music is not
+#    playing" without looking. Nova can look.
+is music playing  ==>  tools
+# ── An ordinary sentence the brain must not turn into navigation
+#    (found by brain paraphrase scoring, 2026-11-19, before it shipped).
+we should go home soon  ==>  llm
+# ...and a STATEMENT about his calendar is not a request to read it (found by
+# held-out brain scoring, 2026-11-19, before it shipped).
+my next meeting is at three  ==>  llm
+# ── Found 2026-11-19 by checking that every brain seed is executable by its
+#    own skill — each was a gap in the tools regex itself.
+# His real sentence (Aug 2026); the LLM answered "I'm not aware of your
+# current location" because "will it take for me to" matched no pattern.
+how long will it take for me to get to CVS  ==>  tools
+lock my mac  ==>  tools
+make the music quieter  ==>  tools
+where's the closest grocery store  ==>  tools
+# ── _STOCK_RE recognised "what's X trading at" but _SUBJECT_RE had no way to
+#    pull X out of it, so the question was dropped (found 2026-11-19 while
+#    building the brain's market skill on the same extractor).
+what's Nvidia trading at  ==>  market
+
+# ── Arithmetic he asked, all answered by the 3B (Aug 2026). A wrong number
+#    sounds exactly like a right one. "went to 25% of 10%" is Whisper's version
+#    of "what's 25% of 10%"; it stays conversation (no right answer to a
+#    mishear), the clean form is math.
+What's 10 plus 10  ==>  math
+Nova, what's 25% of 10%  ==>  math
+My dinner last night was $95.82 before tax. How much should I tip  ==>  math
+went to 25% of 10%  ==>  llm
+What is tipping etiquette  ==>  llm
+how many milliliters are in a cup  ==>  math
+convert 5 miles to kilometers  ==>  math
+what's 72 fahrenheit in celsius  ==>  math
+set the volume to 50 percent  ==>  tools
+# ── "Tell me when ..." used to be READ as a question: the battery regex
+#    claimed it and answered with today's level, and the LLM answered the rest
+#    with "I'll let you know" — a promise nothing kept. Standing watches
+#    (standing.py, 2026-11-19) keep it.
+tell me when my battery is fully charged  ==>  watch
+let me know if my cpu goes above 90 percent  ==>  watch
+warn me when the battery drops below 15  ==>  watch
+what are you watching  ==>  watch
+stop watching my battery  ==>  watch
+tell me about my battery  ==>  tools
+let me know what you think  ==>  llm
+tell me when you're ready  ==>  llm
+# ── Stage 5, from evidence (2026-11-19) ─────────────────────────────────────
+# A trailing courtesy defeated every launch/quit pattern: "open spotify
+# please" was refused as an unsupported action.
+open spotify please  ==>  tools
+launch safari for me  ==>  tools
+close spotify please  ==>  tools
+# A STATEMENT about a thing is not a request to read it. His real turn: "I
+# asked Nova what the weather was, it kept it on the screen..." fetched a
+# forecast. CLAUDE.md's rule for tools — shaped like a command — applied to
+# every read stage.
+I asked Nova what the weather was, it kept it on the screen after telling it to me  ==>  llm
+the weather was awful last week  ==>  llm
+my battery died yesterday  ==>  llm
+Apple stock is way too expensive  ==>  llm
+# ...and a question about what a thing IS is not a reading of it.
+what does a CPU actually do  ==>  llm
+what is a stock split  ==>  llm
+# "hide everything" on HOME is the home surface, not every app on his Mac.
+hide everything on home  ==>  view
+# Same requests, other word orders.
+turn the sound down  ==>  tools
+turn repeat on  ==>  tools
+# "Let me know when ..." asks about LATER, never for a reading now.
+let me know when the weather clears up  ==>  llm
+
+# ── General-knowledge questions (Stage 3, 2026-11-19) — they must reach the
+#    world-fact stage (8c, inside "llm"), never a command handler. "how far is
+#    X" was claimed by maps: "the moon from earth" would have gone to MapKit as
+#    a nearby search from HIS location, and "chicago from new york" measured
+#    the distance from him to a place called "chicago from new york". ────────
+how far is the moon from earth  ==>  llm
+how far away is the sun  ==>  llm
+how far is chicago from new york  ==>  llm
+how far is mars from the sun  ==>  llm
+how tall is the eiffel tower  ==>  llm
+who wrote pride and prejudice  ==>  llm
+what is photosynthesis  ==>  llm
+when did the berlin wall fall  ==>  llm
+how many legs does a spider have  ==>  llm
+who painted the mona lisa  ==>  llm
+how far is the nearest cvs  ==>  tools
+how far is boston  ==>  tools
+
+# ── His real turns still wrong after the audit (2026-11-19) ────────────────
+#    "open notes" searched for a FILE called notes (file_intents treats "notes"
+#    as a file noun) — even "open the notes app" did. A streaming title "in
+#    Disney Plus" and AMC were unknown, and "find me tickets" went to the LLM.
+#    "Nova, got to sleep" is the sign-off misheard.
+open notes  ==>  tools
+open the notes app  ==>  tools
+Nova, open notes  ==>  tools
+open my notes  ==>  tools
+open my resume  ==>  files
+open the budget spreadsheet  ==>  files
+Pull up Spider-Man No Way Home in Disney Plus  ==>  tools
+watch moana on disney plus  ==>  tools
+find me, tickets to Spider-Man brand new day  ==>  tools
+Open AMC in the browser  ==>  tools
+open fandango  ==>  tools
+Nova, got to sleep  ==>  signoff
+I got to sleep at 3am last night  ==>  no-signoff

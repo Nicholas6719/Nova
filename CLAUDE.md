@@ -25,6 +25,18 @@ Nova has two parts:
   Nova.xcodeproj
   nova_backend/          ← Python backend (the brain)
     nova.py                  entry point + routing pipeline
+    brain.py                 THE BRAIN: learned intent router (see BRAIN.md)
+    skills.py                every skill the brain can run without the LLM
+    BRAIN.md                 the brain: design, stages, numbers, what's next
+    mathskill.py, units.py   arithmetic, percentages, tips, conversions in CODE
+    honesty.py               no spoken promise / false "done" from the LLM
+    delivery.py              the single door for anything unprompted
+    standing.py              "tell me when ..." watches, kept across restarts
+    shape.py                 is a sentence SHAPED like a request? (shared)
+    turnstats.py             per-turn record: path, skill, timings; "why?"
+    world_facts.py           timeless facts: looked up, verified, served (Stage 3)
+    wiki.py                  Wikipedia, the one source facts come from
+    night_school.py          overnight: fact audit, curiosity, paraphrase learning
     config.json              all tuneables
     system_prompt.py         Nova's personality
     stt_engine.py            mic capture, wake dispatch, transcription
@@ -129,6 +141,24 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 
 **`echo_canceller.py`** — Subtracts Nova's own voice from the microphone, so she can be interrupted while speaking. Nova is unusually well placed for this: the hard part of software AEC is a clean reference of what the speaker is playing, and **Nova synthesises her own speech**, so Kokoro hands over that signal before it is ever played. Measured on real Kokoro output against real speech: **27-36 dB of her voice removed, his attenuated only 1.5-3.9 dB, and 0.2 dB when she is silent.** Two traps it exists to handle: the APM works in 10 ms frames (160 samples) while the mic delivers 30 ms (480) and the library does NOT reject a wrong size — it degrades silently; and the reference must be consumed in step with incoming mic frames, because playback runs ahead of capture. **Default OFF** (`stt.echo_cancellation`): enabling it also means keeping mic frames during playback, and Nova listens far more often than she speaks. Nothing raises — a failure returns the raw microphone. `feat/barge-in` is the other half.
 
+**`brain.py`** + **`skills.py`** — **The brain**, ported from JARVIS (MiniPCJarvis `docs/BRAIN.md`); full write-up in `nova_backend/BRAIN.md`. A nearest-neighbour classifier over example sentences: each request type is a SKILL (seeds, a slot function that extracts arguments or refuses, a runner, a consequence tier). A sentence is normalised (lowercase, wake word and politeness stripped, numbers → `N`), embedded with **bge-small via fastembed** (local ONNX, ~4ms; model downloaded once to `nova_backend/models/`, gitignored), and matched against ~675 examples. **JARVIS's rule copied exactly:** `confidence = top if margin >= 0.06 else top - (0.06 - margin) * 3`, act at 0.82, "nearly knew" at 0.66 — same embedder, so the numbers still mean what they were tuned to mean. A confident match whose slots extract is a **reflex**: it runs the SAME `_run_*` stage method the regex chain calls (no LLM, so the MLX prompt cache is untouched), 5-45ms in the live process. A guard refusal hands the turn to the runner-up. Otherwise the old regex stages run unchanged behind it. **Slots are asymmetric on purpose:** reads are lenient; writes with no confirmation step (calendar writes, power, lock, app launch by name, web search) stay strict — the module's own regex must accept the sentence; file moves are lenient because file_intents asks before touching disk. **Shape guards** (each from a measured wrong action): a read must be SHAPED like a request ("my next meeting is at three" read his calendar), navigation like navigation ("we should go home soon" went home), and a transport command must name its object ("what's next" skipped his song). A **confident-conversation veto** (`general` skill ≥ 0.82) skips the regex command stages but never the unsupported-action refusal. `confidence.decide(min_tier=)` takes the skill's tier: the brain can raise the transcript bar, never lower it. Storage: `brain_examples` / `brain_rejections` in nova_memory.db, every write committed on a short-lived connection (JARVIS's 2,600-message night was one uncommitted write). `brain.enabled: false` is an instant rollback. **Stage 2 (learning):** the LLM has no tools, so the TEACHER is the regex chain — a sentence the brain fell through on that a regex stage then claimed is learned, only if the skill's own slots run it AND the brain's own top guess already agrees (the regex makes its own wrong calls). "Did you mean <label>?" when nothing claimed it and the brain nearly knew (raw top ≥ 0.66 AND confidence ≥ 0.70 — the second bar is Nova's, because the first alone was wrong on all 6 of his real offers); yes teaches it, no is remembered forever. Phrases taught by voice ("when I say status check, ..."), near-exact match, nothing high-consequence behind a shortcut. "No, I meant X" un-learns the example behind a wrong reflex (never a seed).
+
+**`mathskill.py`** + **`units.py`** — Arithmetic, percentages ("25% of 10%" → 2.5 percent), tips and unit conversion **in code, never by the model** (ported from JARVIS). No `eval`: a recursive-descent parser over a normalised sentence, which accepts it only when every word is part of the sum. Stage 2e-0.
+
+**`honesty.py`** — Nova's LLM runs NO tools, so every LLM sentence promising to watch / remind / follow up, or claiming "I've opened / set / sent", is false. Filtered per sentence in `_stream_response` before it is spoken (streaming untouched): the first becomes the truth, later ones are dropped, history stores what she said. `llm.honesty_filter`.
+
+**`delivery.py`** — **The single door for anything Nova says unprompted** (timers, the proactive monitor, watches). Claims a UNIQUE row and commits it before speaking (never twice, across threads and restarts), hard hourly/daily ceilings for unprompted kinds counted from the table, and over a ceiling or in quiet hours an item is SHOWN, never dropped. What he asked for (timers, watches) is never held. JARVIS rule 5, from its 2,600-message night.
+
+**`standing.py`** — "Tell me when my battery is fully charged / my CPU goes above 90", list, cancel. Rows in `standing_watches`, one-shot, delivered through the door, survive restarts; an already-true condition is answered, not stored. A direction the words do not give ("tell me when my battery is at 20") comes from the current reading. "Fully charged" is also kept when macOS is HOLDING the battery below 100 on power (Optimized Battery Charging, often 80) — said as such, never as "fully charged", and the spoken battery reading no longer calls that state "charging". **Local readings only** — a stock or weather watch would poll the network unprompted (invariant 3, his call). Stage 2e-0b.
+
+**`shape.py`** — One definition of "shaped like a request", shared by the brain's skills and the regex read stages (weather, market, tools readings): a request opens with a question word or a verb, or ends in "?"; a statement ("my battery died yesterday", "I asked Nova what the weather was...") is not one; nor is a definition ("what does a CPU actually do"), nor "tell me WHEN ..." (a watch, not a reading of now).
+
+**`turnstats.py`** — A row per turn in `turn_stats`: the path that answered (reflex / regex stage / math / watch / phrase / ask / LLM...), skill, confidence, matched example, time to decide and to first word. The evidence the next round of routing work starts from. Answers "why did you do that?" from the record, and "how often do you answer things by yourself?". Bookkeeping never costs a turn.
+
+**`world_facts.py`** + **`wiki.py`** — **Stage 3: facts that can never change**, ported from JARVIS's fact store (BRAIN_ROADMAP.md realm 1). A general-knowledge question that reaches the LLM stage is looked up on **Wikipedia** first (one request, ~0.5-0.9s, hard 2s timeout) and the sentences that answer it go to the model as reference — measured on the real 3B: right 9/9 with them, 8/9 without ("324 metres" for the Eiffel Tower). After the turn, off the live path, a one-sentence answer is synthesised at temperature 0 and STORED only if every number and nearly every word is in the source, it is not changeable, and it is not a "why". Next time it is answered from the store in ~20ms with no model and no request. **The 3B cannot judge "timeless"** — measured, it called 6 of 8 changeable facts timeless (Apple's CEO, Japan's population) — so a deterministic realm-2 screen decides and the model may only veto. **Serving is guarded by words, not just similarity:** at JARVIS's 0.90 cosine bar "who directed jaws 2" scored 0.937 against "who directed jaws" and "how wide is the mariana trench" 0.943 against "how deep"; a fact is served only when the question kind AND the content words match too (tall = high = height). **Privacy guard before any request:** nothing in the first/second person, no name he has told Nova about, no contact details — counted at the network boundary in the tests. Relevance floor 0.70 (measured: right pages 0.795-0.898, another question's pages ≤0.564). "How do you know that?" cites the article and when it was last checked; "that's wrong" demotes the fact and it is never stored again. Wikipedia rate-limits bursts (429 after ~10 quick requests): `Retry-After` is honoured. Tables `world_facts` / `world_lookups` in nova_memory.db (`facts` is memory.py's). `facts.enabled: false` stops every request.
+
+**`night_school.py`** — What Nova does while he sleeps (JARVIS's night school), **silent** — reported only when he asks "what did you learn last night?". Runs in `facts.night_hours` (01-06), after 45 idle minutes, at most once a day, on mains power only, every model call a background job, stopping between items the moment he is back. Three jobs: **the audit** — Wikipedia revision ids mean one request re-checks every stored fact and an unedited page is confirmed without reading it; an edited page is re-read, and if the answer is no longer in it the model may say CHANGED (demote) but may never confirm (measured: the 3B said SAME against an unrelated sentence) — two strikes demote; **curiosity** (his option C) — general, timeless questions he asked this week that the model answered from memory are looked up and offered to the store, each sent at most once ever, nothing personal or changeable sent; **paraphrase distillation** (local) — sentences a regex stage had to handle are paraphrased and taught to the brain through `brain.learn`'s full bar.
+
 **`ws_server.py`** — Bridge between Python and Swift. HTTP server on :5001, WebSocket server on :8766. Swift connects here to receive state changes, message content, streaming tokens, and **which screen to show** in real time. The current view and its data are held like the current state, so a client that connects — or reconnects after an app relaunch — is told immediately instead of coming up blank.
 
 **`requirements.txt`** — All Python dependencies. Install with `pip install -r requirements.txt`.
@@ -138,19 +168,34 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 ## Pipeline Routing Order (nova.py — first match wins)
 
 1. System commands — sleep / wake / mute (always intercepted first)
+1b. Destructive-action confirmation — a power command's strict yes/no
 2. Calendar follow-up offer — answers a "want to hear what's coming up?" with yes/no
 2b. Pending file question — "which one?" / "move it to Documents?" answered before routing
-2c. UI navigation — go home / the menu / a named screen / work mode, plus the
-    home surface itself: clear home, restore home, move a card to a slot
-3. Calendar / reminders intents — read / create / complete / delete / update (EventKit)
-4. Screen awareness — what's on my screen / what app am I in
-4b. Weather — now / tomorrow / next few days, here or a named place
-5. File intents — find / read / open / move / copy / rename
-6. Memory intents — remember / recall / update / forget
-7. Fast-path intents — greetings / date / time / repeat last response
-8. Tool intents — open app / volume / battery / search / screenshot
+2b′. The brain's lessons — an answer to "did you mean X?", a correction of the last
+    reflex, teaching / forgetting / listing a phrase, and a taught phrase itself
+2b″. "Why did you do that?" / "how often do you answer by yourself?" (turnstats)
+2b‴. World-fact lessons — "how do you know that?", "that's wrong" about a fact,
+    "what did you learn last night?"
+2c. UI navigation (regex, anchored both ends) — go home / the menu / a named screen /
+    work mode, plus the home surface: clear home, restore home, move a card to a slot
+2d. Pending actuation question — "that would send it, want me to?"
+2e-0. Arithmetic / tips / conversions in code (mathskill.py)
+2e-0b. Standing watches — "tell me when ...", list, cancel (standing.py)
+2e. **THE BRAIN** (`_brain_turn`) — a confident skill match runs directly; a confident
+    "this is conversation" skips 2f-8 (never 8b); anything else falls through
+2f-8. **Regex command stages, the fallback** (`_regex_commands`), unchanged in order:
+    actuation (work mode) → calendar → screen → weather → market → files →
+    memory → fast path → tools
+8a. "Did you mean <label>?" — nothing claimed it, but the brain nearly knew
+8b. Unsupported action — refused honestly, never left to the LLM to fake
+8c. World facts — a verified fact answered from the store; otherwise a general-
+    knowledge question is looked up on Wikipedia and the answering sentences go
+    to the LLM as reference (stored afterwards if timeless, off the live path)
 9. RAG context enrichment — query personal documents for context
 10. LLM fallback — MLX streaming with sentence-chunked TTS overlap
+
+Every regex stage is still there. One is removed only when the brain matches it on
+the corpus AND the `[brain-disagree]` log from real use says it is safe.
 
 ---
 
@@ -223,6 +268,29 @@ what Nova is doing.
   child process, runs it from the REPO path so Python-only changes need only an
   app relaunch), `NovaAPIClient` (HTTP + WS), `LocationProvider`.
 
+**Installing NovaOS.app (what he launches from Applications / the Dock).**
+The app runs the backend from the REPO (`nova_backend/nova.py`, whatever
+branch is checked out) with miniforge's python3 — the first interpreter that
+imports `mlx_lm`; it must also have everything in requirements.txt
+(`fastembed` included). Built and installed 2026-11-19:
+
+```bash
+xcodebuild -project Nova.xcodeproj -scheme Nova -configuration Release -derivedDataPath /tmp/novabuild build
+ditto /tmp/novabuild/Build/Products/Release/NovaOS.app /Applications/NovaOS.app
+```
+
+That needs his "Mac Development" certificate (team GVCGVNM4PS); on
+2026-11-19 the keychain had none and Xcode's account login was rejected, so
+it was built AD-HOC (`CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual
+DEVELOPMENT_TEAM="" REGISTER_APP_GROUPS=NO`), which keeps every entitlement
+the target generates (audio input, calendars, location, network). **The trap:**
+macOS keys privacy grants to the signature, so a newly signed app is a
+stranger — on first launch the backend FROZE on its very first `open()` of
+`nova.py` (the repo lives in ~/Documents) until he clicked Allow on the
+Documents prompt; no log line, 0% CPU, nothing on :5001. An ad-hoc build
+re-prompts after every rebuild; a team-signed one keeps its grants. Pinned
+in the Dock. Logs: `~/Library/Logs/Nova/backend.log`.
+
 **The Xcode target takes its files from disk** (`PBXFileSystemSynchronizedRootGroup`).
 Anything under `Nova/` is in the build because it exists — there is no list to
 forget to update.
@@ -240,7 +308,17 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | Suite | Proves | Fidelity |
 |---|---|---|
 | `verify_environment.py` | every engine imports, MLX generates | real engines |
-| `test_routing_corpus.py` | every phrase that has broken Nova still routes right | real code, side effects stubbed |
+| `test_routing_corpus.py` | every phrase that has broken Nova still routes right | real code, real memory stage on a throwaway data dir, tools via dry-run `detect()` |
+| `test_brain_seeds.py` | no two skills own a canonical seed; every seed executable by its own skill | real skills + real slot extractors |
+| `test_brain_intent.py` | brain vs regex on corpus, 5-fold held-out, two paraphrase sets, his real turns; no NEW wrong action | real brain + real embedder, throwaway DB |
+| `test_brain_learning.py` | the brain learns, asks, is taught and corrected — and nothing goes wrong silently | real `_handle_turn_impl`, stage runners recorded |
+| `test_turnstats.py` | every turn records what answered it; "why?" is answered from that | real `_handle_turn_impl`, stage runners recorded |
+| `test_world_facts.py` | facts looked up, kept only if timeless and grounded, never served for another question, nothing personal sent; night school's audit, curiosity, gates | real store/night school/embedder + real pipeline; Wikipedia canned (real captured responses), model scripted |
+| `test_audit_regressions.py` | every defect the 2026-11-19 four-way audit of the brain branch proved (wrong arithmetic, false promises let through, a stale "did you mean" that could lock his Mac, names leaking to Wikipedia in the possessive, "shuffle off" turning shuffle on...) stays fixed — each check confirmed failing on the pre-fix commit | real modules + real pipeline, tools as dry runs, no network, no model |
+| `world_facts_live.py` | the real 3B answers better with the reference; real lookups, intake, audit; the real process looks up, stores, serves, cites | real model + real Wikipedia + real process (NOVA_TEST_LIVE=1, ~8 requests) |
+| `test_honesty.py` | no spoken promise nothing keeps; typed turns stay silent | real `_stream_response`, scripted LLM |
+| `test_unprompted.py` | one door for unprompted speech: never twice, ceilings, watches kept across restarts | real delivery/proactive/standing, throwaway DB |
+| `brain_live_check.py` | the brain inside the REAL process: reflexes, timings, LLM still answers after, did-you-mean, taught phrase, correction | real process, read-only sentences, silent turns |
 | `test_conversation_loop.py` | when Nova keeps listening vs returns to wake | real `_main_loop`, scripted mic |
 | `test_prompt_cache.py` | the prompt cache changed speed and NOTHING else | real engine + real model |
 | `test_rag_relevance.py` | Nova only quotes a document when it has one | real rag.py + real on-disk index |
@@ -289,10 +367,30 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
    that guard, "close this tab" and "go back" ran against whatever Nicholas had
    open.
 
+8. **Score a router on sentences it was not built from.** The brain is seeded
+   from the corpus, so the corpus only proves parity. Its real numbers come
+   from 5-fold held-out scoring, paraphrase sets written BEFORE the seeds they
+   test (v2 stayed sealed until the seeds froze), and his real turns minus any
+   that are seeds. And a wrong action is scored apart from a miss: a miss falls
+   to conversation; a wrong action does something on his Mac.
+9. **A harness that approximates a stage is not testing it.** The corpus
+   harness guessed at the memory stage with two regexes and reported 257/257
+   while "what's my memory usage" answered "I don't have your memory usage
+   stored yet". Run the real stage against a throwaway data dir; probe tools
+   with `detect()` (match() in dry mode), never a stubbed match().
+
 **Reporting to Nicholas** — every test report is four sections: what I tested /
 how I tested it (always naming the fidelity above) / what succeeded and what
 did not / what he needs to do. Plus an explicit "could not verify" line. Never
 lead with a pass count.
+
+10. **An app the sweep launches may bring HIS documents with it.** The
+    launch/quit test used TextEdit, which restores untitled documents on
+    launch — one he once had Nova type into ("Nova wrote this line") came
+    back every run, its quit stalled, the check failed, and TextEdit was left
+    open on his Mac. The test uses Calculator now (nothing to restore) and
+    skips itself if Calculator is already his. Never quit an app holding his
+    content to make a test pass.
 
 **When to run what:** targeted suites for a targeted fix; `--quick` before any
 merge; `--all` before a merge touching shared plumbing. Do NOT full-sweep every
@@ -304,13 +402,15 @@ small change — Nicholas asked for this explicitly and it is faster and sharper
 
 1. **Ports are 5001 (HTTP) and 8766 (WS).** These differ from Jarvis (3000/8765) intentionally so both apps can run simultaneously. Do not change them.
 2. **LLM n_ctx stays at 4096.** Do not raise the context window without explicit instruction.
-3. **No cloud dependencies — TWO narrow, documented exceptions.** Nova is local and private: no API keys, and the LLM/STT/TTS/memory NEVER leave the machine. The exceptions:
+3. **No cloud dependencies — FIVE narrow, documented exceptions.** Nova is local and private: no API keys, and the LLM/STT/TTS/memory NEVER leave the machine. The exceptions:
    - `maps_engine.py` — "how far is the nearest X" and travel times are Apple MapKit network lookups; getting a location fix sends an approximate position to Apple.
    - `spotify_search.py` — **added 2026-08-13, his explicit choice** after being shown the alternatives (hand off to Spotify's own search with no key; automate Spotify's UI). Name→URI lookup only; the words he asked for are what leaves the machine. Playback is local.
    - `market_engine.py` — **added 2026-08-17, his explicit choice.** Market data only; he ruled out any access to his real accounts. Yahoo needs no key at all; Finnhub's free tier needs one, stored at `NOVA_DATA_DIR/finnhub_credentials.json` and never in the committed config. What leaves the machine is a ticker or a company name he said out loud. **The privacy wrinkle he was told about and accepted: weather leaks an approximate location, but a stock query leaks what he is invested in.** `finance.enabled: false` disables it.
    - `weather_engine.py` — **added 2026-08-13, Nicholas's explicit choice** after being shown WeatherKit (needs a paid developer account), weather.gov (grid lookup) and browser scraping. Open-Meteo needs **no API key and no account**, so nothing ties a request to him beyond the IP any HTTP call carries. What leaves the machine is an approximate coordinate (rounded to ~100m) or a place name he said aloud.
 
-   Both are used ONLY when he asks that kind of question, touch neither the LLM nor memory, are never stored, and degrade honestly ("I can't get your location", "I couldn't reach the weather service") rather than guessing. `weather.enabled: false` disables the second entirely. **Do not widen further without asking him — this is his privacy line, and he decides where it sits.**
+   - `wiki.py` (Stage 3: `world_facts.py`, `night_school.py`) — **added 2026-11-19, his explicit choice: option C** of three he was shown (A local only, B lookups only when he asks, C B plus overnight research on his past questions). Wikipedia needs **no key and no account**; the User-Agent names nobody. What leaves the machine: the words of a general-knowledge question he asked; overnight, his own past general-knowledge questions the model answered from memory (each at most once, ever) and the page ids of facts already stored, to re-check them. **Never**: anything in the first or second person, any name he has told Nova about, memory, documents or the conversation — refused before the request, and logged in `world_lookups` so "what did you look up?" is answerable. Stored facts are Wikipedia's, never his. `facts.enabled: false` stops every request; `facts.night_school: false` keeps on-demand lookups and stops the overnight part.
+
+   Each is used ONLY for that kind of question (night school only for what he already asked), none sends his memory, and they degrade honestly ("I can't get your location", "I couldn't reach the weather service") rather than guessing. `weather.enabled: false` disables the second entirely. **Do not widen further without asking him — this is his privacy line, and he decides where it sits.**
 4. **Memory summarization runs on a daemon thread.** It must never block the main pipeline or the voice loop.
 5. **RAG loads in the background.** Queries must fail gracefully (return empty string) if the index is not yet ready.
 6. **TTS and LLM overlap.** The sentence-chunked streaming pipeline in `nova.py._stream_response` must not be changed to a blocking pattern.
@@ -351,7 +451,9 @@ The MLX model (~2GB) downloads automatically on first run.
 1. Describing IMAGES (photos) — screen awareness reads text and windows, it does not
    describe pictures. `file_intents` still says "I can't see inside images yet".
    Needs a real vision model; see screen_awareness.py for why Moondream was rejected.
-2. Proactive notifications — background monitor for upcoming events / due reminders
+2. Proactive notifications — BUILT (proactive.py: events about to start, overdue
+   reminders), now through the single door (delivery.py). Remaining: anything
+   beyond the calendar, and briefs.
 3. Barge-in over speakers — the canceller now EXISTS (`echo_canceller.py`, measured
    27-36 dB of Nova's voice removed) and `feat/barge-in` is the other half, but
    `stt.echo_cancellation` ships OFF: turning it on also keeps mic frames during
@@ -361,4 +463,9 @@ The MLX model (~2GB) downloads automatically on first run.
    Remaining: the other tabs (finance, calendar, files, memory, conversations
    all still render generically), and a health screen that needs the phone.
 5. iOS app — far back burner, separate on-device architecture
+6. The brain (see `nova_backend/BRAIN.md`): Stages 1-5 are built. Remaining:
+   explanations ("why ...") are looked up but never stored; Wikipedia lead
+   sections only (no "why is the sky blue" answer in them); a real night of
+   night school has not yet run on his Mac; regex stages retire only on
+   `[brain-disagree]` evidence from real use.
 

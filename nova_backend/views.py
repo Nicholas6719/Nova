@@ -195,6 +195,7 @@ DEFAULT_SLOTS: dict[str, str] = {
     "playing":  "L2",
     "weather":  "R1",
     "upcoming": "R2",
+    "awareness": "R3",
 }
 
 _SLOT_ALIASES: dict[str, str] = {
@@ -228,6 +229,11 @@ _CARD_ALIASES: dict[str, str] = {
     "upcoming": "upcoming", "calendar": "upcoming", "schedule": "upcoming",
     "agenda": "upcoming", "events": "upcoming", "reminders": "upcoming",
     "my day": "upcoming", "today": "upcoming",
+    # Deliberately NOT "what's on my screen" — that is a real command, and an
+    # alias is only safe because the move regex demands a verb and a known slot
+    # at the other end. Nothing here should be a sentence Nova already answers.
+    "awareness": "awareness", "screen awareness": "awareness",
+    "screen card": "awareness", "on my screen": "awareness",
     # Not movable — it is a row, not a card — but recognised so Nova can say
     # so instead of dropping the sentence on the model.
     "system": "system", "system info": "system", "system status": "system",
@@ -237,6 +243,7 @@ _CARD_ALIASES: dict[str, str] = {
 _CARD_SPOKEN: dict[str, str] = {
     "market": "markets", "playing": "now playing",
     "weather": "weather", "upcoming": "upcoming",
+    "awareness": "screen awareness",
 }
 _SLOT_SPOKEN: dict[str, str] = {
     "L1": "top left", "L2": "middle left", "L3": "bottom left",
@@ -295,6 +302,9 @@ def _move_match(text: str):
 _CLEAR_RE = re.compile(
     _LEAD + r"(?:clear|hide|empty)\s+(?:the\s+|my\s+)?"
     r"(?:home|screen|home\s*screen|everything|cards|the\s+cards|panels)"
+    # "hide everything on home" was claimed by the tools MINIMIZE rule
+    # (minimize every app) — the home surface is what he meant.
+    r"(?:\s+(?:on|from)\s+(?:the\s+|my\s+)?home(?:\s*screen)?)?"
     r"\s*[.?!]?$",
     re.IGNORECASE,
 )
@@ -491,6 +501,8 @@ class NovaViews:
         # A proactive announcement, briefly on screen as well as spoken. Held
         # here rather than pushed as a one-off payload so any re-render of home
         # keeps showing it until it expires.
+        # The last app he was seen actually using. See _build_awareness.
+        self._last_app: Optional[tuple] = None
         self._notice = ""
         self._notice_until = 0.0
         self._system_token = 0
@@ -510,6 +522,12 @@ class NovaViews:
             "playing":  _Tile("playing", self._build_music, 2.0, self.refresh_home),
             "weather":  _Tile("weather", self._build_weather, 600.0, self.refresh_home),
             "upcoming": _Tile("upcoming", self._build_upcoming, 120.0, self.refresh_home),
+            # What he is looking at. Cheap on purpose: the frontmost app and
+            # its window title need NO Screen Recording grant, so this card is
+            # live for everyone rather than only for people who granted a
+            # capture permission for a card they have not seen yet.
+            "awareness": _Tile("awareness", self._build_awareness, 5.0,
+                               self.refresh_home),
         }
         for tile in self._tiles.values():
             tile.prime()
@@ -653,8 +671,11 @@ class NovaViews:
             text, until = self._notice, self._notice_until
         if not text or time.time() >= until:
             return None
-        # Never over one of his cards.
-        if any(sl == "R3" for sl in self.slots.values()):
+        # Never over one of his cards — but awareness does not count. That one
+        # is passive context Nova put there herself, and a heads-up he asked
+        # for is worth more than a note about what app he is looking at. A card
+        # HE moved to R3 still wins, and the notice steps aside.
+        if any(sl == "R3" for card, sl in self.slots.items() if card != "awareness"):
             return None
         return P.at(P.items([{"title": text}], title="Heads up"), "R3", "notice")
 
@@ -826,6 +847,8 @@ class NovaViews:
             return self._calendar_payload()
         if view.name == "system":
             return self._system_payload()
+        if view.name in ("browser", "automation"):
+            return self._activity_payload(view.name)
         return {}
 
     def _calendar_payload(self) -> dict:
@@ -839,6 +862,40 @@ class NovaViews:
         block = self._tiles["upcoming"].get()
         return P.panel(title="Calendar", subtitle=_today_line(),
                        blocks=[block or P.note("Nothing on your calendar today.")])
+
+    _ACTIVITY_TITLES = {
+        "browser":    ("Browser activity", "What Nova looked up for you"),
+        "automation": ("Automation", "What Nova typed and clicked"),
+    }
+
+    def _activity_payload(self, kind: str) -> dict:
+        """What Nova actually did, after the fact.
+
+        The live step list already shows a run WHILE it happens; this is the
+        other half — the thing he glances at afterwards to see whether the
+        search he half-heard actually landed. Failures stay in the list and
+        stay marked, because a log that only remembers its successes is worse
+        than no log: it would tell him something worked when it did not.
+        """
+        import panels as P
+        title, subtitle = self._ACTIVITY_TITLES[kind]
+        rows = []
+        for entry in reversed(list(getattr(self.assistant, "activity_log", ()))):
+            if entry.get("kind") != kind:
+                continue
+            rows.append({"title": entry.get("text", ""),
+                         "meta": entry.get("time", ""),
+                         "accent": "failed" if entry.get("failed") else ""})
+        if not rows:
+            blocks = [P.note("Nothing yet." if kind == "browser"
+                             else "Nova hasn't typed or clicked anything yet.")]
+        else:
+            block = P.items(rows, title="History")
+            # Stamped so the client can find it by name rather than by
+            # position — same identity mechanism the home cards use.
+            block["card"] = "history"
+            blocks = [block]
+        return P.panel(title=title, subtitle=subtitle, blocks=blocks)
 
     def _system_payload(self) -> dict:
         """What Nova is made of, and what she is allowed to do.
@@ -1015,8 +1072,14 @@ class NovaViews:
             # Just her. No cards, no row, and no greeting to imply otherwise.
             return P.panel(title="", subtitle=_today_line(), blocks=[])
 
+        # Computed first: a live notice evicts the awareness card rather than
+        # drawing on top of it.
+        notice = self._home_notice()
+
         cards = []
         for card, tile in self._tiles.items():
+            if card == "awareness" and notice is not None:
+                continue
             block = tile.get()                  # cached; never blocks
             if block is not None:
                 cards.append(P.at(dict(block),
@@ -1027,7 +1090,7 @@ class NovaViews:
         return P.panel(
             title="" if spoken_yet else _greeting(),
             subtitle=_today_line(),
-            blocks=cards + [self._home_notice(), self._home_system(spoken_yet)],
+            blocks=cards + [notice, self._home_system(spoken_yet)],
         )
 
     def _home_system(self, spoken_yet: bool) -> Optional[dict]:
@@ -1106,6 +1169,127 @@ class NovaViews:
         for r in rows:
             r.pop("sort", None)
         return P.items(rows[:6], title="Upcoming")
+
+    # What Nova can OFFER, per app, and nothing she cannot actually do.
+    #
+    # Deterministic on purpose. Everything else on a panel is templated rather
+    # than phrased, and a SUGGESTION is the one thing on screen where an
+    # invented offer would be worst — it would have Nova volunteering a
+    # capability she does not have, which is the exact failure the unsupported
+    # guard exists to prevent on the voice side.
+    # Every command here is checked against the REAL router by
+    # tests/test_home.py. An offer is a promise, and the first draft of this
+    # table broke it: "read this page" routes to nothing at all, so accepting
+    # would have sent Nova a phrase she cannot handle and the card would have
+    # been a button that does nothing.
+    _OFFERS: tuple = (
+        (("brave browser", "google chrome", "safari", "arc", "firefox"),
+         "Want me to tell you what's on this page?",
+         "read the {app} window behind you"),
+        (("textedit", "notes", "pages", "microsoft word", "obsidian", "bear"),
+         "Want me to read this back to you?",
+         "read the {app} window behind you"),
+    )
+
+    def _build_awareness(self) -> Optional[dict]:
+        """The app he is in, and — sometimes — one thing Nova could do about it.
+
+        The SUGGESTION stands until he ANSWERS it — yes, or not now — and the
+        client owns that, because the client is the only place his answer can
+        actually be observed. Three attempts to ration it here all failed the
+        same way: the offer was spent by a render nobody saw. Building a
+        payload at boot, refreshing a tile on its timer, and pushing home while
+        Brave sat in front of Nova's window are all indistinguishable from him
+        reading the card, and each one silently consumed the one offer he was
+        ever going to get. Restraint has to live where the answer is.
+        """
+        import panels as P
+        # The FRONTMOST window that isn't Nova's own.
+        #
+        # Not simply the frontmost app: home is on screen precisely when he is
+        # looking at Nova, so keying on the true frontmost app meant the card
+        # existed only in the moments nobody could see it. His TextEdit window
+        # is still on his screen, sitting behind hers — naming it is honest,
+        # and it is the thing he would be asking about.
+        try:
+            import screen_awareness as sa
+            windows = sa.visible_windows()
+        except Exception as exc:
+            log.debug(f"awareness: no window list ({exc})")
+            return None
+
+        # THE SUBJECT IS THE APP HE WAS LAST ACTUALLY USING, and it is only
+        # learned while Nova is NOT in front.
+        #
+        # Behind Nova's own window the stack is not stable: with TextEdit and
+        # Finder both open, "the frontmost window that isn't Nova" flipped
+        # between the two every few seconds, so the card changed its mind about
+        # what he was looking at and the offer button moved out from under his
+        # cursor. Measured on the real card, twice.
+        #
+        # Reading it only while another app is in front removes the ambiguity
+        # entirely — whatever is frontmost then IS what he is using — and it
+        # self-corrects, because the moment he goes back to work it updates.
+        nova_in_front = bool(windows) and windows[0][0] in ("NovaOS", "Nova")
+        # Stability is not the same as stubbornness. A remembered app whose
+        # window has since closed is not "what he was last looking at" any
+        # more, it is a name for something that is not there — and the card
+        # went on offering to read a TextEdit dialog that had closed, which
+        # Nova then correctly refused to find. If it is gone, re-learn.
+        # Checked against every window that EXISTS, not the on-screen list.
+        # Nova's window covers the display, so from here his browser looks
+        # closed the moment she comes to the front — and the card forgot what
+        # he was doing every single time he looked at it.
+        try:
+            alive = {name for name, _ in sa.existing_windows()}
+        except Exception:
+            alive = {name for name, _ in windows}
+        if self._last_app is not None and self._last_app[0] not in alive:
+            self._last_app = None
+        if not nova_in_front:
+            for name, title in windows:
+                if name in ("NovaOS", "Nova"):
+                    continue
+                self._last_app = (name, title)
+                break
+        elif self._last_app is None:
+            # First run with Nova already up — nothing has been observed yet,
+            # so take the best guess available and let the next switch fix it.
+            for name, title in windows:
+                if name in ("NovaOS", "Nova"):
+                    continue
+                self._last_app = (name, title)
+                break
+        if self._last_app is None:
+            return None
+        app, window = self._last_app
+
+        row: dict = {"title": app}
+        # A window title that merely repeats the app name is not context, it is
+        # the same word twice. Chrome-less apps do this constantly.
+        if window and window.strip().lower() != app.strip().lower():
+            row["detail"] = window[:80]
+
+        # Both offers read the screen, and reading the screen needs the grant.
+        # Offering it without one would put a button on his home screen whose
+        # only possible outcome is Nova explaining she is not allowed — which
+        # is worse than no offer, because he clicked it.
+        try:
+            may_read = sa.has_permission()
+        except Exception:
+            may_read = False
+
+        low = app.lower()
+        for apps, offer, say in (self._OFFERS if may_read else ()):
+            if low in apps:
+                row["meta"] = offer
+                # What saying yes actually runs, NAMING the window the card is
+                # about — the stack behind Nova reorders, and the handler must
+                # read the one he was shown, not whatever is on top when he
+                # gets around to clicking.
+                row["accent"] = say.format(app=app)
+                break
+        return P.items([row], title="On your screen")
 
     def _build_weather(self) -> Optional[dict]:
         import panels as P

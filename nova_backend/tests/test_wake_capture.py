@@ -175,14 +175,17 @@ def frames(n, loud):
     return [LOUD if loud else QUIET] * n
 
 
-def run_capture(pre_wake_frames, live_script):
-    """live_script: list of booleans, one per live frame."""
-    stt._pending_pre_wake = b"".join(frames(pre_wake_frames, True))
+def run_capture(pre_wake, live_script):
+    """pre_wake: a frame count (all speech) OR a list of booleans.
+    live_script: list of booleans, one per live frame."""
+    pre = ([True] * pre_wake) if isinstance(pre_wake, int) else list(pre_wake)
+    stt._pending_pre_wake = b"".join(
+        LOUD if is_speech else QUIET for is_speech in pre)
     stt._audio_q = _queue.Queue()
     for is_speech in live_script:
         stt._audio_q.put(LOUD if is_speech else QUIET)
     # VAD sees the priming frames first, then the live ones.
-    stt.vad = ScriptedVAD([True] * pre_wake_frames + list(live_script))
+    stt.vad = ScriptedVAD(pre + list(live_script))
     audio = stt.record_command(max_duration_s=15.0, start_timeout_s=None)
     return audio
 
@@ -232,6 +235,67 @@ check(audio is not None and captured_s >= expected_min,
       "the capture includes audio from before speech was detected",
       f"captured {captured_s:.2f}s of a 1.0s utterance "
       f"(pre-roll {stt._pre_roll_frames * se.FRAME_MS}ms)")
+
+# ══════════════════════════════════════════════════════════════════════════
+section("THE SHAPE OF A REAL PRE-WAKE BUFFER  (his log, 2026-08-25)")
+# ══════════════════════════════════════════════════════════════════════════
+# The checks above prime with 500ms of solid speech. The real buffer is TWO
+# SECONDS ending at the wake word, so most of it is the quiet room before he
+# spoke — and that is the difference between passing here and failing at his
+# desk:
+#
+#     17:53:15  Wake word detected (score=1.00)
+#     17:53:15  [state] -> listening
+#     17:53:16  [state] -> processing        <- one second later
+#     17:53:16  faster_whisper: duration 00:03.030
+#
+# A three second capture that closed inside a second of the wake word: almost
+# all of it was replayed buffer. Two faults compounding — silence_ms counted
+# through the replay so the grace was part-spent before live audio arrived,
+# and a single 30ms VAD twitch on room noise counted as him starting, which
+# dropped the cutoff from 2000ms to 700ms.
+REAL_BUFFER = ([False] * F(1400)      # the quiet room before he spoke
+               + [True] * F(400)      # "Nova"
+               + [False] * F(200))    # the detector's own lag
+
+# A blip every ~300ms: a fan, a keystroke, his chair.
+def noisy(ms):
+    out = []
+    for i in range(F(ms)):
+        out.append(i % F(300) == 0)
+    return out
+
+audio = run_capture(REAL_BUFFER, noisy(1500) + [True] * F(1000) + [False] * F(1200))
+captured_s = (len(audio) / se.SAMPLE_RATE) if audio is not None else 0.0
+check(audio is not None and captured_s > 3.0,
+      "his command survives a 2s buffer, a 1.5s pause and a noisy room",
+      f"captured {captured_s:.2f}s — the command after the pause must be in it")
+
+# Same buffer, no pause. Must not become sluggish.
+audio = run_capture(REAL_BUFFER, [True] * F(1000) + [False] * F(1500))
+captured_s = (len(audio) / se.SAMPLE_RATE) if audio is not None else 0.0
+check(audio is not None and captured_s < 4.2,
+      "speaking straight away still cuts off promptly",
+      f"captured {captured_s:.2f}s")
+
+# THE WAKE WORD AND NOTHING ELSE. Handing this to Whisper is how a phrase he
+# never said reaches the LLM: two seconds of room noise with "Nova" in it does
+# not reliably come back empty, it comes back with SOMETHING.
+audio = run_capture(REAL_BUFFER, noisy(2500))
+check(audio is None and stt.last_capture_reason == "wake_only",
+      "a capture holding only the wake word is thrown away, not transcribed",
+      f"got {None if audio is None else f'{len(audio)/se.SAMPLE_RATE:.2f}s'}, "
+      f"reason={stt.last_capture_reason!r}")
+
+# And a genuinely short answer must still get through. The threshold is
+# measured, not chosen: 3s of room noise gives a longest VAD run of 0-90ms,
+# the real spoken command gives 960ms, and its first 250ms alone gives 240ms.
+audio = run_capture(REAL_BUFFER, [False] * F(300) + [True] * F(300)
+                    + [False] * F(1500))
+check(audio is not None,
+      "a short command is still kept",
+      f"reason={stt.last_capture_reason!r}")
+
 
 check(config["stt"]["beam_size"] == 5,
       "beam search is on (greedy measured worse on 126 clips)",

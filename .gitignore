@@ -31,3 +31,6 @@ nova_backend/voices-v1.0.bin
 
 # Test bytecode
 nova_backend/tests/__pycache__/
+
+# Embedding model for the brain (fastembed cache, ~64MB, downloaded once)
+nova_backend/models/

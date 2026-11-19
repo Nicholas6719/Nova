@@ -185,6 +185,60 @@ class NovaMemory:
             log.debug(f"Fact(s) deleted by key: {key} ({deleted})")
         return deleted
 
+    # ── Free-form notes ──────────────────────────────────────────────────────
+    # "remember that I like tea" has no (key, value) shape for the structured
+    # facts to hold, so it used to fall through to the LLM — which said "got
+    # it" while nothing explicit was stored. A NOTE keeps his own words,
+    # verbatim, under category 'note' keyed by their normalised form (saying
+    # it twice does not store it twice). It renders as a quote, never as a
+    # paraphrase: a model rewording what he told Nova is how facts drift.
+    NOTE_CATEGORY = "note"
+
+    def add_note(self, statement: str) -> Optional[str]:
+        statement = re.sub(r"\s+", " ", (statement or "")).strip().rstrip(".!?").strip()
+        if len(statement) < 3:
+            return None
+        key = _note_key(statement)
+        if not key:
+            return None
+        self.upsert_fact(self.NOTE_CATEGORY, key, statement, source="explicit")
+        return statement
+
+    def forget_note(self, statement: str) -> int:
+        """Remove the note he is describing. Exact match first; otherwise the
+        single note sharing most of its content words (>= 60%). Never more
+        than one, and never a guess between two equally good candidates."""
+        want = set(_note_key(statement).split("_")) - _NOTE_STOP
+        if not want:
+            return 0
+        with self._lock:
+            conn = self._conn()
+            rows = conn.execute("SELECT key FROM facts WHERE category = ?",
+                                (self.NOTE_CATEGORY,)).fetchall()
+        # EVERY word he said must be in the note, and any number or negation
+        # must agree. A 60% overlap alone deleted "I parked on level 3" for
+        # "forget that I parked on level 4", and "I like tea" for "forget that
+        # I don't like tea" (audit, 2026-11-19).
+        def marks(words: set) -> tuple:
+            return ({w for w in words if any(c.isdigit() for c in w)},
+                    bool(words & _NEGATION))
+        scored = []
+        for r in rows:
+            have = set(r["key"].split("_")) - _NOTE_STOP
+            if not have or not want <= have:
+                continue
+            (wn, wneg), (hn, hneg) = marks(want), marks(have)
+            if (wn and wn != hn) or wneg != hneg:
+                continue
+            overlap = len(want & have) / max(len(want), len(have))
+            scored.append((overlap, r["key"]))
+        scored.sort(reverse=True)
+        if not scored or scored[0][0] < 0.6:
+            return 0
+        if len(scored) > 1 and scored[1][0] == scored[0][0]:
+            return 0
+        return 1 if self.delete_fact(self.NOTE_CATEGORY, scored[0][1]) else 0
+
     def all_facts(self) -> list[dict]:
         """All facts as structured dicts, most-recently-updated first."""
         with self._lock:
@@ -267,6 +321,33 @@ def _norm(s: str) -> str:
     return s.lower().strip().replace(" ", "_")
 
 
+_NOTE_STOP = frozenset({"i", "my", "the", "a", "an", "that", "to", "in", "on",
+                        "of", "is", "am", "me", "and", "it"})
+
+
+_NEGATION = frozenset({"not", "don't", "dont", "doesn't", "didn't", "isn't", "wasn't",
+                       "never", "no", "can't", "won't", "aren't"})
+
+
+def _note_key(statement: str) -> str:
+    return "_".join(re.findall(r"[a-z0-9']+", (statement or "").lower()))[:120]
+
+
+_TO_2P = [(r"\bI'm\b", "you're"), (r"\bI've\b", "you've"), (r"\bI'll\b", "you'll"),
+          (r"\bI'd\b", "you'd"), (r"\bI am\b", "you are"), (r"\bI was\b", "you were"),
+          (r"\bI\b", "you"), (r"\bmyself\b", "yourself"), (r"\bmy\b", "your"),
+          (r"\bmine\b", "yours"), (r"\bme\b", "you")]
+
+
+def to_second_person(statement: str) -> str:
+    """His words, addressed back to him: "I put my resume in Downloads" ->
+    "you put your resume in Downloads". Pronouns only; nothing else moves."""
+    out = statement or ""
+    for pat, rep in _TO_2P:
+        out = re.sub(pat, rep, out, flags=re.I)
+    return out
+
+
 # Categories never subjected to the degenerate-fact filter. An allergy stores the
 # allergen as both key and value ('peanuts'/'peanuts'), which is legitimate — and
 # allergies are safety-critical, so they are never filtered.
@@ -328,6 +409,11 @@ def _render_fact(category: str, key: str, value: str,
     know about me"), where Nova is talking TO Nicholas — third person there read
     as "His favorite favorite color is red."
     """
+    if category == "note":
+        # His own words, quoted — never reworded (see NovaMemory.add_note).
+        if second_person:
+            return f"You told me {to_second_person(value)}."
+        return f'He told you: "{value}".'
     k = _strip_category_prefix(category, key.replace("_", " "))
     if second_person:
         if category == "allergy":

@@ -27,6 +27,10 @@ final class ShellViewModel: ObservableObject {
     /// Parked in the corner, above everything, while working alongside him.
     @Published private(set) var isPuck: Bool = false
     @Published private(set) var isConnected: Bool = false
+    /// The last thing Nova said. Exists so a card that ASKED a question can
+    /// show the answer in place instead of guessing at one — the only consumer
+    /// today is the screen-awareness card's done state.
+    @Published private(set) var lastAnswer: String = ""
 
     private let api: NovaAPIClient
     private var cancellables = Set<AnyCancellable>()
@@ -56,6 +60,15 @@ final class ShellViewModel: ObservableObject {
         // Work mode is decided by the backend — it knows when Nova acted on his
         // Mac and when he said "go home" — so the window follows it rather than
         // the two keeping separate opinions about where Nova should be.
+        api.$messages
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] messages in
+                guard let last = messages.last, last.role == .assistant,
+                      !last.content.isEmpty else { return }
+                self?.lastAnswer = last.content
+            }
+            .store(in: &cancellables)
+
         api.$isPuck
             .receive(on: DispatchQueue.main)
             .sink { [weak self] puck in self?.setPuck(puck) }

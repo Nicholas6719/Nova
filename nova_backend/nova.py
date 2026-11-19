@@ -25,6 +25,7 @@ import queue
 import re
 import threading
 import time
+import collections
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -59,6 +60,11 @@ _SLEEP_TRAILER_RE = re.compile(r"^[\s,.!]*(?:now|please|then|ok|okay|thanks?|"
                                r"thank you|for now|nova)?[\s,.!]*$", re.I)
 
 
+# The sign-off as Whisper sometimes hears it ("Nova, got to sleep" — his real
+# turn). Only as the WHOLE utterance: "I got to sleep at 3am" is a story.
+_MISHEARD_SIGNOFF = re.compile(r"^\s*(?:(?:hey\s+)?nova[,.!\s]+)?(?:got|gotta|goes)\s+to\s+sleep[\s.!,]*$", re.I)
+
+
 def find_signoff(text: str):
     """Locate a trailing sign-off. Returns (index, phrase) or (None, None).
 
@@ -67,6 +73,11 @@ def find_signoff(text: str):
     and used to put Nova to sleep mid-anecdote.
     """
     low = (text or "").lower()
+    m = _MISHEARD_SIGNOFF.match(low)
+    if m:
+        idx = low.find("to sleep") - 1
+        idx = low.rfind(" ", 0, idx) + 1 if idx > 0 else 0
+        return idx, low[idx:].strip(" .!,")
     best = None
     for phrase in _SLEEP_PHRASES:
         start = 0
@@ -123,6 +134,23 @@ _HYPOTHETICAL_RE = re.compile(
     r"[\s.!?]*$",
     re.I,
 )
+
+
+# An unmistakable lesson, even when its one step is not yet something Nova can
+# do: "when I say X, do Y" / "... I want you to Y".
+_TEACH_CUE = re.compile(r"(?:,|\s)\s*(?:then\s+|do\s+|you\s+should\s+|i\s+want\s+you\s+to\s+)", re.I)
+
+
+# A step that opens with a pronoun or determiner is a statement, not an
+# instruction: "when I say I'm tired, I MEAN IT" vs "..., JUGGLE three oranges".
+_NOT_AN_INSTRUCTION = re.compile(r"^\s*(?:i|i'm|im|i've|it|it's|its|that|that's|this|you|you're|we|"
+                                 r"he|she|they|there|my|the|a|an|so|and|but)\b", re.I)
+
+
+def _is_unsupported_action(text: str) -> bool:
+    """Phrased as an action, and no handler claimed it: Nova must refuse it
+    honestly rather than let the LLM say it already did it (stage 8b)."""
+    return bool(_ACTION_REQUEST_RE.match(text) and not _HYPOTHETICAL_RE.search(text))
 
 # An imperative that survived every handler. The verbs are ones Nova either
 # performs deterministically or cannot perform at all — so if one reaches the
@@ -256,6 +284,10 @@ class VoiceAssistant:
         # `_last_response` because that only becomes true after she ANSWERS,
         # which is a beat too late to be a greeting.
         self._conversation_started = False
+        # What Nova has DONE, newest last. Small on purpose: this is a log he
+        # glances at after the fact, not an audit trail, and an unbounded one
+        # would be a memory leak with a screen attached.
+        self.activity_log: "collections.deque" = collections.deque(maxlen=40)
         # A harness builds the assistant through _init_state alone, so the
         # cues have to exist here too — silent by default in that case, since
         # nothing has configured or started them.
@@ -270,6 +302,18 @@ class VoiceAssistant:
         # (shutdown / restart / sleep). Unlike the soft offer, anything that
         # isn't a clear yes cancels it — we never guess about powering off.
         self._tool_confirm: Optional[Callable[[], str]] = None
+        self.brain = None                # brain.py; set by _init_brain
+        self._brain_chat = False         # this turn: brain sure it's conversation
+        self._brain_fell_through = False # this turn: brain declined (learnable)
+        self._brain_offer = None         # pending "did you mean X?"
+        self._last_reflex = None         # what "no, I meant ..." would correct
+        self._last_turn = None           # turnstats: the last decision, for "why?"
+        self.turnstats = None
+        self.facts = None                # world_facts.py; set by _init_facts
+        self.night = None                # night_school.py
+        self._turn_basis = None          # this turn: what the answer rested on
+        self._last_basis = None          # the last answer's, for "how do you know?"
+        self._last_active = time.time()  # night school waits until he's been away
         self._rag_ready       = False
         self._rag             = None
         # Set by a "return to wake mode" voice command to drop out of
@@ -332,6 +376,8 @@ class VoiceAssistant:
         # the build and is now simply not on the critical path.
         self.ws.on_interrupt = self._barged_in
         self._init_views()          # after _init_ws: it needs the WS server
+        self._init_brain()          # last: its skills reach every engine above
+        self._init_facts()          # after the brain: it shares the embedder
         self._verify_engines()
         self._show_home()
         self._warm_prompt_cache()
@@ -496,17 +542,28 @@ class VoiceAssistant:
                     done.set()
                 self._llm_queue.task_done()
 
-    def _submit_turn(self, text: str, wait: bool) -> None:
+    def _submit_turn(self, text: str, wait: bool, silent: bool = False) -> None:
         """Enqueue a conversation turn for the MLX worker thread. Voice waits for
         completion (so the wake loop doesn't resume mid-response); text input
         returns immediately and receives results over the WebSocket."""
         done = threading.Event() if wait else None
         self._llm_queue.put(
             (_PRIO_TURN, next(self._llm_seq),
-             lambda: self._handle_turn_impl(text), done)
+             lambda: self._run_turn(text, silent), done)
         )
         if done is not None:
             done.wait()
+
+    def _run_turn(self, text: str, silent: bool) -> None:
+        """Typed or spoken travels WITH the turn. It used to be one shared
+        flag set at submit time, so a typed turn queued behind a spoken one
+        silenced the spoken reply, or the voice loop made a typed one speak
+        (audit, 2026-11-19)."""
+        self._silent_turn = silent
+        try:
+            self._handle_turn_impl(text)
+        finally:
+            self._silent_turn = False
 
     def _submit_job(self, fn, wait: bool = False,
                     priority: int = None) -> None:
@@ -564,8 +621,9 @@ class VoiceAssistant:
         from tools import NovaTools
         # on_announce lets a timer speak when it fires — nothing is asking at
         # that moment, so it needs its own safe path to the floor.
-        self.tools = NovaTools(self.config, on_announce=self._announce,
-                               on_progress=self._show_work)
+        self.tools = NovaTools(self.config, on_announce=self._timer_fired,
+                               on_progress=self._show_work,
+                               on_activity=self.record_activity)
 
     def _init_calendar(self) -> None:
         # NovaCalendar's LLM extraction/summarize calls run on the nova-llm
@@ -580,6 +638,10 @@ class VoiceAssistant:
         # into self.llm is thread-safe.
         from file_intents import NovaFiles
         self.files = NovaFiles(self.config, self.llm)
+        # "open notes" is the Notes app: files asks tools whether a name is an
+        # installed app (exact names only) before claiming it as a file.
+        if getattr(self, "tools", None) is not None:
+            self.files.app_named = self.tools.app_named
 
     def _init_screen(self) -> None:
         # Same thread story as the calendar and files: dispatched from
@@ -726,7 +788,13 @@ class VoiceAssistant:
         # getattr, not attribute access: a missing signal is designed to mean
         # "behave exactly as before", and that must not become a crash in the
         # voice loop just because an STT implementation predates this.
-        decision = C.decide(text, getattr(self.stt, "last_confidence", None))
+        # The brain's view of what this sentence would DO can only raise the
+        # bar (a file move the regex tier read as chat), never lower it.
+        min_tier = None
+        if self.brain is not None and self.brain.ready:
+            min_tier = self.brain.tier_for(text, self)
+        decision = C.decide(text, getattr(self.stt, "last_confidence", None),
+                            min_tier=min_tier)
         log.info(f"[confidence] {decision.score:.2f} tier={decision.tier} "
                  f"-> {decision.action}")
 
@@ -771,6 +839,8 @@ class VoiceAssistant:
             log.warning(f"could not show home at startup: {exc}")
         self._start_home_ticker()
         self._start_proactive()
+        self._init_standing()
+        self._start_night_school()
 
     def _start_proactive(self) -> None:
         """Let Nova speak first, occasionally.
@@ -783,20 +853,95 @@ class VoiceAssistant:
         """
         try:
             from proactive import ProactiveMonitor
-            def _speak_and_show(text: str) -> None:
-                # On screen first: it costs nothing and _announce blocks until
-                # it finds a gap, which can be a while if she is mid-sentence.
-                try:
-                    self.views.flash_notice(text)
-                except Exception as exc:
-                    log.debug(f"could not show the notice: {exc}")
-                self._announce(text)
+            d = self._delivery()
 
-            self.proactive = ProactiveMonitor(self.config, self, _speak_and_show)
+            def _deliver(text: str, key: Optional[str] = None,
+                         kind: str = "proactive") -> None:
+                # Through the single door: claimed before it is said, counted
+                # against the ceilings, shown instead of spoken when over them.
+                if d is not None:
+                    d.deliver(kind, text, key=key, claimed=key is not None)
+                else:
+                    self._show_then_announce(text)
+
+            claim = (lambda key, kind, text: d.claim(key, kind, text)) if d else None
+            self.proactive = ProactiveMonitor(self.config, self, _deliver, claim=claim)
             self.proactive.start()
         except Exception as exc:
             log.warning(f"proactive monitor unavailable: {exc}")
             self.proactive = None
+
+    def _show_then_announce(self, text: str) -> None:
+        # On screen first: it costs nothing and _announce blocks until it
+        # finds a gap, which can be a while if she is mid-sentence.
+        try:
+            self.views.flash_notice(text)
+        except Exception as exc:
+            log.debug(f"could not show the notice: {exc}")
+        self._announce(text)
+
+    def _delivery(self):
+        """The single door for unprompted speech (delivery.py), made once."""
+        d = getattr(self, "delivery", None)
+        if d is not None:
+            return d
+        try:
+            from delivery import Delivery
+
+            def _show(text: str) -> None:
+                self.views.flash_notice(text)
+            self.delivery = Delivery(DATA_DIR / "nova_memory.db", self.config,
+                                     speak=self._announce, show=_show)
+        except Exception as exc:
+            log.warning(f"delivery unavailable, speaking directly: {exc}")
+            self.delivery = None
+        return self.delivery
+
+    def _init_standing(self) -> None:
+        """Standing watches, on the single door. Started with the proactive
+        monitor (after every engine exists); readings are local only."""
+        self.standing = None
+        try:
+            from standing import StandingWatches
+            d = self._delivery()
+
+            def _read(metric: str):
+                if metric == "battery":
+                    r = self.tools.battery_reading()
+                    return r and r.get("level")
+                if metric == "cpu":
+                    r = self.tools.cpu_reading()
+                    return r and r.get("busy")
+                if metric == "memory":
+                    r = self.tools.memory_reading()
+                    return r and r.get("pct")
+                return None
+
+            def _deliver(kind: str, text: str, key: str):
+                if d is not None:
+                    d.deliver(kind, text, key=key)
+                else:
+                    self._show_then_announce(text)
+
+            def _held() -> Optional[bool]:
+                r = self.tools.battery_reading()
+                return None if r is None else bool(r.get("held"))
+
+            self.standing = StandingWatches(DATA_DIR / "nova_memory.db", _read, _deliver,
+                                            self.config, held=_held)
+            self.standing.start()
+        except Exception as exc:
+            log.warning(f"standing watches unavailable: {exc}")
+            self.standing = None
+
+    def _timer_fired(self, msg: str) -> None:
+        """A timer he set has gone off: through the door (requested kind, so
+        never held by a ceiling), from the timer's own thread."""
+        d = self._delivery()
+        if d is not None:
+            d.deliver("timer", msg)
+        else:
+            self._announce(msg)
 
     def _start_home_ticker(self) -> None:
         """Keep home honest about the world while he is looking at it.
@@ -846,6 +991,17 @@ class VoiceAssistant:
         except Exception as exc:
             # A panel failing must never cost him the spoken answer.
             log.warning(f"could not send panel: {exc}")
+
+    def record_activity(self, summary: str, failed: bool = False,
+                        kind: str = "browser") -> None:
+        """One line in the history, stamped when it happened."""
+        try:
+            self.activity_log.append({
+                "time": datetime.now().strftime("%-I:%M %p"),
+                "text": summary, "failed": bool(failed), "kind": kind})
+            self.views.refresh_home()
+        except Exception as exc:
+            log.debug(f"could not record activity: {exc}")
 
     def _show_work(self, payload: dict) -> None:
         """Put a live step list on screen while a handler is working.
@@ -1100,11 +1256,10 @@ class VoiceAssistant:
             # He SPOKE this one. Clear any silent flag left by a typed turn, or
             # a single use of the keyboard would mute Nova for the rest of the
             # session.
-            self._silent_turn = False
             self.ws.send_message("user", text)
             # Run on the MLX worker thread and wait: capture must not resume
             # until the response (and its TTS) is done, or it self-captures.
-            self._submit_turn(text, wait=True)
+            self._submit_turn(text, wait=True)        # spoken: silent defaults False
             if self._sleep_after_turn:
                 # The utterance carried both content and a sign-off; the content
                 # has now been answered, so honor the sign-off.
@@ -1203,17 +1358,77 @@ class VoiceAssistant:
         if not text.strip():
             return
         log.info(f"[text-input] {text}{' (silent)' if silent else ''}")
-        self._silent_turn = silent
         self.memory.add_turn("user", text)
         self.ws.send_message("user", text)
         # Submit to the MLX worker and return immediately; the response streams
         # back over the WebSocket. (Never touch MLX from this HTTP/WS thread.)
-        self._submit_turn(text, wait=False)
+        self._submit_turn(text, wait=False, silent=silent)
 
     # ═════════════════════════════════════════════════════════════════════════════
     # Core turn handler
     # ═════════════════════════════════════════════════════════════════════════════
     def _handle_turn_impl(self, text: str) -> None:
+        """One turn, timed and recorded (turnstats.py): which path answered it,
+        how long the decision took, how long until the first word. The record
+        is the evidence future routing work starts from, and what "why did you
+        do that?" is answered from. Nested calls (a corrected request routed
+        again, a confirmed read-back) are part of the outer turn."""
+        depth = getattr(self, "_turn_depth", 0)
+        self._turn_depth = depth + 1
+        if depth == 0:
+            self._turn_t0 = time.time()
+            self._last_active = self._turn_t0
+            self._turn_note = None
+            self._turn_first = None
+            self._turn_basis = None
+        try:
+            self._route_turn(text)
+        finally:
+            self._turn_depth = depth
+            if depth == 0:
+                self._record_turn(text)
+
+    def _note(self, path: str, skill: Optional[str] = None,
+              confidence: Optional[float] = None, matched: Optional[str] = None) -> None:
+        """Which path answered this turn. The first one to claim it wins."""
+        if getattr(self, "_turn_note", None) is None:
+            t0 = getattr(self, "_turn_t0", None)
+            self._turn_note = {"path": path, "skill": skill, "confidence": confidence,
+                               "matched": matched,
+                               "decide_ms": (time.time() - t0) * 1000 if t0 else None}
+
+    def _mark_first(self) -> None:
+        """The first word of this turn's answer is going out."""
+        if getattr(self, "_turn_first", None) is None and getattr(self, "_turn_t0", None):
+            self._turn_first = (time.time() - self._turn_t0) * 1000
+
+    def _record_turn(self, text: str) -> None:
+        note = getattr(self, "_turn_note", None) or {"path": "unknown"}
+        row = {"text": text.strip(), **note, "first_ms": getattr(self, "_turn_first", None)}
+        if note.get("path") != "explain":
+            self._last_turn = row
+            self._last_basis = getattr(self, "_turn_basis", None)
+        # "No, I meant ..." corrects the LAST reflex only while it is the last
+        # thing Nova did. It used to stay armed for 90 seconds through other
+        # turns, so "open safari", a question, then "that's wrong" about the
+        # ANSWER un-learned the safari example.
+        if note.get("path") not in ("reflex", "lesson", "explain"):
+            self._last_reflex = None
+        # A "did you mean" lives for exactly one answer: the turn after it.
+        # Anything an earlier stage answered (a sleep command, a pending file
+        # question) used to leave it armed for the next yes-shaped sentence.
+        if note.get("path") != "ask":
+            self._brain_offer = None
+        self._last_active = time.time()
+        try:
+            if getattr(self, "turnstats", None) is None:
+                from turnstats import TurnStats
+                self.turnstats = TurnStats(DATA_DIR / "nova_memory.db")
+            self.turnstats.record(row)
+        except Exception as exc:
+            log.warning(f"turn stats unavailable: {exc}")
+
+    def _route_turn(self, text: str) -> None:
         """Full pipeline for one user utterance. First match wins.
 
         Always runs on the ``nova-llm`` worker thread (via ``_submit_turn``) so
@@ -1223,6 +1438,7 @@ class VoiceAssistant:
         # ── 1. System commands ───────────────────────────────────────────────
         resp = self._handle_system_commands(text)
         if resp is not None:
+            self._note("system")
             self._respond(resp)
             return
 
@@ -1230,6 +1446,7 @@ class VoiceAssistant:
         # Armed by a power command. Only an explicit yes proceeds; ANYTHING
         # else cancels — we never power off the Mac on an ambiguous reply.
         if self._tool_confirm is not None:
+            self._note("pending")
             confirm = self._tool_confirm
             self._tool_confirm = None
             if re.match(r"^\s*(yes|yeah|yep|yup|do it|confirm|go ahead|please do)\b",
@@ -1248,9 +1465,11 @@ class VoiceAssistant:
             self._calendar_offer = None
             low = text.lower().strip()
             if re.match(r"^(ye(s|ah|p)|sure|please|ok|okay|go ahead|do it|yes\s+please)\b", low):
+                self._note("pending")
                 self._respond(offer())
                 return
             if re.match(r"^(no|nope|nah|no\s+thanks|that'?s\s+all|i'?m\s+good)\b", low):
+                self._note("pending")
                 self._respond(f"Alright, {self.config['user']['address_as']}.")
                 return
             # Otherwise: not a reply to the offer — fall through to normal routing.
@@ -1263,11 +1482,56 @@ class VoiceAssistant:
         if self.files.has_pending():
             resp = self.files.resolve_pending(text)
             if resp is not None:
+                self._note("pending")
                 if self.files.pending_offer is not None:
                     self._calendar_offer = self.files.pending_offer
                     self.files.pending_offer = None
                 self._respond(resp)
                 return
+
+        # ── 2b′. The brain's own questions and lessons ───────────────────────
+        # An answer to "did you mean X?", a correction of the last reflex
+        # ("no, I meant ..."), teaching or forgetting a phrase ("when I say
+        # lights out, mute the sound and lock my Mac"), and a taught phrase
+        # itself. All before routing, so none can be re-read as a new command.
+        try:
+            lesson = self._brain_lessons(text)
+        except Exception as exc:
+            # A failure in the brain's bookkeeping must cost the lesson, never
+            # the turn: it used to propagate and end the turn in silence.
+            log.warning(f"[brain] lessons failed, routing on: {exc}")
+            lesson = False
+        if lesson:
+            self._note("lesson")
+            return
+
+        # ── 2b″. "Why did you do that?" / "how often do you answer by yourself"
+        # Answered from the turn record (turnstats.py), never invented.
+        import turnstats
+        if turnstats.wants_explanation(text):
+            self._note("explain")
+            self._respond(turnstats.explain(getattr(self, "_last_turn", None), self.brain))
+            return
+        if turnstats.wants_report(text):
+            self._note("explain")
+            try:
+                if getattr(self, "turnstats", None) is None:
+                    self.turnstats = turnstats.TurnStats(DATA_DIR / "nova_memory.db")
+                stats = self.turnstats.summary()
+                learned = self.brain.learned() if self.brain is not None and self.brain.ready else []
+                self._respond(turnstats.report(stats, learned))
+            except Exception as exc:
+                log.warning(f"brain report failed: {exc}")
+                self._respond("I couldn't put that together just now.")
+            return
+
+        # ── 2b‴. World facts: receipts, disputes, the night-school report ────
+        # "How do you know that?" is answered from what the last answer
+        # actually rested on; "that's wrong" about a fact stops Nova trusting
+        # it; "what did you learn last night?" reads night school's record.
+        if self._world_lessons(text):
+            self._note("explain")
+            return
 
         # ── 2c. UI navigation ────────────────────────────────────────────────
         # "go home", "show me the menu", "go to finance". BEFORE calendar,
@@ -1279,7 +1543,8 @@ class VoiceAssistant:
         # fall straight through to conversation.
         view_intent = self.views.detect_intent(text)
         if view_intent is not None:
-            self._respond(self.views.handle(view_intent, text))
+            self._note("view")
+            self._run_view(view_intent, text)
             return
 
         # ── 2d. Actuation confirmation ────────────────────────────────────────
@@ -1288,124 +1553,76 @@ class VoiceAssistant:
         if self.actuation.pending is not None:
             resp = self.actuation.resolve_pending(text)
             if resp is not None:
+                self._note("pending")
                 self._respond(resp)
                 return
 
-        # ── 2e. Actuation ─────────────────────────────────────────────────────
-        # Typing and clicking, WORK MODE ONLY. Before tools, whose "open X" and
-        # "search X" rules would claim some of this phrasing.
-        act_intent = self.actuation.detect_intent(text)
-        if act_intent is not None:
-            self._respond(self.actuation.handle(act_intent, text))
+        # ── 2e-0. Arithmetic, percentages, tips, unit conversion ─────────────
+        # In CODE (mathskill.py, units.py — ported from JARVIS), never by the
+        # model: a wrong number sounds exactly like a right one. The parser
+        # accepts a sentence only when every word of it is part of the sum,
+        # so "set the volume to 50 percent" and "I have 2 kids" never land here.
+        if self._run_math(text):
             return
 
-        # ── 3. Calendar / reminders intents ──────────────────────────────────
-        # BEFORE memory + fast-path + tools: detection is strict (needs an
-        # unambiguous calendar word), and running it early stops the greedy
-        # memory-recall regex ("what's my X") from swallowing "what's my
-        # calendar today" and the tool regexes ("find X"/"open X") from
-        # grabbing calendar phrasing.
-        cal_intent = self.calendar.detect_intent(text)
-        if cal_intent is not None:
-            resp = self.calendar.handle(cal_intent, text)
-            # A read handler may arm a soft follow-up (e.g. read_rest_of_week).
-            followup = self.calendar.pending_intent
-            self.calendar.pending_intent = None
-            if followup:
-                self._calendar_offer = lambda fi=followup: self.calendar.handle(fi, "")
-            self._emit_panel(self.calendar)
-            self._respond(resp)
+        # ── 2e-0b. Standing watches ───────────────────────────────────────────
+        # "Tell me when my battery is charged" is a WATCH, not a question:
+        # stored, checked by a loop, said once through the single door
+        # (standing.py). Before the brain and the regex stages, both of which
+        # would read it as a battery question and answer with today's level.
+        st = getattr(self, "standing", None)
+        if st is not None:
+            try:
+                resp = st.handle(text)
+            except Exception as exc:
+                log.warning(f"[watch] failed, routing on: {exc}")
+                resp = None
+            if resp is not None:
+                self._note("watch")
+                self._respond(resp)
+                return
+
+        # ── 2e. THE BRAIN ─────────────────────────────────────────────────────
+        # A learned intent router (brain.py, skills.py). A confident match
+        # whose skill can extract its arguments runs directly — the same stage
+        # method the regex below would call, no LLM. Anything else falls to the
+        # regex command stages exactly as they were, which stay as the fallback
+        # until the brain has matched each of them on the corpus.
+        if self._brain_turn(text):
             return
 
-        # ── 4. Screen awareness ──────────────────────────────────────────────
-        # BEFORE files: "screen" is not a file stopword, so "read my screen"
-        # would otherwise become a file search for a document named "screen".
-        # Detection is strict — it needs an explicit screen phrase.
-        screen_intent = self.screen.detect_intent(text)
-        if screen_intent is not None:
-            self._respond(self.screen.handle(screen_intent, text))
+        # ── 2f-8. Regex command stages (the fallback) ────────────────────────
+        # Skipped only when the brain is CONFIDENT the sentence is
+        # conversation — as sure as it would need to be to act. The
+        # unsupported-action refusal below still runs either way.
+        if not self._brain_chat:
+            claim = self._regex_intent(text) if self._brain_fell_through else None
+            if self._regex_commands(text):
+                # Each stage notes itself BEFORE it answers (decide_ms used to
+                # include the whole spoken answer, and re-deriving the stage
+                # after the handler's side effects could name the wrong one).
+                # The brain fell through and a regex stage knew what this
+                # was: that is a lesson (brain.learn applies the bar).
+                if claim is not None:
+                    self._learn_from_regex(text, claim)
+                return
+
+        # ── 8-. A request at the END of something else ──────────────────────
+        # "You didn't close the brave browser, please close the brave browser"
+        # (his real turn) went to the LLM: the complaint in front hid the
+        # command from every anchored matcher. If what follows "please" / "can
+        # you" is itself something Nova does, do that — and only then.
+        if self._trailing_request(text):
             return
 
-        # ── 4b. Weather ───────────────────────────────────────────────────────
-        # BEFORE files and tools: "what's the weather" contains no file words,
-        # but "is it going to rain tomorrow" would otherwise fall through to
-        # the LLM, which would happily invent a forecast. Detection is strict:
-        # a weather word must appear, and an action verb rules it out.
-        weather_intent = self.weather.detect_intent(text)
-        if weather_intent is not None:
-            resp = self.weather.handle(text, weather_intent)
-            self._emit_panel(self.weather)
-            self._respond(resp)
-            return
-
-        # ── 4c. Market data ───────────────────────────────────────────────────
-        # AFTER weather (both answer "how's the X") and BEFORE files and tools,
-        # whose "find X" and "open X" rules would swallow "what's Apple stock
-        # at". Detection needs a finance word AND a resolvable subject, so
-        # "how are you doing" and "I had apple pie" fall straight through.
-        market_intent = self.market.detect_intent(text)
-        if market_intent is not None:
-            resp = self.market.handle(market_intent, text)
-            self._emit_panel(self.market)
-            self._respond(resp)
-            return
-
-        # ── 5. File management intents ───────────────────────────────────────
-        # BEFORE memory and tools. Tools' web-search rule ("find X") and app
-        # launch ("open X") would both swallow file phrasing, and memory recall
-        # ("what's my X") would answer "I don't have your resume stored yet".
-        # Detection is strict — it needs a file word AND a searchable name —
-        # so ordinary conversation still falls straight through.
-        file_intent = self.files.detect_intent(text)
-        if file_intent is not None:
-            resp = self.files.handle(file_intent, text)
-            if self.files.pending_offer is not None:
-                self._calendar_offer = self.files.pending_offer
-                self.files.pending_offer = None
-            self._emit_panel(self.files)
-            self._respond(resp)
-            return
-
-        # ── 6. Memory intents ────────────────────────────────────────────────
-        resp = self._handle_memory_intent(text)
-        if resp is not None:
-            self._respond(resp)
-            return
-
-        # ── 7. Fast-path intents ─────────────────────────────────────────────
-        resp = self._fast_path(text)
-        if resp is not None:
-            self._respond(resp)
-            return
-
-        # ── 8. Tool intents ──────────────────────────────────────────────────
-        resp = self.tools.match(text)
-        if resp is not None:
-            # A destructive tool (power) asks first and hands back the action
-            # to run only if the user confirms on the next turn.
-            self._tool_confirm = self.tools.pending_confirm
-            self.tools.pending_confirm = None
-            # A SOFT offer ("want me to pull up directions?") reuses the same
-            # one-shot slot as the calendar follow-up: yes runs it, anything
-            # else just drops it and routes normally.
-            if self.tools.pending_offer is not None:
-                self._calendar_offer = self.tools.pending_offer
-                self.tools.pending_offer = None
-            # She just did something on his Mac, so she steps aside into the
-            # corner — the second way into work mode, alongside asking for it.
-            if getattr(self.tools, "touched_mac", False):
-                self.tools.touched_mac = False
-                self.set_work_mode(True, reason="acted on the Mac")
-            # He asked what his CPU was doing: the number she just said should
-            # also be a number he can see, so the status row comes back for a
-            # while and then settles away on its own.
-            if getattr(self.tools, "showed_system", False):
-                self.tools.showed_system = False
-                try:
-                    self.views.recall_system()
-                except Exception as exc:
-                    log.warning(f"could not recall status row: {exc}")
-            self._respond(resp)
+        # ── 8a. "Did you mean ...?" ──────────────────────────────────────────
+        # Nothing claimed it, but the brain NEARLY knew: a skill ranked top
+        # with a raw similarity over brain.ask_threshold, and that skill's own
+        # slots can run the sentence. Asking costs one short question; the
+        # alternative is the LLM guessing, or "I can't do that" for something
+        # Nova can do. A yes runs it and teaches the brain (source=user); a no
+        # is remembered so the same wrong guess is never offered again.
+        if self._offer_brain_guess(text):
             return
 
         # ── 8b. Unsupported ACTION request ───────────────────────────────────
@@ -1417,13 +1634,28 @@ class VoiceAssistant:
         # replied "I've opened the coding projects folder for you." A system
         # prompt rule cut that from 4 cases to 1; only refusing deterministically
         # makes it zero.
-        if (_ACTION_REQUEST_RE.match(text) and not _HYPOTHETICAL_RE.search(text)):
+        if _is_unsupported_action(text):
+            self._note("unsupported")
             log.info(f"[unsupported-action] {text}")
             self._respond(
                 "I can't do that one yet. I'll tell you when I can, rather "
                 "than pretend I did it."
             )
             return
+
+        # ── 8c. World facts (Stage 3) ────────────────────────────────────────
+        # A general-knowledge question Nova has already verified is answered
+        # from the store in milliseconds. Otherwise it is looked up on
+        # Wikipedia (his choice; wiki.py) and the sentences that answer it go
+        # to the model as reference, so the answer rests on a source instead
+        # of a 3B's memory. After the turn, off the live path, the answer may
+        # become a stored fact (world_facts.consider decides).
+        ref = None
+        if self.facts is not None:
+            fact = self._world_fact(text)
+            if fact is not None:
+                return
+            ref = self._world_reference(text)
 
         # ── 9. RAG context enrichment ────────────────────────────────────────
         rag_ctx = ""
@@ -1434,8 +1666,772 @@ class VoiceAssistant:
                 pass
 
         # ── 10. LLM fallback (streaming) ──────────────────────────────────────
+        if ref is not None:
+            self._note("wiki")
+        else:
+            self._note("conversation" if self._brain_chat else "llm")
         self.set_state("thinking")
-        self._stream_response(text, rag_context=rag_ctx)
+        self._stream_response(text, rag_context=rag_ctx,
+                              reference=(ref or {}).get("context", ""))
+        if ref is not None:
+            self._world_consider(ref)
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # World facts and night school (Stage 3 of the brain port)
+    # ═════════════════════════════════════════════════════════════════════════════
+    _RELATION_WORDS = re.compile(
+        r"name|sister|brother|mother|father|mom|mum|dad|wife|husband|partner|girlfriend|"
+        r"boyfriend|fianc|friend|son|daughter|family|cousin|aunt|uncle|grand|niece|nephew|"
+        r"pet|dog|cat|parrot|bird|fish|horse|rabbit|hamster|boss|manager|coworker|colleague|"
+        r"roommate|neighbo|relationship|people|person|contact|kid|child|baby", re.I)
+
+    def _private_names(self) -> set:
+        """Names that must never be sent to Wikipedia: his own, and anyone or
+        anything he has told Nova about as a relation (his sister's name, his
+        dog's). Read fresh, so a fact learned today protects tonight."""
+        names = set()
+        u = self.config.get("user", {})
+        for v in (u.get("name"), u.get("address_as"), "Coppola"):
+            if v:
+                names.update(re.findall(r"[A-Za-z']{3,}", v))
+        try:
+            for f in self.memory.all_facts():
+                cat, key = str(f.get("category", "")), str(f.get("key", ""))
+                val = str(f.get("value", ""))
+                if cat == "note":
+                    # Free text: only capitalised words that are not the
+                    # sentence's first ("Sarah's birthday is in May").
+                    words = re.findall(r"[A-Za-z][A-Za-z'’]{2,}", val)
+                    names.update(w for w in words[1:] if w[0].isupper())
+                elif self._RELATION_WORDS.search(f"{cat} {key}"):
+                    # EVERY word of the value, in any case: the reconciler
+                    # stores "a parrot named kiwi" as relationship/parrot =
+                    # "Kiwi", and his sister as sister = "sarah" — neither was
+                    # collected (audit, 2026-11-19).
+                    names.update(re.findall(r"[A-Za-z][A-Za-z'’]{2,}", val))
+        except Exception as exc:
+            log.debug(f"facts: could not read names ({exc})")
+        return names
+
+    def _init_facts(self) -> None:
+        self.facts = None
+        cfg = self.config.get("facts", {})
+        if not cfg.get("enabled", True):
+            log.info("[facts] disabled in config: no Wikipedia lookups")
+            return
+        try:
+            from world_facts import WorldFacts
+            embedder = None
+            if self.brain is not None:
+                embedder = self.brain._get_embedder
+            else:
+                from brain import EMBED_MODEL, MODEL_DIR
+                _holder: dict = {}
+
+                def embedder():
+                    if "m" not in _holder:
+                        from fastembed import TextEmbedding
+                        _holder["m"] = TextEmbedding(EMBED_MODEL, cache_dir=str(MODEL_DIR),
+                                                     local_files_only=True)
+                    return _holder["m"]
+            self.facts = WorldFacts(DATA_DIR / "nova_memory.db", self.config,
+                                    embedder=embedder, names=self._private_names)
+        except Exception as exc:
+            log.warning(f"[facts] unavailable: {exc}")
+            self.facts = None
+
+    def _llm_generate(self, system: str, user: str, temperature: float = 0.0,
+                      max_tokens: int = 120) -> str:
+        """A blocking model call from anywhere: direct on the nova-llm thread
+        (MLX is thread-local), otherwise as a BACKGROUND job there, so a turn
+        he is waiting on always goes first."""
+        if threading.current_thread().name == "nova-llm":
+            return self.llm.generate(system_prompt=system, history=[], user_message=user,
+                                     temperature=temperature, max_tokens=max_tokens)
+        out: dict = {}
+
+        def job():
+            try:
+                out["v"] = self.llm.generate(system_prompt=system, history=[], user_message=user,
+                                             temperature=temperature, max_tokens=max_tokens)
+            except Exception as exc:
+                out["e"] = exc
+        self._submit_job(job, wait=True)
+        if "e" in out:
+            raise out["e"]
+        return out.get("v", "")
+
+    def _world_fact(self, text: str) -> Optional[dict]:
+        """Answer from the store, if it holds this exact fact."""
+        try:
+            fact = self.facts.lookup(text)
+        except Exception as exc:
+            log.warning(f"[facts] lookup failed, answering normally: {exc}")
+            return None
+        if fact is None:
+            return None
+        self._note("fact", confidence=fact.get("score"), matched=fact["question"])
+        self._turn_basis = self.facts.last
+        self._respond(fact["answer"])
+        return fact
+
+    def _world_reference(self, text: str) -> Optional[dict]:
+        """Look a general-knowledge question up. None unless it found
+        sentences that answer it; never raises, never delays a non-question."""
+        try:
+            ref = self.facts.reference(text)
+        except Exception as exc:
+            log.warning(f"[facts] reference failed, answering normally: {exc}")
+            return None
+        if not ref.get("ok"):
+            return None
+        log.info(f"[facts] looked up: {len(ref['sentences'])} sentence(s), best {ref['best']:.3f}")
+        self._turn_basis = self.facts.last
+        return ref
+
+    def _world_consider(self, ref: dict) -> None:
+        """After the answer: maybe store it. Background priority, so the next
+        thing he says jumps ahead of it."""
+        def job():
+            try:
+                self.facts.consider(ref, self._llm_generate, origin="asked")
+            except Exception as exc:
+                log.warning(f"[facts] intake failed: {exc}")
+        self._submit_job(job)
+
+    def _world_lessons(self, text: str) -> bool:
+        import world_facts as W
+        import night_school as N
+        if N.wants_report(text):
+            rep = self.night.last_report() if self.night is not None else None
+            label = (lambda s: self.brain.by_name[s].label
+                     if self.brain is not None and s in self.brain.by_name else s)
+            self._respond(N.spoken(rep, label))
+            return True
+        basis = getattr(self, "_last_basis", None)
+        last = getattr(self, "_last_turn", None) or {}
+        if W.wants_source(text):
+            said = W.receipt(basis)
+            if said is None and last.get("path") in ("llm", "conversation"):
+                said = ("I didn't look that one up. It came from what I already know, "
+                        "so I could be wrong.")
+            if said is None and last:
+                # After a command, "how do you know" means "why did you do
+                # that" — answered from the record, never left to the model.
+                import turnstats
+                said = turnstats.explain(last, self.brain)
+            if said is None:
+                return False
+            self._respond(said)
+            return True
+        if W.says_wrong(text) and basis and self.facts is not None \
+                and time.time() - basis.get("ts", 0) <= self.CORRECTION_WINDOW_S:
+            q = basis["fact"]["question"] if basis["how"] == "stored" else basis.get("question", "")
+            n = self.facts.dispute(q)
+            log.info(f"[facts] disputed {q!r} ({n} demoted)")
+            self._last_basis = None
+            self._respond("Thanks. I've stopped trusting that one, and I won't keep it.")
+            return True
+        return False
+
+    def _start_night_school(self) -> None:
+        self.night = None
+        if self.facts is None or not self.config.get("facts", {}).get("night_school", True):
+            return
+        try:
+            from night_school import NightSchool
+
+            def acts(p: str) -> bool:
+                b = self.brain
+                return bool(b is not None and b.ready and b.decide(p, va=self) is not None)
+
+            def learn(p: str, skill: str) -> bool:
+                out: dict = {}
+
+                def job():
+                    try:
+                        out["v"] = self.brain.learn(p, skill, source="night_school", va=self)
+                    except Exception as exc:
+                        log.warning(f"[night] learn failed: {exc}")
+                self._submit_job(job, wait=True)
+                return bool(out.get("v"))
+
+            def skill_for(t: str) -> Optional[str]:
+                from skills import skill_for_regex
+                stage, intent = self._regex_intent(t)
+                if stage in ("llm", "unsupported", None):
+                    return None
+                return skill_for_regex(self, t, stage, intent)
+
+            def on_power() -> Optional[bool]:
+                r = self.tools.battery_reading()
+                return None if r is None else bool(r.get("ac"))
+
+            here = lambda: time.time() - self._last_active < 120
+            self.night = NightSchool(
+                DATA_DIR / "nova_memory.db", self.config, self.facts, self._llm_generate,
+                here=here, learn=learn if self.brain is not None else None,
+                acts=acts, skill_for=skill_for, on_power=on_power)
+            self.night.start(idle_for=lambda: time.time() - self._last_active)
+        except Exception as exc:
+            log.warning(f"[night] not started: {exc}")
+            self.night = None
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Routing: the brain, and the regex stages behind it
+    # ═════════════════════════════════════════════════════════════════════════════
+    def _init_brain(self) -> None:
+        """The learned router. Loads in the background (the first run embeds
+        ~700 seeds, ~4s; later runs read them from nova_memory.db). Until it
+        is ready, and whenever it is disabled or fails, every turn takes the
+        regex chain exactly as before."""
+        self.brain = None
+        if not self.config.get("brain", {}).get("enabled", True):
+            log.info("[brain] disabled in config; regex routing only")
+            return
+        try:
+            from brain import Brain
+            from skills import SKILLS
+            self.brain = Brain(DATA_DIR / "nova_memory.db", SKILLS, self.config, va=self)
+            self.brain.load_background()
+        except Exception as exc:
+            log.warning(f"[brain] unavailable, regex routing only: {exc}")
+            self.brain = None
+
+    def _brain_turn(self, text: str) -> bool:
+        """Route through the brain. True if it handled the turn."""
+        # Per turn, never carried over: a stale verdict from the last turn must
+        # not skip the regex stages for this one (nor while loading).
+        self._brain_chat = False
+        self._brain_fell_through = False
+        b = self.brain
+        if b is None or not b.ready:
+            return False
+        t0 = time.time()
+        try:
+            d = b.decide(text, self)
+        except Exception as exc:
+            log.warning(f"[brain] decide failed, falling back: {exc}")
+            return False
+        ms = (time.time() - t0) * 1000
+        self._brain_chat = d is None and b.conversation
+        self._brain_fell_through = d is None and not b.conversation
+        if d is not None:
+            # What a correction ("no, I meant ...") would be correcting.
+            self._last_reflex = {"text": text, "skill": d.skill.name,
+                                 "match": dict(b.last_match or {}), "ts": time.time()}
+        m = b.last_match or {}
+        if self.config.get("brain", {}).get("log_disagreements", True):
+            regex = self._regex_route(text)
+            mine = d.skill.stage if d is not None else ("llm" if b.conversation else None)
+            if mine is not None and regex != mine:
+                log.info(f"[brain-disagree] {text!r}: brain {mine} "
+                         f"({m.get('skill')}@{m.get('confidence')}), regex {regex}")
+        if d is None:
+            log.info(f"[brain] {'conversation' if b.conversation else 'fallthrough'} "
+                     f"(top {m.get('skill')}@{m.get('confidence')}, "
+                     f"rival {m.get('rival')}, {ms:.0f}ms)")
+            return False
+        log.info(f"[brain] reflex {d.skill.name}@{d.confidence:.2f} {d.args} ({ms:.0f}ms)")
+        self._note("reflex", d.skill.name, d.confidence, m.get("text"))
+        try:
+            d.skill.run(self, text, d.args)
+        except Exception as exc:
+            # The skill's handler raised. Never cost him the turn: say so.
+            log.exception(f"[brain] {d.skill.name} failed: {exc}")
+            self._respond("Something went wrong doing that.")
+        return True
+
+    # ── Stage 2: learning, "did you mean", taught phrases, corrections ───────
+    _YES_RE = re.compile(r"^\s*(?:yes|yeah|yep|yup|sure|please|do it|go ahead|"
+                         r"that'?s right|correct|right|exactly|uh huh)\b", re.I)
+    _NO_RE = re.compile(r"^\s*(?:no|nope|nah|not that|wrong|neither)\b", re.I)
+    _MEANT_RE = re.compile(
+        r"^\s*(?:no|nope|nah|wrong|not that)\b[,.!]?\s*(?:,\s*)?"
+        r"(?:i\s+(?:meant|mean|said|wanted|asked(?:\s+for)?)|"
+        r"that'?s\s+not\s+what\s+i\s+(?:meant|said|asked(?:\s+for)?))\b[,:]?\s*(?P<rest>.*)$",
+        re.I)
+    _WRONG_RE = re.compile(
+        r"^\s*(?:no[,.!]?\s+)?(?:that'?s\s+(?:wrong|not\s+right|not\s+what\s+i\s+"
+        r"(?:meant|said|asked(?:\s+for)?))|wrong\s+one|that\s+was\s+wrong)[.!]*\s*$", re.I)
+    _TEACH_RE = re.compile(
+        r"^\s*(?:from\s+now\s+on[,\s]+)?when(?:ever)?\s+i\s+say\s+[\"']?(?P<rest>.+)$", re.I)
+    _FORGET_CMD_RE = re.compile(
+        r"^\s*(?:forget|delete|remove|stop\s+using)\s+(?:the\s+)?(?:phrase|command|"
+        r"shortcut)\s+[\"']?(?P<p>.+?)[\"']?[.!?]*\s*$"
+        r"|^\s*forget\s+what\s+(?:to\s+do|you\s+do|i\s+said)\s+when\s+i\s+say\s+"
+        r"[\"']?(?P<q>.+?)[\"']?[.!?]*\s*$", re.I)
+    _LIST_CMD_RE = re.compile(
+        r"^\s*what\s+(?:phrases|commands|shortcuts)\s+(?:have\s+i\s+taught\s+you|"
+        r"do\s+(?:you\s+know|i\s+have))\b", re.I)
+    CORRECTION_WINDOW_S = 90.0
+
+    def _brain_lessons(self, text: str) -> bool:
+        b = self.brain
+        if b is None or not b.ready:
+            self._brain_offer = None
+            return False
+        # An answer to "did you mean X?" — one shot: anything else drops it,
+        # and so does time. It used to wait forever: asked "did you mean lock
+        # your Mac?", he said "go to sleep", and hours later "right, what's on
+        # my calendar" matched yes and LOCKED HIS MAC (audit, 2026-11-19).
+        offer, self._brain_offer = self._brain_offer, None
+        if offer is not None and time.time() - offer.get("ts", 0) > self.CORRECTION_WINDOW_S:
+            offer = None
+        if offer is not None:
+            m = self._MEANT_RE.match(text)
+            if m:
+                b.reject(offer["text"], offer["skill"])
+                rest = m.group("rest").strip()
+                if rest:
+                    self._handle_turn_impl(rest)
+                else:
+                    self._respond("Okay. What did you mean?")
+                return True
+            if self._YES_RE.match(text):
+                sk = b.by_name.get(offer["skill"])
+                if sk is not None:
+                    b.learn(offer["text"], sk.name, source="user", va=self)
+                    log.info(f"[brain] confirmed: {offer['text']!r} -> {sk.name}")
+                    self._last_reflex = None      # he chose it; nothing to correct
+                    sk.run(self, offer["text"], offer["args"])
+                    return True
+            if self._NO_RE.match(text):
+                b.reject(offer["text"], offer["skill"])
+                self._respond("Okay.")
+                return True
+            # not an answer: route normally
+
+        # A correction of the last reflex. Not while an actuation question is
+        # open: "no, the other button" answers THAT question (stage 2d).
+        last = self._last_reflex
+        if last is not None and self.actuation.pending is None \
+                and time.time() - last["ts"] <= self.CORRECTION_WINDOW_S:
+            m = self._MEANT_RE.match(text)
+            if m or self._WRONG_RE.match(text):
+                self._last_reflex = None
+                b.reject(last["text"], last["skill"])
+                removed = b.unlearn(last["match"])
+                log.info(f"[brain] corrected: {last['text']!r} was not {last['skill']}"
+                         + (f" (unlearned the {removed} example)" if removed else ""))
+                rest = m.group("rest").strip() if m else ""
+                if rest:
+                    self._handle_turn_impl(rest)
+                else:
+                    self._respond("Sorry about that. What did you mean?")
+                return True
+
+        # Teaching, forgetting and listing taught phrases.
+        if self._LIST_CMD_RE.match(text):
+            cmds = b.commands()
+            if not cmds:
+                self._respond("You haven't taught me any phrases yet.")
+            else:
+                parts = [f"{c['phrase']}, which {self._steps_spoken(c['steps'])}"
+                         for c in cmds]
+                self._respond("You've taught me " + "; ".join(parts) + ".")
+            return True
+        m = self._FORGET_CMD_RE.match(text)
+        if m:
+            phrase = (m.group("p") or m.group("q") or "").strip()
+            if b.forget_command(phrase):
+                self._respond(f"Done. {phrase} doesn't do anything special any more.")
+            else:
+                self._respond(f"I don't have a phrase called {phrase}.")
+            return True
+        m = self._TEACH_RE.match(text)
+        if m:
+            said = self._teach_phrase(m.group("rest"))
+            # "when I say I'm tired, I mean it" is conversation, not a lesson:
+            # if nothing in it is something Nova can do, it is not claimed
+            # (it used to answer "I don't know how to I mean it yet").
+            if said is not None:
+                self._respond(said)
+                return True
+
+        # A taught phrase.
+        hit = b.match_command(text)
+        if hit is not None:
+            phrase, steps, sim = hit
+            log.info(f"[brain] taught phrase {phrase!r}@{sim:.2f}: {len(steps)} step(s)")
+            self._note("phrase", phrase, sim)
+            for step in steps:
+                self._run_step(step["text"])
+            return True
+        return False
+
+    def _teach_phrase(self, rest: str) -> Optional[str]:
+        """"lights out, mute the sound and lock my Mac" -> a stored phrase.
+
+        Every step must be something Nova can already do (the brain or a regex
+        stage claims it), and nothing high-consequence: a shortcut that could
+        shut the Mac down on a near-miss of a casual phrase is not worth having.
+        """
+        b = self.brain
+        m = re.match(r"(?P<phrase>.+?)[\"']?\s*(?:,|\s+then\s+|\s+do\s+|\s+you\s+should\s+|"
+                     r"\s+i\s+want\s+you\s+to\s+)\s*(?:please\s+)?(?P<steps>.+)$", rest.strip(), re.I)
+        if not m:
+            return ("Say it like this: when I say lights out, mute the sound and "
+                    "lock my Mac.")
+        phrase = m.group("phrase").strip().strip("\"'").strip()
+        raw_steps = [x.strip(" .!") for x in re.split(
+            r",\s*(?:and\s+)?(?:then\s+)?|\s+and\s+then\s+|\s+then\s+|\s+and\s+",
+            m.group("steps").strip(" .!")) if x.strip(" .!")]
+        if not phrase or not raw_steps:
+            return "I didn't catch what you want that phrase to do."
+        if len(raw_steps) > 6:
+            return "That's a lot of steps for one phrase. Try six or fewer."
+        steps = []
+        for st in raw_steps:
+            d = b.decide(st, self)
+            if d is not None:
+                if d.skill.tier == "high":
+                    return (f"I won't put {st} behind a shortcut. Things that can't "
+                            "be undone should always be asked for directly.")
+                steps.append({"text": st, "skill": d.skill.name})
+                continue
+            stage, intent = self._regex_intent(st)
+            if stage in ("llm", "unsupported") or stage.startswith("error"):
+                if not steps and len(raw_steps) == 1 and not _TEACH_CUE.search(rest) \
+                        and _NOT_AN_INSTRUCTION.match(st):
+                    return None          # "..., I mean it": not a lesson — route it normally
+                return f"I don't know how to {st} yet, so I didn't save that phrase."
+            import confidence as C
+            if C.consequence(st) == C.HIGH:
+                return (f"I won't put {st} behind a shortcut. Things that can't "
+                        "be undone should always be asked for directly.")
+            steps.append({"text": st, "skill": f"regex:{stage}"})
+        b.teach_command(phrase, steps)
+        return f"Got it. When you say {phrase}, I'll {self._steps_spoken(steps, verb=False)}."
+
+    def _steps_spoken(self, steps: list, verb: bool = True) -> str:
+        """Each step as Nova would SAY it: the skill's label ("check your
+        battery"), not his words — "I'll what's my battery at" was the first
+        version of this sentence."""
+        b = self.brain
+        texts = []
+        for st in steps:
+            sk = b.by_name.get(st.get("skill")) if b is not None else None
+            texts.append(sk.label if sk is not None and sk.label else st["text"])
+        joined = texts[0] if len(texts) == 1 else ", ".join(texts[:-1]) + " and " + texts[-1]
+        return ("will " + joined) if verb else joined
+
+    def _run_step(self, text: str) -> None:
+        """One step of a taught phrase: the brain if it is sure, else the regex
+        stages. Never the LLM — a step that nothing claims says so."""
+        b = self.brain
+        d = b.decide(text, self) if b is not None and b.ready else None
+        if d is not None:
+            d.skill.run(self, text, d.args)
+            return
+        # _teach_phrase accepts a step any stage of _regex_intent claims, and
+        # that includes views, arithmetic and watches, which live OUTSIDE
+        # _regex_commands — so "go home" behind a phrase answered "I couldn't
+        # go home" (audit, 2026-11-19). Run the same stages it checked.
+        view_intent = self.views.detect_intent(text)
+        if view_intent is not None:
+            self._run_view(view_intent, text)
+            return
+        if self._run_math(text):
+            return
+        st = getattr(self, "standing", None)
+        if st is not None:
+            resp = st.handle(text)
+            if resp is not None:
+                self._respond(resp)
+                return
+        if not self._regex_commands(text):
+            self._respond(f"I couldn't {text}.")
+
+    def _learn_from_regex(self, text: str, claim: tuple) -> None:
+        b = self.brain
+        if b is None or not b.ready:
+            return
+        try:
+            from skills import skill_for_regex
+            skill = skill_for_regex(self, text, claim[0], claim[1])
+            if skill and b.learn(text, skill, va=self):
+                log.info(f"[brain] learned from the {claim[0]} stage: {text!r} -> {skill}")
+        except Exception as exc:
+            log.warning(f"[brain] learning failed (turn unaffected): {exc}")
+
+    _TAIL_RE = re.compile(
+        r"(?P<lead>.*\w.*?)[,.;!]\s+(?:so\s+|now\s+|just\s+|and\s+)?(?:(?:can|could|would|will)\s+you\s+)?"
+        r"(?:please\s+)(?P<tail>\w.+?)[\s.!?]*$"
+        r"|(?P<lead2>.*\w.*?)[,.;!]\s+(?:so\s+|now\s+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?"
+        r"(?P<tail2>\w.+?)[\s.!?]*$", re.I)
+
+    def _trailing_request(self, text: str) -> bool:
+        if getattr(self, "_turn_depth", 1) > 1:
+            return False                     # never re-split a tail
+        m = self._TAIL_RE.match(text or "")
+        if not m:
+            return False
+        lead = (m.group("lead") or m.group("lead2") or "").strip()
+        tail = (m.group("tail") or m.group("tail2") or "").strip()
+        if len(lead.split()) < 2 or len(tail.split()) < 2:
+            return False
+        stage, _ = self._regex_intent(tail)
+        claimed = stage not in ("llm", "unsupported") and not stage.startswith("error")
+        if not claimed and self.brain is not None and self.brain.ready:
+            try:
+                claimed = self.brain.decide(tail, self) is not None
+            except Exception:
+                claimed = False
+        if not claimed:
+            return False
+        log.info(f"[tail] running the request at the end: {tail!r}")
+        self._handle_turn_impl(tail)
+        return True
+
+    def _offer_brain_guess(self, text: str) -> bool:
+        b = self.brain
+        if b is None or not b.ready or not b.unsure or not self._brain_fell_through:
+            return False
+        u = b.unsure
+        sk = b.by_name.get(u["skill"])
+        if sk is None or b.was_rejected(text, sk.name):
+            return False
+        label = sk.label or sk.name.split(".", 1)[-1].replace("_", " ")
+        self._brain_offer = {"text": text, "skill": sk.name, "args": u["args"],
+                             "ts": time.time()}
+        self._note("ask", sk.name, u.get("confidence"))
+        log.info(f"[brain] asking: did you mean {sk.name}? (top {u['top']}, "
+                 f"confidence {u['confidence']})")
+        self._respond(f"Did you mean {label}?")
+        return True
+
+    def _run_math(self, text: str) -> bool:
+        try:
+            import mathskill
+            r = mathskill.slots(text)
+        except Exception as exc:
+            log.warning(f"[math] parse failed, routing on: {exc}")
+            return False
+        if not r or not r.get("said"):
+            return False
+        log.info(f"[math] {r.get('expr')!r} = {r.get('value')}")
+        self._note("math")
+        self._respond(r["said"])
+        return True
+
+    def _regex_route(self, text: str) -> str:
+        """Which regex stage WOULD claim this, with no side effects."""
+        return self._regex_intent(text)[0]
+
+    def _regex_intent(self, text: str) -> tuple[str, Optional[str]]:
+        """(stage, intent) the regex chain WOULD give this, with no side
+        effects. Used to log disagreements — how the brain earns the removal
+        of a regex stage, or shows it has not — and as the TEACHER for
+        learning (skills.skill_for_regex maps it to a skill)."""
+        try:
+            import mathskill
+            import standing
+            if mathskill.slots(text):
+                return "math", None
+            if standing.claims(text):
+                return "watch", None
+            for stage, det in (("view", self.views.detect_intent),
+                               ("actuation", self.actuation.detect_intent),
+                               ("calendar", self.calendar.detect_intent),
+                               ("screen", self.screen.detect_intent),
+                               ("weather", self.weather.detect_intent),
+                               ("market", self.market.detect_intent),
+                               ("files", self.files.detect_intent)):
+                got = det(text)
+                if got is not None:
+                    return stage, got
+            if self._memory_would_claim(text):
+                return "memory", None
+            if self._fast_path(text) is not None:
+                return "fastpath", None
+            got = self.tools.detect(text)
+            if got is not None:
+                return "tools", got
+            if _is_unsupported_action(text):
+                return "unsupported", None
+        except Exception as exc:
+            return f"error:{exc}", None
+        return "llm", None
+
+    def _memory_would_claim(self, text: str) -> bool:
+        """_handle_memory_intent's verdict WITHOUT its writes (it saves and
+        forgets as it matches, like tools.match did)."""
+        if self._SAVE_RE.search(text) or self._NOTE_SAVE_RE.match(text) \
+                or self._UPDATE_RE.search(text) or self._FORGET_RE.search(text) \
+                or self._NOTE_FORGET_RE.match(text):
+            return True
+        m = self._RECALL_RE.search(text)
+        if m:
+            key = m.group(1).strip()
+            if self.memory.find_fact(key):
+                return True
+            return not (self._is_system_query(key) or self.tools.detect(text) is not None)
+        return any(p in text.lower() for p in self._META_RECALL)
+
+    def _regex_commands(self, text: str) -> bool:
+        """Stages 2f-8: the regex chain as it was, behind the brain. True if
+        a stage claimed the turn."""
+        # ── 2f. Actuation ─────────────────────────────────────────────────────
+        # Typing and clicking, WORK MODE ONLY. Before tools, whose "open X" and
+        # "search X" rules would claim some of this phrasing.
+        act_intent = self.actuation.detect_intent(text)
+        if act_intent is not None:
+            self._note("regex:actuation")
+            self._run_actuation(act_intent, text)
+            return True
+
+        # ── 3. Calendar / reminders intents ──────────────────────────────────
+        # BEFORE memory + fast-path + tools: detection is strict (needs an
+        # unambiguous calendar word), and running it early stops the greedy
+        # memory-recall regex ("what's my X") from swallowing "what's my
+        # calendar today" and the tool regexes ("find X"/"open X") from
+        # grabbing calendar phrasing.
+        cal_intent = self.calendar.detect_intent(text)
+        if cal_intent is not None:
+            self._note("regex:calendar")
+            self._run_calendar(cal_intent, text)
+            return True
+
+        # ── 4. Screen awareness ──────────────────────────────────────────────
+        # BEFORE files: "screen" is not a file stopword, so "read my screen"
+        # would otherwise become a file search for a document named "screen".
+        # Detection is strict — it needs an explicit screen phrase.
+        screen_intent = self.screen.detect_intent(text)
+        if screen_intent is not None:
+            self._note("regex:screen")
+            self._run_screen(screen_intent, text)
+            return True
+
+        # ── 4b. Weather ───────────────────────────────────────────────────────
+        # BEFORE files and tools: "what's the weather" contains no file words,
+        # but "is it going to rain tomorrow" would otherwise fall through to
+        # the LLM, which would happily invent a forecast. Detection is strict:
+        # a weather word must appear, and an action verb rules it out.
+        weather_intent = self.weather.detect_intent(text)
+        if weather_intent is not None:
+            self._note("regex:weather")
+            self._run_weather(weather_intent, text)
+            return True
+
+        # ── 4c. Market data ───────────────────────────────────────────────────
+        # AFTER weather (both answer "how's the X") and BEFORE files and tools,
+        # whose "find X" and "open X" rules would swallow "what's Apple stock
+        # at". Detection needs a finance word AND a resolvable subject, so
+        # "how are you doing" and "I had apple pie" fall straight through.
+        market_intent = self.market.detect_intent(text)
+        if market_intent is not None:
+            self._note("regex:market")
+            self._run_market(market_intent, text)
+            return True
+
+        # ── 5. File management intents ───────────────────────────────────────
+        # BEFORE memory and tools. Tools' web-search rule ("find X") and app
+        # launch ("open X") would both swallow file phrasing, and memory recall
+        # ("what's my X") would answer "I don't have your resume stored yet".
+        # Detection is strict — it needs a file word AND a searchable name —
+        # so ordinary conversation still falls straight through.
+        file_intent = self.files.detect_intent(text)
+        if file_intent is not None:
+            self._note("regex:files")
+            self._run_files(file_intent, text)
+            return True
+
+        # ── 6. Memory intents ────────────────────────────────────────────────
+        resp = self._handle_memory_intent(text)
+        if resp is not None:
+            self._note("regex:memory")
+            self._respond(resp)
+            return True
+
+        # ── 7. Fast-path intents ─────────────────────────────────────────────
+        resp = self._fast_path(text)
+        if resp is not None:
+            self._note("regex:fastpath")
+            self._respond(resp)
+            return True
+
+        # ── 8. Tool intents ──────────────────────────────────────────────────
+        resp = self.tools.match(text)
+        if resp is not None:
+            self._note("regex:tools")
+            self._finish_tool(resp)
+            return True
+
+        return False
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Stage runners — ONE code path per handler
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Each is what a routing stage does once it has decided the utterance is
+    # its own. The regex chain calls them after detect_intent; the brain's
+    # skills (skills.py) call the SAME methods after classifying. Two copies of
+    # "what happens after a calendar read" would drift — the follow-up offer,
+    # the panel, work mode — and the drift would only show up in use.
+    def _run_view(self, intent: str, text: str) -> None:
+        self._respond(self.views.handle(intent, text))
+
+    def _run_actuation(self, intent: str, text: str) -> None:
+        self._respond(self.actuation.handle(intent, text))
+
+    def _run_calendar(self, intent: str, text: str) -> None:
+        resp = self.calendar.handle(intent, text)
+        # A read handler may arm a soft follow-up (e.g. read_rest_of_week).
+        followup = self.calendar.pending_intent
+        self.calendar.pending_intent = None
+        if followup:
+            self._calendar_offer = lambda fi=followup: self.calendar.handle(fi, "")
+        self._emit_panel(self.calendar)
+        self._respond(resp)
+
+    def _run_screen(self, intent: str, text: str) -> None:
+        self._respond(self.screen.handle(intent, text))
+
+    def _run_weather(self, intent: str, text: str) -> None:
+        resp = self.weather.handle(text, intent)
+        self._emit_panel(self.weather)
+        self._respond(resp)
+
+    def _run_market(self, intent: str, text: str) -> None:
+        resp = self.market.handle(intent, text)
+        self._emit_panel(self.market)
+        self._respond(resp)
+
+    def _run_files(self, intent: str, text: str) -> None:
+        resp = self.files.handle(intent, text)
+        if self.files.pending_offer is not None:
+            self._calendar_offer = self.files.pending_offer
+            self.files.pending_offer = None
+        self._emit_panel(self.files)
+        self._respond(resp)
+
+    def _finish_tool(self, resp: str) -> None:
+        """Everything that follows a tool answering, whoever routed to it."""
+        # A destructive tool (power) asks first and hands back the action
+        # to run only if the user confirms on the next turn.
+        self._tool_confirm = self.tools.pending_confirm
+        self.tools.pending_confirm = None
+        # A SOFT offer ("want me to pull up directions?") reuses the same
+        # one-shot slot as the calendar follow-up: yes runs it, anything
+        # else just drops it and routes normally.
+        if self.tools.pending_offer is not None:
+            self._calendar_offer = self.tools.pending_offer
+            self.tools.pending_offer = None
+        # She just did something on his Mac, so she steps aside into the
+        # corner — the second way into work mode, alongside asking for it.
+        if getattr(self.tools, "touched_mac", False):
+            self.tools.touched_mac = False
+            self.set_work_mode(True, reason="acted on the Mac")
+        # He asked what his CPU was doing: the number she just said should
+        # also be a number he can see, so the status row comes back for a
+        # while and then settles away on its own.
+        if getattr(self.tools, "showed_system", False):
+            self.tools.showed_system = False
+            try:
+                self.views.recall_system()
+            except Exception as exc:
+                log.warning(f"could not recall status row: {exc}")
+        self._respond(resp)
 
     # ── Unprompted announcements (timers) ─────────────────────────────────────────
     def _announce(self, text: str) -> None:
@@ -1497,6 +2493,7 @@ class VoiceAssistant:
         text = text.strip()
         if not text:
             return
+        self._mark_first()
         self._last_response = text
         self._begin_conversation()
         self.memory.add_turn("assistant", text)
@@ -1642,14 +2639,31 @@ class VoiceAssistant:
     # ═════════════════════════════════════════════════════════════════════════════
     # Memory intents
     # ═════════════════════════════════════════════════════════════════════════════
-    _SAVE_RE    = re.compile(r"remember (?:that )?my ([\w][\w ]*?) is (.+)", re.I)
+    # [\w' ] not [\w ]: "my sister's name" has an apostrophe, and without it
+    # the save regex failed, the sentence fell to the LLM, and the LLM said
+    # "got it" for a fact nothing stored (found 2026-11-19).
+    _SAVE_RE    = re.compile(r"remember (?:that )?my ([\w][\w' ]*?) is (.+)", re.I)
     # "who's my favorite superhero" missed entirely and fell to the LLM, which
     # invented an answer ("Deadpool") for a fact Nova was supposed to know.
     # People ask about people with WHO, and about things with WHAT.
     _RECALL_RE  = re.compile(
-        r"(?:what|who)(?:'?s| is|'?re| are)\s+my\s+([\w][\w ]*?)[\s.?!]*$", re.I)
-    _UPDATE_RE  = re.compile(r"actually (?:my ([\w][\w ]*?) is |it'?s )(.+)", re.I)
-    _FORGET_RE  = re.compile(r"forget (?:that )?my ([\w][\w ]*?)$", re.I)
+        r"(?:what|who)(?:'?s| is|'?re| are)\s+my\s+([\w][\w' ]*?)[\s.?!]*$", re.I)
+    _UPDATE_RE  = re.compile(r"actually (?:my ([\w][\w' ]*?) is |it'?s )(.+)", re.I)
+    _FORGET_RE  = re.compile(r"forget (?:that )?my ([\w][\w' ]*?)[\s.?!]*$", re.I)
+    _META_RECALL = ("what do you know about me", "what do you remember",
+                    "what have i told you")
+    # Free-form notes: "remember that I like tea". Anchored at the start, and
+    # the things "remember ..." also introduces are excluded: a reminder
+    # ("remember to call mom" is the calendar's), a question ("remember when
+    # we...", "remember what I said"), and a bare pointer ("remember that").
+    _NOTE_SAVE_RE = re.compile(
+        r"^\s*(?:please\s+)?(?:remember|keep in mind)\s+(?:that\s+)?"
+        r"(?!(?:to|when|what|who|where|how|why|if|whether|me|this|it)\b)"
+        r"(?!that\s*[.?!]*$)(.{3,}?)[\s.?!]*$", re.I)
+    _NOTE_FORGET_RE = re.compile(
+        r"^\s*(?:please\s+)?forget\s+(?:that\s+|about\s+)?"
+        r"(?!(?:it|about it|everything|this|me)\b)(?!that\s*[.?!]*$)(.{3,}?)[\s.?!]*$",
+        re.I)
 
     # Explicit user-directed memory commands store under the 'explicit' category,
     # source='explicit', so they supersede by canonical key and sit alongside the
@@ -1690,6 +2704,15 @@ class VoiceAssistant:
             self._remember_fact(key, value)
             return f"Got it. I'll remember your {key} is {value}."
 
+        # Save a free-form note — "remember that I like tea". After the
+        # structured form, so "remember that my X is Y" keeps its key.
+        m = self._NOTE_SAVE_RE.match(text)
+        if m:
+            from memory import to_second_person
+            stored = self.memory.add_note(m.group(1))
+            if stored:
+                return f"Got it. I'll remember that {to_second_person(stored)}."
+
         # Recall — "what's my X" (searches EVERY category, not just 'explicit')
         m = self._RECALL_RE.search(text)
         if m:
@@ -1699,7 +2722,13 @@ class VoiceAssistant:
                 return f"Your {key} is {found[1]}."
             # Nothing stored. If this reads as a system question, fall through so
             # Tools can answer it; otherwise say honestly that it isn't stored.
-            if self._is_system_query(key):
+            # "what's my memory usage" answered "I don't have your memory
+            # usage stored yet": the word list below never knew "memory" or
+            # "usage", and the routing harness hid it by asking tools FIRST
+            # (the pipeline asks memory first). Asking tools itself — a dry
+            # run, nothing happens — cannot drift out of step with what tools
+            # can actually answer.
+            if self._is_system_query(key) or self.tools.detect(text) is not None:
                 return None
             return f"I don't have your {key} stored yet."
 
@@ -1727,9 +2756,16 @@ class VoiceAssistant:
                 return f"Done. I've forgotten your {key}."
             return f"I don't have your {key} stored, {name}."
 
+        # Forget a free-form note — "forget that I put my resume in Downloads"
+        m = self._NOTE_FORGET_RE.match(text)
+        if m:
+            if self.memory.forget_note(m.group(1)):
+                return "Done. I've forgotten that."
+            return f"I don't have that stored, {name}."
+
         # Meta-recall — "what do you know about me"
         low = text.lower()
-        if any(p in low for p in ("what do you know about me", "what do you remember", "what have i told you")):
+        if any(p in low for p in self._META_RECALL):
             facts = self.memory.facts_for_readback()
             if not facts:
                 return f"I don't have anything stored about you yet, {name}."
@@ -1773,7 +2809,8 @@ class VoiceAssistant:
     _TTS_CLAUSE_END = re.compile(r"[,;:](?=\s)")
     _TTS_FIRST_CHUNK_MIN_WORDS = 4
 
-    def _stream_response(self, user_text: str, rag_context: str = "") -> None:
+    def _stream_response(self, user_text: str, rag_context: str = "",
+                         reference: str = "") -> None:
         """
         Stream LLM tokens to the UI and speak sentences AS they complete, so
         Nova starts talking on sentence 1 while it's still generating the rest
@@ -1785,7 +2822,7 @@ class VoiceAssistant:
         path — an instant, code-free rollback if playback ever starves.
         """
         memory_ctx    = self.memory.get_context_for_llm()
-        system_prompt = self._build_system_prompt(memory_ctx, rag_context)
+        system_prompt = self._build_system_prompt(memory_ctx, rag_context, reference)
         history       = self.memory.get_recent_turns(n=10)
         stream_tts    = self.config["tts"].get("stream_while_generating", True)
         split_first   = self.config["tts"].get("split_first_clause", True)
@@ -1793,10 +2830,22 @@ class VoiceAssistant:
         full_response = ""
         pending       = ""            # tokens not yet emitted as a full sentence
         state         = {"spoke": False}
+        # Nova's LLM runs no tools, so a sentence promising to watch, remind or
+        # follow up — or claiming it already set/opened/sent something — is
+        # never true here (honesty.py). Checked per sentence BEFORE it is
+        # spoken, so the streaming overlap is untouched.
+        import honesty
+        honest = honesty.Filter() if self.config["llm"].get("honesty_filter", True) \
+            else (lambda x: x)
+        # Typed in, typed back — on this path too. _respond always honoured
+        # _silent_turn; this one spoke every LLM answer aloud, so a question
+        # he TYPED because he couldn't talk was read out through his speakers.
+        silent = bool(getattr(self, "_silent_turn", False))
 
         def _emit(text: str) -> None:
+            text = honest(text)
             text = _clean_for_tts(text)
-            if not text:
+            if not text or silent:
                 return
             if not state["spoke"]:
                 self.set_state("speaking")   # first audio → flip orb to speaking
@@ -1832,6 +2881,8 @@ class VoiceAssistant:
 
         def on_token(token: str) -> None:
             nonlocal full_response, pending
+            if not full_response:
+                self._mark_first()
             full_response += token
             self.ws.stream_token(token)   # UI shows text live
             if stream_tts:
@@ -1850,13 +2901,19 @@ class VoiceAssistant:
             _flush(force=True)            # speak the trailing partial sentence
         else:
             # Blocking fallback: whole reply generated, now speak it back-to-back.
-            self.set_state("speaking")
             for sentence in self._SENT_SPLIT.split(full_response.strip()):
                 s = sentence.strip()
                 if s:
-                    self.tts.speak(_clean_for_tts(s))
+                    _emit(s)
 
         self.tts.wait_until_done(timeout=60)
+
+        if getattr(honest, "replaced", None):
+            for said, truth in honest.replaced:
+                log.info(f"[honesty] replaced {said!r}")
+            # What is stored and shown is what she SAID, not what the model
+            # wrote: a promise kept in history would be repeated next turn.
+            full_response = honest.text
 
         self._last_response = full_response
         self._begin_conversation()
@@ -1869,9 +2926,10 @@ class VoiceAssistant:
 
         self.set_state("idle")
 
-    def _build_system_prompt(self, memory_ctx: str, rag_ctx: str) -> str:
+    def _build_system_prompt(self, memory_ctx: str, rag_ctx: str, reference: str = "") -> str:
         from system_prompt import build_system_prompt
-        return build_system_prompt(self.config, memory_context=memory_ctx, rag_context=rag_ctx)
+        return build_system_prompt(self.config, memory_context=memory_ctx, rag_context=rag_ctx,
+                                   reference_context=reference)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────────

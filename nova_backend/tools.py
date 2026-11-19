@@ -41,7 +41,7 @@ import ctypes
 import ctypes.util
 import logging
 import re
-import subprocess
+import subprocess as _subprocess
 import threading
 import time
 import urllib.parse
@@ -49,6 +49,94 @@ from pathlib import Path
 from typing import Callable, Optional
 
 log = logging.getLogger("nova.tools")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DETECT WITHOUT DOING
+# ═══════════════════════════════════════════════════════════════════════════════
+# `match()` decides AND acts in one pass: probing routing with "open spotify"
+# used to launch Spotify (tests/test_routing_corpus.py says so). The brain needs
+# to ask "would tools claim this?" — to log where it and the regex chain
+# disagree, and to score itself — without anything happening on his Mac.
+#
+# So `detect()` runs the very same `match()` in DRY mode. The regexes, alias
+# lookups and installed-app scan all run for real; the first thing that would
+# reach OUTSIDE this process (a subprocess, the browser, MapKit, Spotify's web
+# API, a timer thread) raises _Claimed instead. Every branch of match() that
+# reaches that point has already decided the utterance is its own, so being
+# stopped there IS the verdict. This is one decision procedure, not a second
+# hand-copied one that could drift from it.
+#
+# Dry mode is THREAD-LOCAL: the home tiles refresh tool readings on their own
+# threads while a turn is being routed, and they must keep working.
+_DRY = threading.local()
+
+
+class _Claimed(Exception):
+    """Raised in dry mode where match() would have acted."""
+    def __init__(self, what: str) -> None:
+        super().__init__(what)
+        self.what = what
+
+
+def _dry() -> bool:
+    return bool(getattr(_DRY, "active", False))
+
+
+def _external(what: str) -> None:
+    """Call at the top of anything that acts outside the process."""
+    if _dry():
+        raise _Claimed(what)
+
+
+class _GuardedSubprocess:
+    """`subprocess` for this module, with a dry-mode tripwire on run/Popen.
+
+    The safety net under the explicit _external() calls: anything in here
+    that shells out — osascript, open, pmset, top — trips it, including paths
+    nobody remembered to mark.
+    """
+    def __getattr__(self, name):
+        return getattr(_subprocess, name)
+
+    def run(self, *a, **k):
+        _external("subprocess")
+        return _subprocess.run(*a, **k)
+
+    def Popen(self, *a, **k):
+        _external("subprocess")
+        return _subprocess.Popen(*a, **k)
+
+
+subprocess = _GuardedSubprocess()
+
+
+class _GuardedModule:
+    """A module whose functions ACT (browser_control, maps_engine). In dry mode
+    every callable trips the wire except the named pure resolvers."""
+    def __init__(self, mod, pure: frozenset) -> None:
+        self._mod, self._pure = mod, pure
+
+    def __getattr__(self, name):
+        attr = getattr(self._mod, name)
+        if callable(attr) and name not in self._pure and _dry():
+            def _trip(*a, **k):
+                raise _Claimed(f"{self._mod.__name__}.{name}")
+            return _trip
+        return attr
+
+
+# Pure lookups: string/URL resolution with no I/O (checked: browser_control's
+# site_search and resolve_target only consult SITES and build URLs).
+_BC_PURE = frozenset({"site_search", "resolve_target"})
+
+
+def _guarded(modname: str):
+    import importlib
+    mod = importlib.import_module(modname)
+    if not _dry():
+        return mod
+    return _GuardedModule(mod, _BC_PURE if modname == "browser_control" else frozenset())
 
 # Spoken number words we accept in durations ("give me two minutes").
 _NUM_WORDS = {
@@ -98,6 +186,7 @@ _APP_ALIASES: dict[str, str] = {
     "zoom": "zoom.us", "system preferences": "System Settings",
     "settings": "System Settings", "preferences": "System Settings",
     "imessage": "Messages", "text messages": "Messages",
+    "eye message": "Messages", "i message": "Messages",   # how Whisper hears it
     "apple music": "Music", "face time": "FaceTime",
     "app store": "App Store", "appstore": "App Store",
     "activity monitor": "Activity Monitor", "task manager": "Activity Monitor",
@@ -110,7 +199,8 @@ _APP_ALIASES: dict[str, str] = {
 class NovaTools:
     def __init__(self, config: dict,
                  on_announce: Optional[Callable[[str], None]] = None,
-                 on_progress: Optional[Callable[[dict], None]] = None) -> None:
+                 on_progress: Optional[Callable[[dict], None]] = None,
+                 on_activity: Optional[Callable[[str, bool], None]] = None) -> None:
         self.config = config
         # Called by a timer/short-reminder when it fires. nova.py supplies a
         # callback that speaks safely (never on top of an in-flight response).
@@ -118,6 +208,10 @@ class NovaTools:
         # Pushes a live step list to the screen while a handler works. None in
         # the routing harness, where Progress simply becomes a no-op.
         self._on_progress = on_progress
+        # Writes one line to the history when a run ends. Separate from
+        # on_progress because the live list and the log answer different
+        # questions and have different lifetimes.
+        self._on_activity = on_activity
         # True when this turn actually manipulated his Mac (launched an app,
         # drove the browser). nova.py reads it to park Nova in the corner, so
         # she gets out of the way of whatever she just opened. One-shot.
@@ -150,9 +244,49 @@ class NovaTools:
     # ═══════════════════════════════════════════════════════════════════════
     # Dispatch
     # ═══════════════════════════════════════════════════════════════════════
+    def detect(self, text: str) -> Optional[str]:
+        """Would match() claim this utterance? Returns what it would do (a
+        short label, e.g. "subprocess" or "browser_control.open_url" or
+        "reply"), or None. NOTHING happens: see "DETECT WITHOUT DOING" above.
+
+        State match() touches on the way is put back afterwards, so a detect
+        can never arm a confirmation or move Nova into work mode.
+        """
+        saved = (self.pending_confirm, self.pending_offer,
+                 getattr(self, "touched_mac", False),
+                 getattr(self, "showed_system", False))
+        _DRY.active = True
+        try:
+            return "reply" if self.match(text) is not None else None
+        except _Claimed as c:
+            return c.what
+        finally:
+            _DRY.active = False
+            (self.pending_confirm, self.pending_offer,
+             self.touched_mac, self.showed_system) = saved
+
     def match(self, text: str) -> Optional[str]:
         """Return a response string if the text matches a tool intent, else None."""
         low = text.lower().strip()
+        # Whisper writes his pauses as commas: "Nova, open, brave, browser." and
+        # "Close, brave." were refused as unsupported actions because every
+        # verb pattern here expects whitespace after the verb. A comma carries
+        # nothing these patterns read, so it becomes a space; a leading wake
+        # word goes too (typed text and the corpus never pass through
+        # _strip_wake_prefix). Digits keep theirs ("1,000").
+        low = re.sub(r"^(?:hey\s+)?nova\b[,.!]?\s*", "", low)
+        low = re.sub(r"(?<!\d),|,(?!\d)", " ", low)
+        low = re.sub(r"\s+", " ", low).strip()
+        # A trailing courtesy is not part of the app name: "open spotify
+        # please" was refused as an unsupported action, because the launch
+        # rule tried to open an app called "spotify please".
+        for _ in range(2):
+            low = re.sub(r"[\s,]+(?:please|for me|right now|now|thanks|thank you|nova)[.!?]*$",
+                         "", low).strip()
+        # A reading is a REQUEST: "my battery died yesterday" read his battery,
+        # "what does a CPU actually do" read his CPU (shape.py).
+        import shape
+        reading_ok = shape.reads(low)
         self.pending_confirm = None
         self.pending_offer = None
 
@@ -162,8 +296,12 @@ class NovaTools:
             return self._request_power(m.group(1))
 
         # ── 2. Lock screen ──────────────────────────────────────────────────
-        if re.search(r"\block\s+(?:the\s+)?(?:screen|mac|computer|laptop)\b", low) \
-           or re.search(r"\block\s+it\s+up\b", low):
+        # The request itself, at the head of the sentence: "I forgot to lock
+        # my computer yesterday" and "how do I lock my screen" locked it
+        # (audit, 2026-11-19 — "my" had just been allowed).
+        if re.search(r"^\s*(?:(?:please|can\s+you|could\s+you|go\s+ahead\s+and|now)\s+)*"
+                     r"lock\s+(?:the\s+|my\s+|this\s+)?(?:screen|mac|macbook|computer|laptop)\b", low) \
+           or re.search(r"^\s*(?:please\s+)?lock\s+it\s+up\b", low):
             return self._lock_screen()
 
         # ── 3. Timers / short in-process reminders ──────────────────────────
@@ -218,6 +356,13 @@ class NovaTools:
         # it fall through to the music section rather than moving system audio.
         # "the volume of work is insane" is not a request. The word has to be
         # paired with something to DO to it, or a question about it.
+        # "turn the sound down" says the same thing as "volume down".
+        low_v = re.sub(r"\b(turn|crank|bring)\s+(up|down)\s+the\s+(?:sound|audio)\b",
+                       r"\1 the volume \2", low)
+        low_v = re.sub(r"\b(turn|crank|bring)\s+the\s+(?:sound|audio)\s+(up|down)\b",
+                       r"\1 the volume \2", low_v)
+        if low_v != low:
+            low = low_v
         if "volume" in low and not re.search(r"\b(music|spotify|song|track)\b", low) \
            and re.search(r"\b(?:up|down|louder|quieter|softer|increase|raise|"
                          r"decrease|lower|max|full|mute|off|silent|set|what|"
@@ -238,7 +383,8 @@ class NovaTools:
             return self._volume_query()
 
         # ── 7. Battery ──────────────────────────────────────────────────────
-        if any(p in low for p in ("battery", "how much charge", "power level", "how charged")):
+        if reading_ok and any(p in low for p in ("battery", "how much charge",
+                                                 "power level", "how charged")):
             return self._battery_status()
 
         # ── 8. System stats ─────────────────────────────────────────────────
@@ -246,11 +392,11 @@ class NovaTools:
         # terrible these days", "in memory of my grandfather", "I need more
         # space in my closet" and "we should give the team some space" — all
         # answered with a system stat.
-        if self._MEMORY_STAT_RE.search(low) and not re.search(r"\bremember\b", low):
+        if reading_ok and self._MEMORY_STAT_RE.search(low) and not re.search(r"\bremember\b", low):
             return self._memory_status()
-        if re.search(r"\bcpu\b|\bprocessor\s+usage\b", low):
+        if reading_ok and re.search(r"\bcpu\b|\bprocessor\s+usage\b", low):
             return self._cpu_status()
-        if self._DISK_STAT_RE.search(low):
+        if reading_ok and self._DISK_STAT_RE.search(low):
             return self._disk_status()
         if re.search(r"\bsystem\s+stats?\b|\bhow.*\b(mac|computer)\b.*\bdoing\b", low):
             return self._all_stats()
@@ -432,6 +578,7 @@ class NovaTools:
         return f"{secs} second" + ("s" if secs != 1 else "")
 
     def _start_timer(self, phrase: str, kind: str, source: str) -> str:
+        _external("timer")
         secs = self.parse_duration(phrase)
         if secs is None:
             return ("How long would you like? Try something like "
@@ -475,6 +622,7 @@ class NovaTools:
         return f"Timer set for {spoken}."
 
     def _cancel_timers(self) -> str:
+        _external("timer")
         with self._lock:
             if not self._timers:
                 return "You don't have any timers running."
@@ -525,6 +673,7 @@ class NovaTools:
         permission (osascript still exits 0, so we must verify by re-reading).
         The optional `brightness` CLI (brew install brightness) does work.
         """
+        _external("brightness")
         before = self._brightness_read()
         if target is not None and _which("brightness"):
             subprocess.run(["brightness", str(round(target, 2))], capture_output=True)
@@ -591,11 +740,13 @@ class NovaTools:
         return f"Volume is at {vol} percent."
 
     def _volume_set(self, level: int) -> str:
+        _external("volume")
         level = max(0, min(100, level))
         subprocess.run(["osascript", "-e", f"set volume output volume {level}"], check=False)
         return "Volume off." if level == 0 else f"Volume set to {level}."
 
     def _volume_adjust(self, delta: int) -> str:
+        _external("volume")
         cur, _ = self._volume_read()
         if cur is None:
             return "I couldn't read the volume."
@@ -604,6 +755,7 @@ class NovaTools:
         return f"Volume {'up' if delta > 0 else 'down'} to {new}."
 
     def _mute_audio(self, mute: bool) -> str:
+        _external("volume")
         subprocess.run(
             ["osascript", "-e", f"set volume output muted {'true' if mute else 'false'}"],
             check=False,
@@ -632,7 +784,17 @@ class NovaTools:
                 return None
             level = int(m.group(1))
             ac = "AC Power" in out
-            return {"level": level, "ac": ac, "charging": ac and level < 100}
+            st = re.search(r"\d+%;\s*([^;]+);", out)
+            state = (st.group(1).strip().lower() if st else "")
+            # "AC attached; not charging" is macOS Optimized Battery Charging
+            # (or a battery-health limit) HOLDING the level — often at 80 —
+            # on purpose. A "tell me when it's fully charged" watch must know,
+            # or it waits for a 100 that never comes.
+            held = ac and ("not charging" in out.lower() or state in ("ac attached",)) \
+                and level < 100
+            charging = state in ("charging", "finishing charge") or (ac and level < 100 and not held)
+            return {"level": level, "ac": ac, "charging": charging, "held": held,
+                    "state": state}
         except Exception as e:
             log.warning(f"battery read failed: {e}")
             return None
@@ -754,7 +916,13 @@ class NovaTools:
             return "I couldn't read the battery level."
         level = b["level"]
         if b["ac"]:
-            status = "and charging" if level < 100 else "and fully charged"
+            if level >= 100:
+                status = "and fully charged"
+            elif b.get("held"):
+                # Not "charging": Optimized Battery Charging is holding it.
+                status = "plugged in, and macOS is holding it there to protect the battery"
+            else:
+                status = "and charging"
         elif level > 20:
             status = "on battery"
         else:
@@ -874,6 +1042,20 @@ class NovaTools:
             cls._app_index = index
         return cls._app_index
 
+    def app_named(self, raw: str) -> Optional[str]:
+        """The app this EXACTLY names (an alias or a whole installed name),
+        never a partial match: file_intents asks it whether "open notes" means
+        the Notes app, and a partial ("report" in "Crash Reporter") must never
+        take a file request away from the file stage."""
+        clean = re.sub(r"[^\w\s.]", "", raw or "").strip().lower()
+        clean = re.sub(r"^(?:the|a|an|my)\s+", "", clean)
+        clean = re.sub(r"\s+(?:app|application)$", "", clean).strip()
+        if not clean:
+            return None
+        if clean in _APP_ALIASES:
+            return _APP_ALIASES[clean]
+        return self._installed_apps().get(clean)
+
     def _resolve_app(self, raw: str) -> Optional[str]:
         """Spoken name -> exact app name. alias → exact → unique partial.
 
@@ -935,6 +1117,15 @@ class NovaTools:
         activated, so Nova said "Opening Brave" while nothing happened.
         """
         resolved = self._resolve_app(name)
+        if _dry():
+            # The live path tries `open -a` on an UNRESOLVED name too and
+            # claims only if macOS finds it. Asking macOS would launch it, so
+            # dry mode claims exactly the names that resolve against what is
+            # installed (the index scans /Applications, /System/Applications,
+            # Utilities and ~/Applications — where `open -a` looks).
+            if resolved:
+                raise _Claimed("open_app")
+            return None
         target = resolved or name.title()
         was_running = self._app_running(target)
         # Opening an app is Nova acting on his machine, which is what puts her
@@ -994,6 +1185,7 @@ class NovaTools:
         resolved = self._resolve_app(name)
         if not resolved:
             return None
+        _external("quit_app")
         running = subprocess.run(["pgrep", "-x", resolved], capture_output=True).returncode == 0
         if not running:
             # Some bundles run under a different process name; ask System Events.
@@ -1036,7 +1228,7 @@ class NovaTools:
     # Browser control
     # ═══════════════════════════════════════════════════════════════════════
     def _match_browser(self, low: str) -> Optional[str]:
-        import browser_control as bc
+        bc = _guarded("browser_control")
 
         # ── page/tab state ──────────────────────────────────────────────
         if re.search(r"\b(what|which)\s+(page|site|website)\b.*\b(am\s+i|is\s+this)\b", low) \
@@ -1090,6 +1282,39 @@ class NovaTools:
                 return bc.scroll("bottom")
             return bc.scroll("up" if re.search(r"\bup\b", low) else "down")
 
+        # ── tickets ─────────────────────────────────────────────────────
+        # "find me, tickets to Spider-Man brand new day" (his real turn) went
+        # to the LLM. Fandango's search takes the title (URL checked).
+        m = re.match(r"^(?:find|get|look\s+up|search\s+for|show)(?:\s+me)?\s+(?:some\s+)?"
+                     r"(?:movie\s+)?tickets?\s+(?:to|for)\s+(?:see\s+)?(.+?)[?.!]*$", low)
+        if m:
+            hit = bc.site_search("fandango", m.group(1).strip())
+            if hit:
+                url, label = hit
+                bc.open_url(url, label)
+                return f"Searching Fandango for tickets to {m.group(1).strip()}."
+
+        # ── a title ON a named site ─────────────────────────────────────
+        # "Pull up Spider-Man No Way Home in Disney Plus" (his real turn) went
+        # to the LLM. A site with a known search goes there; one without (Disney
+        # Plus's search pages 404 to an outside link, checked) gets a real web
+        # search for the title and the site, read back like any other.
+        m = re.match(r"^(?:pull\s+up|bring\s+up|find|look\s+up|show\s+me|watch|put\s+on|open|"
+                     r"search\s+for|look\s+for)\s+(?:me\s+)?(.+?)\s+(?:in|on)\s+(?:the\s+)?"
+                     r"([\w .]+?)(?:\s+app)?[?.!]*$", low)
+        if m:
+            title, where = m.group(1).strip(), m.group(2).strip()
+            key = re.sub(r"\.(com|org|net)$", "", where)
+            if (key in bc.SITES or key in bc._SITE_SEARCH) \
+                    and key not in ("spotify", "maps", "google maps", "apple") \
+                    and title not in ("it", "that", "this", "something"):
+                hit = bc.site_search(key, title)
+                if hit:
+                    url, label = hit
+                    bc.open_url(url, label)
+                    return f"Searching {label} for {title}."
+                return self._web_search(f"{title} {bc.DISPLAY.get(key, key.title())}")
+
         # ── search WITHIN a site ────────────────────────────────────────
         # "search amazon for spider-man" means Amazon's own search, not a
         # Google search for the words "amazon for spider-man".
@@ -1118,11 +1343,20 @@ class NovaTools:
             q = re.sub(r"[?.!,]+$", "", m.group(1).strip())
             if q and q not in _FOLDERS:
                 url, label = bc.resolve_target(q)
-                resp = bc.open_url(url, label)
-                # "Searching for X" reads better aloud than "Opening a search for X".
-                if resp.startswith("Opening") and label.startswith("a search"):
-                    return f"Searching for {q}."
-                return resp
+                # A NAMED SITE goes straight there; a plain query goes to the
+                # real search, which reads the results back.
+                #
+                # This block used to open the URL and say "Searching for X" —
+                # the behaviour _web_search was written to replace. Because
+                # _match_browser runs first, that made the reading path dead
+                # code for every phrasing that reaches here, which is most of
+                # them: "search the web for X" was answered without Nova ever
+                # looking at the page, with no step list and nothing in the
+                # history. The regex stays (it is the anchored one that keeps
+                # "job search" out); only the destination changes.
+                if label.startswith("a search"):
+                    return self._web_search(q)
+                return bc.open_url(url, label)
 
         # ── navigate to a site ──────────────────────────────────────────
         m = (re.search(r"\b(?:go\s+to|pull\s+up|bring\s+up|visit|browse\s+to)\s+(.+)", low)
@@ -1131,6 +1365,7 @@ class NovaTools:
         if m:
             target = re.sub(r"[?.!,]+$", "", m.group(1).strip())
             target = re.sub(r"^(?:the|a|an|my)\s+", "", target)
+            target = bc._IN_BROWSER.sub("", target).strip()
             plain = re.sub(r"\s+(?:folder|directory)$", "", target).strip()
             # Folders and real apps are NOT websites — let those routes win.
             if plain in _FOLDERS or self._resolve_app(target):
@@ -1179,19 +1414,23 @@ class NovaTools:
             for i, w in enumerate(words))
 
     def _match_maps(self, low: str) -> Optional[str]:
-        import maps_engine
+        maps_engine = _guarded("maps_engine")
 
         # ── Distance / travel time, spoken (does NOT open Maps) ─────────
         # Checked BEFORE navigation: "how long would it TAKE ME TO get to the
         # nearest CVS" contains the words "take me to", which would otherwise
         # be swallowed by the navigation pattern below.
-        m = (re.search(r"\bhow\s+long\s+(?:would\s+it\s+)?(?:take\s+)?(?:me\s+)?(?:to\s+)?"
+        # "will it take FOR me to" is how he said it (Aug 2026), and it matched
+        # nothing: the LLM told him it didn't know where he was.
+        m = (re.search(r"\bhow\s+long\s+(?:would\s+|will\s+|does\s+)?(?:it\s+)?(?:take\s+)?"
+                       r"(?:for\s+)?(?:me\s+)?(?:to\s+)?"
                        r"(?:get\s+to|drive\s+to|walk\s+to|reach)\s+(.+)", low)
              or re.search(r"\bhow\s+(?:long|far)\s+(?:is\s+it\s+)?(?:to|from\s+here\s+to)\s+(.+)", low)
              or re.search(r"\bhow\s+far\s+(?:away\s+)?is\s+(.+)", low)
-             or re.search(r"\b(?:where|how\s+close)\s+is\s+the\s+nearest\s+(.+)", low)
-             or re.search(r"\bnearest\s+(.+?)(?:\s+from\s+here)?$", low))
-        if m:
+             or re.search(r"\b(?:where|how\s+close)\s+is\s+the\s+(?:nearest|closest)\s+(.+)", low)
+             or re.search(r"\b(?:where'?s)\s+the\s+(?:nearest|closest)\s+(.+)", low)
+             or re.search(r"\b(?:nearest|closest)\s+(.+?)(?:\s+from\s+here)?$", low))
+        if m and not self._not_a_trip(m.group(1)):
             return self._maps_eta(low, m.group(1))
 
         # ── Navigation: open Maps with the destination ──────────────────
@@ -1213,12 +1452,33 @@ class NovaTools:
 
         return None
 
+    # "How far is X" is a trip from HIM only when X is somewhere he could go.
+    # A distance between two other places ("chicago from new york", "the moon
+    # from earth") or to something in the sky is a general-knowledge question:
+    # it belongs to the world-fact stage, and sending it to MapKit as a search
+    # near his location measured nonsense and leaked where he was for nothing.
+    _SKY = re.compile(r"^(?:the\s+)?(?:(?:nearest|closest)\s+)?(?:moon|sun|mars|venus|mercury|jupiter|"
+                      r"saturn|uranus|neptune|pluto|earth|planets?|stars?|galax(?:y|ies)|"
+                      r"black\s+holes?|alpha\s+centauri|proxima(?:\s+centauri)?|asteroids?|"
+                      r"comets?|nebula|constellation|milky\s+way|andromeda|horizon|space|"
+                      r"outer\s+space|universe|iss|international\s+space\s+station)\b", re.I)
+    # "X from Y" / "X to Y" where Y is not him: a distance between two other
+    # things — "chicago from new york", "closest planet to the sun", "closest
+    # country to australia" (audit, 2026-11-19).
+    _FROM_ELSEWHERE = re.compile(r"\b(?:from|to)\s+(?!here\b|my\s+(?:location|place|house|home)\b|"
+                                 r"me\b|us\b|where\s+i\s+am\b)\S", re.I)
+
+    def _not_a_trip(self, raw_place: str) -> bool:
+        p = (raw_place or "").strip()
+        return bool(self._SKY.search(p) or self._FROM_ELSEWHERE.search(p))
+
     def _maps_eta(self, low: str, raw_place: str) -> Optional[str]:
         """Speak how far/long away a place is, then offer directions."""
         import maps_engine
         place = self._clean_place(re.sub(r"^(?:the\s+)?nearest\s+", "", raw_place))
         if not place:
             return None
+        _external("maps_engine.nearest")
         mode = self._travel_mode(low)
 
         res = maps_engine.nearest(place, mode=mode)
@@ -1433,6 +1693,8 @@ class NovaTools:
 
         # ── what's playing ──────────────────────────────────────────────
         if re.search(r"\bwhat(?:'?s| is)\s+(?:currently\s+)?playing\b", low) \
+           or re.search(r"^\s*is\s+(?:there\s+)?(?:any\s+|some\s+)?(?:music|anything|something|a\s+song)"
+                        r"\s+(?:currently\s+)?(?:playing|on)(?:\s+(?:right\s+)?now)?\s*$", low) \
            or re.search(r"\bwhat\s+song\s+is\s+(?:this|playing)\b", low) \
            or re.search(r"\bwho\s+(?:sings|is\s+singing)\s+this\b", low) \
            or re.search(r"\bname\s+of\s+(?:this|the)\s+song\b", low):
@@ -1548,7 +1810,18 @@ class NovaTools:
             return f"Repeat {word}." if ok else "I couldn't change repeat."
 
         # ── music volume (the PLAYER's own volume, not system audio) ─────
-        if re.search(r"\b(music|spotify|song)\b", low) and "volume" in low:
+        # "turn the music down" never says "volume", and fell through to the
+        # LLM. A turn/make verb with a direction is the same request.
+        # The verb must GOVERN the music: "I want to make a song about growing
+        # up" and "bring up the song lyrics" changed his volume (audit).
+        _MV = (r"^\s*(?:(?:please|can\s+you|could\s+you)\s+)?(?:turn|crank|make|bring)\s+"
+               r"(?:(?:up|down)\s+)?(?:the\s+|my\s+|this\s+)?(?:music|spotify|song)\b"
+               r"(?:\s+(?:up|down|louder|quieter|softer|a\s+(?:bit|little)\s+(?:up|down|louder|quieter)))?")
+        mvm = re.search(_MV, low)
+        directed = bool(mvm and re.search(r"\b(?:up|down|louder|quieter|softer)\b", mvm.group(0)))
+        if re.search(r"\b(music|spotify|song)\b", low) and (
+                re.search(r"\b(?:music|spotify|song)\s+volume\b|\bvolume\s+(?:of|on)\s+(?:the\s+)?"
+                          r"(?:music|spotify|song)\b", low) or directed):
             app = self._running_player()
             if not app:
                 return self._no_player()
@@ -1683,7 +1956,8 @@ class NovaTools:
     # Playback mode, as a command rather than a word in a sentence.
     _SHUFFLE_RE = re.compile(
         r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
-        r"(?:(?:turn|switch)\s+(?:on|off)\s+)?"
+        # "turn repeat on" as well as "turn on repeat" (2026-11-19).
+        r"(?:(?:turn|switch)\s+(?:(?:on|off)\s+)?)?"
         r"(shuffle|repeat|loop)\b"
         r"(?:\s+(?:mode|on|off|this|it|the\s+(?:song|track|album|playlist)))?"
         r"\s*[.?!]*\s*$"
@@ -1895,6 +2169,7 @@ class NovaTools:
                 "Pick one and I can take it from there.")
 
     def _play_named(self, query: str, prefer=None) -> str:
+        _external("spotify_search")
         import spotify_search
 
         if not spotify_search.is_configured():
@@ -1977,6 +2252,7 @@ class NovaTools:
         return r.returncode == 0
 
     def _minimize(self, target: str, minimize: bool) -> Optional[str]:
+        _external("minimize")
         verb = "Minimized" if minimize else "Restored"
         target = re.sub(r"\b(window|windows|app|application)s?\b", "", target).strip()
 
@@ -2072,6 +2348,7 @@ class NovaTools:
         spoken answer is templated from titles here, in Python, the same way
         every other number and fact she speaks is.
         """
+        _external("web_search")
         import panels as P
         self.touched_mac = True
         url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
@@ -2085,7 +2362,8 @@ class NovaTools:
 
         prog = P.Progress(self._on_progress, "Searching the web",
                           ["Opening the browser", "Loading the page",
-                           "Reading the results"], detail=query)
+                           "Reading the results"], detail=query,
+                          on_done=self._log_activity("Searched the web for"))
         prog.start()
 
         opened = B.open_url(url, f"a search for {query}", new_tab=True)
@@ -2106,6 +2384,13 @@ class NovaTools:
             [{"title": r["title"][:90], "meta": r["host"]} for r in results[:6]],
             title="What's on the page"))
         return self._speak_results(query, results)
+
+    def _log_activity(self, prefix: str, kind: str = "browser"):
+        """A closure that writes one history line when a run ends."""
+        def done(summary: str, failed: bool) -> None:
+            if self._on_activity:
+                self._on_activity(f"{prefix} {summary}".strip(), failed, kind)
+        return done
 
     @staticmethod
     def _speak_results(query: str, results: list) -> str:

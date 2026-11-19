@@ -86,6 +86,27 @@ _SILENT_FRAMES_TO_ALARM  = int(5000 / FRAME_MS)
 # after the wake word this buffer is the only thing protecting his first word.
 PRE_ROLL_MS_DEFAULT      = 480
 
+# How much CONSECUTIVE live speech means Nicholas has actually started talking,
+# as opposed to the VAD twitching on a fan or a keystroke.
+#
+# ONE 30ms frame used to be enough, which switched the cutoff from the 2s
+# post-wake grace to the ordinary 700ms. From his own log: wake word at
+# 17:53:15, capture closed and transcribing at 17:53:16, and it held nothing
+# but the wake word.
+#
+# A RUN, not a total — scattered blips over a two second wait add up to a
+# quarter second of "speech" without him having said anything. Measured with
+# the real webrtcvad at his aggressiveness: 3s of room noise gives a longest
+# run of 0-90ms across five loudness levels, while the real spoken command
+# gives 960ms and even its first 250ms gives 240ms. 150 sits in that gap with
+# room on both sides. An earlier 90 sat exactly ON the noise ceiling and let a
+# capture of pure noise through.
+#
+# The same number decides both things it can decide, because they are the same
+# question: has he started? If not, the grace still applies — and if the whole
+# capture went by without one, he said the wake word and nothing else.
+_LIVE_ONSET_MS   = 150
+
 
 class STTEngine:
     def __init__(self, config: dict, mic_gate: Optional[threading.Event] = None,
@@ -579,9 +600,10 @@ class STTEngine:
         total_ms    = 0
         speaking    = False
         # Speech heard on LIVE audio, as opposed to the wake word replayed from
-        # the pre-wake buffer. Until this is non-zero, Nicholas has said the
-        # wake word and not yet started his command.
-        live_speech_ms = 0
+        # the pre-wake buffer. Until he has actually started, Nicholas has said
+        # the wake word and nothing else.
+        live_run_ms    = 0      # the CURRENT consecutive run
+        he_started     = False  # latched once a run reaches _LIVE_ONSET_MS
         pre_roll: "collections.deque[bytes]" = collections.deque(
             maxlen=self._pre_roll_frames)
         hard_cap_ms = int(max_duration_s * 1000) if max_duration_s else MAX_RECORDING_MS
@@ -594,6 +616,7 @@ class STTEngine:
             for i in range(0, len(raw) - FRAME_BYTES + 1, FRAME_BYTES):
                 priming.append(raw[i:i + FRAME_BYTES])
         processing_priming = bool(priming)
+        had_priming = processing_priming
 
         # Deadline for the user to START speaking (conversation-mode timeout).
         start_deadline = (time.time() + start_timeout_s) if start_timeout_s else None
@@ -609,6 +632,16 @@ class STTEngine:
             else:
                 if processing_priming:
                     processing_priming = False
+                    # The grace starts HERE, not part-spent.
+                    #
+                    # silence_ms kept counting through the replayed pre-wake
+                    # buffer, so by the time live audio arrived a chunk of his
+                    # window was already gone — silence BEFORE the wake word is
+                    # not him finishing, it is him not having started. Measured
+                    # in his log: the capture was 3.0s long and closed under a
+                    # second after the wake word fired.
+                    silence_ms = 0
+                    live_run_ms = 0
                 try:
                     frame = self._audio_q.get(timeout=0.2)
                 except queue.Empty:
@@ -637,7 +670,9 @@ class STTEngine:
                 speech_ms += FRAME_MS
                 total_ms  += FRAME_MS
                 if not processing_priming:
-                    live_speech_ms += FRAME_MS
+                    live_run_ms += FRAME_MS
+                    if live_run_ms >= _LIVE_ONSET_MS:
+                        he_started = True
             elif speaking:
                 buf        += frame
                 silence_ms += FRAME_MS
@@ -646,7 +681,8 @@ class STTEngine:
                 # inside the priming buffer is just the gap between "Nova" and the
                 # command, not the end of the utterance.
                 if not processing_priming:
-                    if live_speech_ms == 0:
+                    live_run_ms = 0        # the run is broken; onset must re-earn it
+                    if not he_started:
                         # The wake word is already in the buffer, so `speaking`
                         # is True before Nicholas has said anything else — and
                         # the short cutoff then ended the capture 700ms later.
@@ -677,6 +713,29 @@ class STTEngine:
                     "detecting silence — end-of-speech detection is not working. "
                     "Every turn will feel slow until this is fixed.")
                 break
+
+        # One line per post-wake capture, so the next time something feels
+        # wrong the log says which half it was. The failure this replaced was
+        # invisible from the outside: "listening" then "processing" a second
+        # later, with nothing to say whether Nova stopped early or he really
+        # had not spoken.
+        if had_priming:
+            log.info(f"[capture] {total_ms}ms held, "
+                     f"{'he started' if he_started else 'NOTHING after the wake word'}"
+                     f", {silence_ms}ms of trailing silence "
+                     f"(grace {self._post_wake_grace_ms}ms)")
+
+        # He said the wake word and nothing after it.
+        #
+        # Handing this on means handing Whisper a couple of seconds of room
+        # noise with "Nova" in it, and it does not reliably come back empty —
+        # it comes back with something, which strips to a phrase he never said
+        # and goes to the LLM. Nova answering a question nobody asked is worse
+        # than Nova going quietly back to waiting.
+        if had_priming and not he_started:
+            log.info("Heard the wake word and nothing after it — still waiting.")
+            self.last_capture_reason = "wake_only"
+            return None
 
         audio = np.frombuffer(buf, dtype=np.int16)
         if len(audio) == 0:

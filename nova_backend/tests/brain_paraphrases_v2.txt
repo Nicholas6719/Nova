@@ -1,0 +1,126 @@
+# SEALED held-out set v2 — written 2026-11-19 AFTER the first brain scoring and
+# BEFORE seeds were widened, and not scored until the widening was finished.
+#
+# Why a second set: brain_paraphrases.txt was scored while the seeds were being
+# built, so its failures were SEEN. Widening seeds after seeing them is tuning
+# to the test, however careful. This file is the one nobody looked at, so its
+# number is the honest answer to "does the brain generalise?"
+#
+# Same format and labels as adversarial_phrases.txt. Never edited to pass.
+
+# calendar
+do I have plans tonight  ==>  calendar
+how busy am I tomorrow  ==>  calendar
+what's happening on my calendar this weekend  ==>  calendar
+when is my next appointment  ==>  calendar
+read me today's schedule  ==>  calendar
+what's left on my reminders list  ==>  calendar
+schedule a call with the plumber tomorrow at 10  ==>  calendar
+make a reminder to water the plants  ==>  calendar
+cancel my lunch event  ==>  calendar
+check off the laundry reminder  ==>  calendar
+
+# weather
+what's the high today  ==>  weather
+is it windy out  ==>  weather
+is it going to be sunny tomorrow  ==>  weather
+how warm is it right now  ==>  weather
+what's the weather looking like this week  ==>  weather
+will I need a coat tonight  ==>  weather
+what's the temperature in Seattle  ==>  weather
+
+# market
+what's Apple trading at today  ==>  market
+how are Nvidia shares doing  ==>  market
+how's the S&P doing today  ==>  market
+what's the stock price of Netflix  ==>  market
+what's the analyst consensus on Amazon  ==>  market
+
+# files
+find my passport scan  ==>  files
+where's the PDF of my lease  ==>  files
+open my budget spreadsheet  ==>  files
+show me what's in Downloads  ==>  files
+move the meeting notes to the projects folder  ==>  files
+summarize the project proposal document  ==>  files
+
+# screen
+what's on the screen right now  ==>  screen
+what does this window say  ==>  screen
+tell me what app I have open in front  ==>  screen
+read the error on my screen  ==>  screen
+
+# memory
+remember that my mom's birthday is March 3rd  ==>  memory
+what's my dog's name  ==>  memory
+remember that I hate cilantro  ==>  memory
+forget that I hate cilantro  ==>  memory
+what do you remember about me  ==>  memory
+
+# fastpath
+hey Nova  ==>  fastpath
+good afternoon  ==>  fastpath
+what's the time right now  ==>  fastpath
+what's the date today Nova  ==>  fastpath
+say that one more time  ==>  fastpath
+
+# tools
+what's my battery percentage  ==>  tools
+how much free memory do I have  ==>  tools
+how much space do I have on my drive  ==>  tools
+what's eating my cpu  ==>  tools
+turn the sound up  ==>  tools
+make it quieter  ==>  tools
+set the volume to half  ==>  tools
+mute the volume  ==>  tools
+make the display dimmer  ==>  tools
+open Xcode please  ==>  tools
+launch Spotify  ==>  tools
+quit Safari  ==>  tools
+play some music for me  ==>  tools
+pause the track  ==>  tools
+skip ahead to the next song  ==>  tools
+what's this track called  ==>  tools
+play Bohemian Rhapsody  ==>  tools
+turn shuffle on  ==>  tools
+look up the score of the Celtics game  ==>  tools
+search the web for vegan recipes  ==>  tools
+go back to the previous page  ==>  tools
+close this browser tab  ==>  tools
+how far is the nearest Starbucks  ==>  tools
+how long does it take to walk to the library  ==>  tools
+set a 20 minute timer  ==>  tools
+how much time is left on my timer  ==>  tools
+lock the screen now  ==>  tools
+
+# view
+go to the home screen  ==>  view
+show me the main menu  ==>  view
+take me to the calendar screen  ==>  view
+open the system panel  ==>  view
+let's work  ==>  view
+hide everything on the home screen  ==>  view
+bring the cards back  ==>  view
+move the weather card to the top right  ==>  view
+
+# llm
+I'm so tired today  ==>  llm
+what's the tallest mountain in the world  ==>  llm
+can you help me write an email to my boss  ==>  llm
+I love this song  ==>  llm
+my battery died on the way to work  ==>  llm
+I need to clean my desktop at home  ==>  llm
+what's the weather like on Mars  ==>  llm
+I'm thinking of buying Tesla stock  ==>  llm
+the home team won last night  ==>  llm
+tell me about the history of Rome  ==>  llm
+how do I make pancakes  ==>  llm
+I forgot my lunch at home  ==>  llm
+do you remember what we talked about yesterday  ==>  llm
+what should I name my dog  ==>  llm
+my screen cracked yesterday  ==>  llm
+what's the best music app  ==>  llm
+I should probably go to bed soon  ==>  llm
+play it by ear  ==>  llm
+open up to me about your day  ==>  llm
+what's your opinion on electric cars  ==>  llm

@@ -27,7 +27,10 @@ enum AwarenessStage: Equatable {
     case idle
     case suggesting(String)
     case checking
-    case done(String)
+    /// `ok` is false when Nova came back unable to do the thing she offered.
+    /// A refusal under a green checkmark reads as a success at a glance, which
+    /// is the one thing a result line must never do.
+    case done(String, ok: Bool)
 }
 
 struct HomeScreen: View {
@@ -248,11 +251,12 @@ struct HomeScreen: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.55))
             }
-        case .done(let result):
+        case .done(let result, let ok):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "checkmark")
+                Image(systemName: ok ? "checkmark" : "exclamationmark")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(NovaDesign.positive.opacity(0.85))
+                    .foregroundStyle((ok ? NovaDesign.positive
+                                         : NovaDesign.negative).opacity(0.85))
                 Text(result)
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.7))
