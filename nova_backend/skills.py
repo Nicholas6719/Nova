@@ -515,6 +515,8 @@ def _file_slots(default: str):
         import file_intents as F
         if not _file_guard(text):
             return None
+        if va.files.names_an_app(text):          # "open notes" is the Notes app
+            return None
         t = (text or "").lower().strip()
         intent = _intent_or(va.files.detect_intent, text, default, _FILE_INTENTS)
         if intent in ("file_move", "file_copy"):

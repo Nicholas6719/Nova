@@ -533,3 +533,22 @@ how many legs does a spider have  ==>  llm
 who painted the mona lisa  ==>  llm
 how far is the nearest cvs  ==>  tools
 how far is boston  ==>  tools
+
+# ── His real turns still wrong after the audit (2026-11-19) ────────────────
+#    "open notes" searched for a FILE called notes (file_intents treats "notes"
+#    as a file noun) — even "open the notes app" did. A streaming title "in
+#    Disney Plus" and AMC were unknown, and "find me tickets" went to the LLM.
+#    "Nova, got to sleep" is the sign-off misheard.
+open notes  ==>  tools
+open the notes app  ==>  tools
+Nova, open notes  ==>  tools
+open my notes  ==>  tools
+open my resume  ==>  files
+open the budget spreadsheet  ==>  files
+Pull up Spider-Man No Way Home in Disney Plus  ==>  tools
+watch moana on disney plus  ==>  tools
+find me, tickets to Spider-Man brand new day  ==>  tools
+Open AMC in the browser  ==>  tools
+open fandango  ==>  tools
+Nova, got to sleep  ==>  signoff
+I got to sleep at 3am last night  ==>  no-signoff

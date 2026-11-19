@@ -119,6 +119,8 @@ SUITES = {
                 False, False),
     "audit":   ("test_audit_regressions.py",
                 "every defect the 2026-11-19 audit proved stays fixed", False, False),
+    "real":    ("test_real_turns.py",
+                "his real turns still wrong after the audit, through the real pipeline", False, False),
     "loop":    ("test_conversation_loop.py",
                 "conversation state machine (real loop, scripted mic)", False, False),
     "cache":   ("test_prompt_cache.py",
@@ -200,7 +202,7 @@ def main() -> int:
     if args.all:
         chosen = list(SUITES)
     elif args.quick:
-        chosen = ["env", "routing", "seeds", "brain", "learn", "facts", "audit", "honesty", "door", "stats", "loop", "wake", "cache", "rag", "tts",
+        chosen = ["env", "routing", "seeds", "brain", "learn", "facts", "audit", "real", "honesty", "door", "stats", "loop", "wake", "cache", "rag", "tts",
                   "weather", "music", "views", "home", "sounds", "market",
                   "act", "conf", "echo"]
     else:

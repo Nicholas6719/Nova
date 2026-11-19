@@ -60,6 +60,11 @@ _SLEEP_TRAILER_RE = re.compile(r"^[\s,.!]*(?:now|please|then|ok|okay|thanks?|"
                                r"thank you|for now|nova)?[\s,.!]*$", re.I)
 
 
+# The sign-off as Whisper sometimes hears it ("Nova, got to sleep" — his real
+# turn). Only as the WHOLE utterance: "I got to sleep at 3am" is a story.
+_MISHEARD_SIGNOFF = re.compile(r"^\s*(?:(?:hey\s+)?nova[,.!\s]+)?(?:got|gotta|goes)\s+to\s+sleep[\s.!,]*$", re.I)
+
+
 def find_signoff(text: str):
     """Locate a trailing sign-off. Returns (index, phrase) or (None, None).
 
@@ -68,6 +73,11 @@ def find_signoff(text: str):
     and used to put Nova to sleep mid-anecdote.
     """
     low = (text or "").lower()
+    m = _MISHEARD_SIGNOFF.match(low)
+    if m:
+        idx = low.find("to sleep") - 1
+        idx = low.rfind(" ", 0, idx) + 1 if idx > 0 else 0
+        return idx, low[idx:].strip(" .!,")
     best = None
     for phrase in _SLEEP_PHRASES:
         start = 0
@@ -628,6 +638,10 @@ class VoiceAssistant:
         # into self.llm is thread-safe.
         from file_intents import NovaFiles
         self.files = NovaFiles(self.config, self.llm)
+        # "open notes" is the Notes app: files asks tools whether a name is an
+        # installed app (exact names only) before claiming it as a file.
+        if getattr(self, "tools", None) is not None:
+            self.files.app_named = self.tools.app_named
 
     def _init_screen(self) -> None:
         # Same thread story as the calendar and files: dispatched from
@@ -1589,6 +1603,14 @@ class VoiceAssistant:
                     self._learn_from_regex(text, claim)
                 return
 
+        # ── 8-. A request at the END of something else ──────────────────────
+        # "You didn't close the brave browser, please close the brave browser"
+        # (his real turn) went to the LLM: the complaint in front hid the
+        # command from every anchored matcher. If what follows "please" / "can
+        # you" is itself something Nova does, do that — and only then.
+        if self._trailing_request(text):
+            return
+
         # ── 8a. "Did you mean ...?" ──────────────────────────────────────────
         # Nothing claimed it, but the brain NEARLY knew: a skill ranked top
         # with a raw similarity over brain.ask_threshold, and that skill's own
@@ -2128,6 +2150,35 @@ class VoiceAssistant:
                 log.info(f"[brain] learned from the {claim[0]} stage: {text!r} -> {skill}")
         except Exception as exc:
             log.warning(f"[brain] learning failed (turn unaffected): {exc}")
+
+    _TAIL_RE = re.compile(
+        r"(?P<lead>.*\w.*?)[,.;!]\s+(?:so\s+|now\s+|just\s+|and\s+)?(?:(?:can|could|would|will)\s+you\s+)?"
+        r"(?:please\s+)(?P<tail>\w.+?)[\s.!?]*$"
+        r"|(?P<lead2>.*\w.*?)[,.;!]\s+(?:so\s+|now\s+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?"
+        r"(?P<tail2>\w.+?)[\s.!?]*$", re.I)
+
+    def _trailing_request(self, text: str) -> bool:
+        if getattr(self, "_turn_depth", 1) > 1:
+            return False                     # never re-split a tail
+        m = self._TAIL_RE.match(text or "")
+        if not m:
+            return False
+        lead = (m.group("lead") or m.group("lead2") or "").strip()
+        tail = (m.group("tail") or m.group("tail2") or "").strip()
+        if len(lead.split()) < 2 or len(tail.split()) < 2:
+            return False
+        stage, _ = self._regex_intent(tail)
+        claimed = stage not in ("llm", "unsupported") and not stage.startswith("error")
+        if not claimed and self.brain is not None and self.brain.ready:
+            try:
+                claimed = self.brain.decide(tail, self) is not None
+            except Exception:
+                claimed = False
+        if not claimed:
+            return False
+        log.info(f"[tail] running the request at the end: {tail!r}")
+        self._handle_turn_impl(tail)
+        return True
 
     def _offer_brain_guess(self, text: str) -> bool:
         b = self.brain

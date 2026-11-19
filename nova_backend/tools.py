@@ -1026,6 +1026,20 @@ class NovaTools:
             cls._app_index = index
         return cls._app_index
 
+    def app_named(self, raw: str) -> Optional[str]:
+        """The app this EXACTLY names (an alias or a whole installed name),
+        never a partial match: file_intents asks it whether "open notes" means
+        the Notes app, and a partial ("report" in "Crash Reporter") must never
+        take a file request away from the file stage."""
+        clean = re.sub(r"[^\w\s.]", "", raw or "").strip().lower()
+        clean = re.sub(r"^(?:the|a|an|my)\s+", "", clean)
+        clean = re.sub(r"\s+(?:app|application)$", "", clean).strip()
+        if not clean:
+            return None
+        if clean in _APP_ALIASES:
+            return _APP_ALIASES[clean]
+        return self._installed_apps().get(clean)
+
     def _resolve_app(self, raw: str) -> Optional[str]:
         """Spoken name -> exact app name. alias → exact → unique partial.
 
@@ -1252,6 +1266,39 @@ class NovaTools:
                 return bc.scroll("bottom")
             return bc.scroll("up" if re.search(r"\bup\b", low) else "down")
 
+        # ── tickets ─────────────────────────────────────────────────────
+        # "find me, tickets to Spider-Man brand new day" (his real turn) went
+        # to the LLM. Fandango's search takes the title (URL checked).
+        m = re.match(r"^(?:find|get|look\s+up|search\s+for|show)(?:\s+me)?\s+(?:some\s+)?"
+                     r"(?:movie\s+)?tickets?\s+(?:to|for)\s+(?:see\s+)?(.+?)[?.!]*$", low)
+        if m:
+            hit = bc.site_search("fandango", m.group(1).strip())
+            if hit:
+                url, label = hit
+                bc.open_url(url, label)
+                return f"Searching Fandango for tickets to {m.group(1).strip()}."
+
+        # ── a title ON a named site ─────────────────────────────────────
+        # "Pull up Spider-Man No Way Home in Disney Plus" (his real turn) went
+        # to the LLM. A site with a known search goes there; one without (Disney
+        # Plus's search pages 404 to an outside link, checked) gets a real web
+        # search for the title and the site, read back like any other.
+        m = re.match(r"^(?:pull\s+up|bring\s+up|find|look\s+up|show\s+me|watch|put\s+on|open|"
+                     r"search\s+for|look\s+for)\s+(?:me\s+)?(.+?)\s+(?:in|on)\s+(?:the\s+)?"
+                     r"([\w .]+?)(?:\s+app)?[?.!]*$", low)
+        if m:
+            title, where = m.group(1).strip(), m.group(2).strip()
+            key = re.sub(r"\.(com|org|net)$", "", where)
+            if (key in bc.SITES or key in bc._SITE_SEARCH) \
+                    and key not in ("spotify", "maps", "google maps", "apple") \
+                    and title not in ("it", "that", "this", "something"):
+                hit = bc.site_search(key, title)
+                if hit:
+                    url, label = hit
+                    bc.open_url(url, label)
+                    return f"Searching {label} for {title}."
+                return self._web_search(f"{title} {bc.DISPLAY.get(key, key.title())}")
+
         # ── search WITHIN a site ────────────────────────────────────────
         # "search amazon for spider-man" means Amazon's own search, not a
         # Google search for the words "amazon for spider-man".
@@ -1302,6 +1349,7 @@ class NovaTools:
         if m:
             target = re.sub(r"[?.!,]+$", "", m.group(1).strip())
             target = re.sub(r"^(?:the|a|an|my)\s+", "", target)
+            target = bc._IN_BROWSER.sub("", target).strip()
             plain = re.sub(r"\s+(?:folder|directory)$", "", target).strip()
             # Folders and real apps are NOT websites — let those routes win.
             if plain in _FOLDERS or self._resolve_app(target):

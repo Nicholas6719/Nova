@@ -57,6 +57,12 @@ def _folder_panel(folder, label: str, info: dict) -> dict:
 # ── Vocabulary ──────────────────────────────────────────────────────────────
 # A noun that means "we are talking about a file". Generic on purpose; the
 # distinctive-token guard in detect_intent is what stops it over-firing.
+_OPEN_THING_RE = re.compile(
+    r"^(?:(?:hey\s+)?nova[,\s]+)?(?:please\s+)?(?:can\s+you\s+)?(?:open|launch|start|pull\s+up|"
+    r"bring\s+up)\s+(?P<thing>(?:the\s+|my\s+)?[\w .'-]+?)(?:\s+app(?:lication)?)?[\s.!?]*$", re.I)
+_EXPLICIT_FILE_RE = re.compile(r"\b(?:file|files|document|documents|doc|docs|pdf|folder|"
+                               r"spreadsheet|presentation)\b", re.I)
+
 _FILE_NOUN_RE = re.compile(
     r"\b(file|files|document|documents|doc|docs|pdf|pdfs|"
     r"image|images|picture|pictures|photo|photos|screenshot|screenshots|"
@@ -220,6 +226,10 @@ _FOLLOWUP_WINDOW_S = 180.0
 
 
 class NovaFiles:
+    # Set by nova.py to tools.app_named (exact app names only); None in a
+    # harness that builds files alone, which keeps the old behaviour.
+    app_named = None
+
     def __init__(self, config: dict, llm) -> None:
         self.config = config
         self.llm = llm
@@ -265,6 +275,21 @@ class NovaFiles:
     # ═══════════════════════════════════════════════════════════════════════
     # Intent detection
     # ═══════════════════════════════════════════════════════════════════════
+    def names_an_app(self, text: str) -> bool:
+        """"open notes" / "open the notes app": the sentence opens something
+        that is EXACTLY an installed app's name, with no file word or
+        extension — the Notes app, not a file called notes. One definition,
+        used by detect_intent and by the brain's file skills alike."""
+        t = (text or "").lower().strip()
+        m = _OPEN_THING_RE.match(t)
+        if not m or self.app_named is None or _FILE_EXT_RE.search(t) \
+                or _EXPLICIT_FILE_RE.search(m.group("thing")):
+            return False
+        try:
+            return bool(self.app_named(m.group("thing")))
+        except Exception:
+            return False
+
     def detect_intent(self, text: str) -> Optional[str]:
         """One of file_find / file_describe / file_open / file_move /
         file_copy / file_rename / file_delete, or None.
@@ -294,6 +319,11 @@ class NovaFiles:
 
         has_noun = bool(_FILE_NOUN_RE.search(t))
         has_ext = bool(_FILE_EXT_RE.search(t))
+        # "open notes" / "open the notes app" is the Notes APP. "notes" is a
+        # file noun, so it searched for a file called notes (his real turn).
+        # Only an EXACT app name, never with a file word or an extension.
+        if self.names_an_app(t):
+            return None
         m = _LIST_FOLDER_RE.search(t)
         if m:
             spoken = next((g for g in m.groupdict().values() if g), "")

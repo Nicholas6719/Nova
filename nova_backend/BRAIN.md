@@ -448,20 +448,25 @@ the pre-fix commit. The ones that mattered most:
 
 Remaining misses both routers share: "do I have plans tonight", "what's the
 stock price of Netflix", "give me a quote on Microsoft", "where did I save my
-tax return", "go to reddit dot com". Real turns still missed: "Pull up
-Spider-Man No Way Home in Disney Plus", "find me, tickets to Spider-Man brand
-new day", "Open AMC in the browser" (none of these sites are in
-browser_control.SITES), "You didn't close the brave browser, please close the
-brave browser", "Nova, got to sleep" (a mishear of the sign-off).
+tax return", "go to reddit dot com".
+
+Fixed after the audit (`tests/test_real_turns.py`, corpus lines): "open
+notes" now opens the Notes app (it searched for a file called notes, because
+"notes" is a file noun — an exact installed-app name wins, never a partial);
+a title "in Disney Plus" is a web search for the title and the site (Disney
+Plus's own search pages 404 to an outside link, so no URL is guessed); AMC,
+Fandango, HBO Max, Peacock, Paramount Plus and Prime Video are known sites;
+"find me tickets to X" searches Fandango; "Nova, got to sleep" is the
+sign-off misheard (only as the whole utterance); and a request after a
+complaint ("You didn't close the brave browser, please close the brave
+browser") is carried out when that tail is something Nova does. Real non-seed
+turns: hybrid 106/109.
 
 Stage 3: explanations are looked up but never stored, and Wikipedia's lead
 sections do not contain every answer ("why is the sky blue" gets colour-swatch
 sentences; the model then answers from memory as before). Present-tense
 "who's the author of X" is refused by the store on purpose (same shape as
 "who's the director of the FBI") and gets a live lookup instead.
-
-"open notes" goes to file search, not the Notes app — in both routers, from
-file_intents treating "notes" as a file noun.
 
 The pre-existing `echo` suite fails on `main` as well: the canceller removes
 0.0 dB where it measured 27-36 dB when built — an environment regression,
