@@ -66,38 +66,14 @@ def _words(text: str) -> list[str]:
     return re.findall(r"[a-z']+", (text or "").lower())
 
 
-# A READ IS A REQUEST, AND REQUESTS HAVE A SHAPE. "my next meeting is at three"
-# sat 0.89 from "when's my next meeting" and read his calendar back to him.
-# CLAUDE.md's rule for tools — command words that are also ordinary English must
-# be SHAPED like commands — applies to the brain's reads for the same reason: a
-# question opens with a question word or a verb, or ends in a question mark; a
-# statement about the same subject opens with "my", "I", "the"...
-_ASK_OPENERS = {
-    "what", "what's", "whats", "when", "when's", "where", "where's", "which", "who",
-    "who's", "how", "how's", "hows", "do", "does", "did", "am", "is", "are", "was",
-    "any", "anything", "read", "show", "tell", "list", "check", "give", "get",
-    "pull", "will", "would", "should", "have", "has", "got", "open", "find",
-    "look", "let", "lets", "let's", "describe", "summarize", "say", "go", "take",
-    "bring", "turn", "make", "set", "put", "start", "play", "pause", "skip",
-    "stop", "resume", "mute", "unmute", "dim", "brighten", "lower", "raise",
-    "crank", "throw", "close", "quit", "launch", "search", "google", "navigate",
-    "cancel", "clear", "hide", "restore", "shuffle", "repeat", "next", "previous",
-    "volume", "louder", "quieter", "battery", "cpu", "weather", "forecast",
-    "hello", "hi", "hey", "good", "morning", "afternoon", "evening", "sorry",
-    "one", "come", "remember", "forget", "actually", "or", "and", "so", "ok",
-    "okay", "now", "also", "just", "please", "nova", "can", "could", "need",
-    "full", "max", "reload", "refresh", "new", "minimize", "lock", "screenshot",
-    "capture", "grab", "locate", "move", "copy", "rename", "drop", "drag",
-    "stick", "shove", "file", "delete", "trash", "duplicate", "change", "use",
-}
+# A READ IS A REQUEST, AND REQUESTS HAVE A SHAPE — shape.py holds the one
+# definition, shared with the regex read stages.
+from shape import _ASK_OPENERS, asks as _shape_asks, asks_for_later  # noqa: E402
 
 
 def _asks(text: str) -> bool:
-    t = (text or "").strip()
-    if t.endswith("?"):
-        return True
-    w = _light_words(t)
-    return bool(w) and w[0] in _ASK_OPENERS
+    # A request about LATER ("tell me when ...") is never a read of NOW.
+    return _shape_asks(text) and not asks_for_later(text)
 
 
 def _asking_def(fn):
@@ -791,10 +767,25 @@ def _tool_fixed(command: str):
     return run
 
 
-def _tool_strict(va, text):
+def _tool_strict(va, text, skill_name: Optional[str] = None):
     """Arguments come from the sentence and tools has no separate extractor,
-    so act only where tools itself would claim the sentence (dry run)."""
-    return {} if va.tools.detect(text) is not None else None
+    so act only where tools itself would claim the sentence (dry run) — and
+    only when what the dry run says it would DO belongs to this skill.
+
+    The replay of his real turns found "Nova, close, brave." reflexing as
+    tools.open_app at 0.91. The action was right (the runner hands his words
+    to tools.match, which quits Brave), but the skill named was wrong, so the
+    log, "why did you do that?" and any lesson would have said "open". A
+    label that belongs to OTHER skills refuses, and the runner-up takes it."""
+    label = va.tools.detect(text)
+    if label is None:
+        return None
+    if skill_name:
+        mine = {lbl for lbl, fam in _TOOL_FAMILY.items() if skill_name in fam}
+        theirs = label in _TOOL_FAMILY and label not in mine
+        if theirs:
+            return None
+    return {}
 
 
 def _run_tool_text(va, t, a):
@@ -811,10 +802,20 @@ def _run_tool_text(va, t, a):
 # his song, "refresh my memory on that" reloaded his browser. A fixed-command
 # skill therefore acts on a sentence only if tools itself would claim it
 # (dry-run detect) OR the sentence names what the command acts on.
-def _names(pattern: str):
+def _names(pattern: str, skill_name: Optional[str] = None):
     rx = re.compile(pattern, re.I)
+
     def slots(va, text):
-        if va.tools.detect(text) is not None:
+        # computed per call: _TOOL_FAMILY is defined further down this module
+        mine = {lbl for lbl, fam in _TOOL_FAMILY.items() if skill_name in fam}
+        label = va.tools.detect(text)
+        # What tools would DO with these words belongs to ANOTHER skill: the
+        # fixed command would be the wrong action. Held-out scoring found "play
+        # some jazz" reflexing as "play music" — resuming whatever was last on
+        # instead of finding jazz.
+        if label in _TOOL_FAMILY and label not in mine:
+            return None
+        if label is not None:
             return {}
         if rx.search(text or "") and _asks(text):
             return {}
@@ -862,10 +863,11 @@ def _T(name, seeds, command=None, tier=LOW, label=""):
     """A tool skill: fixed command if given, else strict on the sentence."""
     if command:
         guard = _GUARDS.get(name)
-        slots = _names(guard) if guard else _tool_strict
+        slots = _names(guard, name) if guard else (lambda va, t, _n=name: _tool_strict(va, t, _n))
         return Skill(name, "tools", seeds, slots=slots, run=_tool_fixed(command),
                      tier=tier, label=label or name.split(".", 1)[1].replace("_", " "))
-    return Skill(name, "tools", seeds, slots=_tool_strict, run=_run_tool_text,
+    return Skill(name, "tools", seeds,
+                 slots=lambda va, t, _n=name: _tool_strict(va, t, _n), run=_run_tool_text,
                  tier=tier, label=label or name.split(".", 1)[1].replace("_", " "))
 
 
@@ -947,7 +949,7 @@ TOOL_SKILLS = [
        command="cancel my timer", label="cancel your timer"),
     # ── apps, folders, windows ──
     _T("tools.open_app", ["can you open brave", "launch xcode", "open spotify",
-                          "open messages", "open youtube", "nova open youtube",
+                          "open messages",
                           "open safari", "launch the calculator"], label="open that"),
     _T("tools.quit_app", ["close brave browser", "close the brave browser",
                           "quit spotify", "close system settings", "close maps",
@@ -1012,9 +1014,10 @@ TOOL_SKILLS = [
                             "search the web for how to move photos into Documents",
                             "nova search the web for the tallest building in the world"],
        label="search the web for that"),
-    _T("tools.site_search", ["search amazon for spiderman", "search Disney Plus for Iron Man",
+    _T("tools.site_search", ["search amazon for spiderman", "search amazon for a laptop stand",
                              "search youtube for cooking videos"], label="search that site"),
-    _T("tools.open_site", ["go to youtube.com", "open github.com", "pull up reddit"],
+    _T("tools.open_site", ["go to youtube.com", "open github.com", "pull up reddit",
+                           "open youtube", "nova open youtube"],
        label="open that site"),
     # ── maps ──
     _T("tools.maps_eta", ["how far is the nearest CVS", "how far is the nearest coffee shop",

@@ -286,6 +286,8 @@ class VoiceAssistant:
         self._brain_fell_through = False # this turn: brain declined (learnable)
         self._brain_offer = None         # pending "did you mean X?"
         self._last_reflex = None         # what "no, I meant ..." would correct
+        self._last_turn = None           # turnstats: the last decision, for "why?"
+        self.turnstats = None
         self._rag_ready       = False
         self._rag             = None
         # Set by a "return to wake mode" voice command to drop out of
@@ -1321,6 +1323,52 @@ class VoiceAssistant:
     # Core turn handler
     # ═════════════════════════════════════════════════════════════════════════════
     def _handle_turn_impl(self, text: str) -> None:
+        """One turn, timed and recorded (turnstats.py): which path answered it,
+        how long the decision took, how long until the first word. The record
+        is the evidence future routing work starts from, and what "why did you
+        do that?" is answered from. Nested calls (a corrected request routed
+        again, a confirmed read-back) are part of the outer turn."""
+        depth = getattr(self, "_turn_depth", 0)
+        self._turn_depth = depth + 1
+        if depth == 0:
+            self._turn_t0 = time.time()
+            self._turn_note = None
+            self._turn_first = None
+        try:
+            self._route_turn(text)
+        finally:
+            self._turn_depth = depth
+            if depth == 0:
+                self._record_turn(text)
+
+    def _note(self, path: str, skill: Optional[str] = None,
+              confidence: Optional[float] = None, matched: Optional[str] = None) -> None:
+        """Which path answered this turn. The first one to claim it wins."""
+        if getattr(self, "_turn_note", None) is None:
+            t0 = getattr(self, "_turn_t0", None)
+            self._turn_note = {"path": path, "skill": skill, "confidence": confidence,
+                               "matched": matched,
+                               "decide_ms": (time.time() - t0) * 1000 if t0 else None}
+
+    def _mark_first(self) -> None:
+        """The first word of this turn's answer is going out."""
+        if getattr(self, "_turn_first", None) is None and getattr(self, "_turn_t0", None):
+            self._turn_first = (time.time() - self._turn_t0) * 1000
+
+    def _record_turn(self, text: str) -> None:
+        note = getattr(self, "_turn_note", None) or {"path": "unknown"}
+        row = {"text": text.strip(), **note, "first_ms": getattr(self, "_turn_first", None)}
+        if note.get("path") != "explain":
+            self._last_turn = row
+        try:
+            if getattr(self, "turnstats", None) is None:
+                from turnstats import TurnStats
+                self.turnstats = TurnStats(DATA_DIR / "nova_memory.db")
+            self.turnstats.record(row)
+        except Exception as exc:
+            log.warning(f"turn stats unavailable: {exc}")
+
+    def _route_turn(self, text: str) -> None:
         """Full pipeline for one user utterance. First match wins.
 
         Always runs on the ``nova-llm`` worker thread (via ``_submit_turn``) so
@@ -1330,6 +1378,7 @@ class VoiceAssistant:
         # ── 1. System commands ───────────────────────────────────────────────
         resp = self._handle_system_commands(text)
         if resp is not None:
+            self._note("system")
             self._respond(resp)
             return
 
@@ -1337,6 +1386,7 @@ class VoiceAssistant:
         # Armed by a power command. Only an explicit yes proceeds; ANYTHING
         # else cancels — we never power off the Mac on an ambiguous reply.
         if self._tool_confirm is not None:
+            self._note("pending")
             confirm = self._tool_confirm
             self._tool_confirm = None
             if re.match(r"^\s*(yes|yeah|yep|yup|do it|confirm|go ahead|please do)\b",
@@ -1355,6 +1405,7 @@ class VoiceAssistant:
             self._calendar_offer = None
             low = text.lower().strip()
             if re.match(r"^(ye(s|ah|p)|sure|please|ok|okay|go ahead|do it|yes\s+please)\b", low):
+                self._note("pending")
                 self._respond(offer())
                 return
             if re.match(r"^(no|nope|nah|no\s+thanks|that'?s\s+all|i'?m\s+good)\b", low):
@@ -1370,6 +1421,7 @@ class VoiceAssistant:
         if self.files.has_pending():
             resp = self.files.resolve_pending(text)
             if resp is not None:
+                self._note("pending")
                 if self.files.pending_offer is not None:
                     self._calendar_offer = self.files.pending_offer
                     self.files.pending_offer = None
@@ -1382,6 +1434,27 @@ class VoiceAssistant:
         # lights out, mute the sound and lock my Mac"), and a taught phrase
         # itself. All before routing, so none can be re-read as a new command.
         if self._brain_lessons(text):
+            self._note("lesson")
+            return
+
+        # ── 2b″. "Why did you do that?" / "how often do you answer by yourself"
+        # Answered from the turn record (turnstats.py), never invented.
+        import turnstats
+        if turnstats.wants_explanation(text):
+            self._note("explain")
+            self._respond(turnstats.explain(getattr(self, "_last_turn", None), self.brain))
+            return
+        if turnstats.wants_report(text):
+            self._note("explain")
+            try:
+                if getattr(self, "turnstats", None) is None:
+                    self.turnstats = turnstats.TurnStats(DATA_DIR / "nova_memory.db")
+                stats = self.turnstats.summary()
+                learned = self.brain.learned() if self.brain is not None and self.brain.ready else []
+                self._respond(turnstats.report(stats, learned))
+            except Exception as exc:
+                log.warning(f"brain report failed: {exc}")
+                self._respond("I couldn't put that together just now.")
             return
 
         # ── 2c. UI navigation ────────────────────────────────────────────────
@@ -1394,6 +1467,7 @@ class VoiceAssistant:
         # fall straight through to conversation.
         view_intent = self.views.detect_intent(text)
         if view_intent is not None:
+            self._note("view")
             self._run_view(view_intent, text)
             return
 
@@ -1403,6 +1477,7 @@ class VoiceAssistant:
         if self.actuation.pending is not None:
             resp = self.actuation.resolve_pending(text)
             if resp is not None:
+                self._note("pending")
                 self._respond(resp)
                 return
 
@@ -1427,6 +1502,7 @@ class VoiceAssistant:
                 log.warning(f"[watch] failed, routing on: {exc}")
                 resp = None
             if resp is not None:
+                self._note("watch")
                 self._respond(resp)
                 return
 
@@ -1446,13 +1522,14 @@ class VoiceAssistant:
         if not self._brain_chat:
             claim = self._regex_intent(text) if self._brain_fell_through else None
             if self._regex_commands(text):
+                self._note(f"regex:{(claim or self._regex_intent(text))[0]}")
                 # The brain fell through and a regex stage knew what this
                 # was: that is a lesson (brain.learn applies the bar).
                 if claim is not None:
                     self._learn_from_regex(text, claim)
                 return
 
-        # ── 8c. "Did you mean ...?" ──────────────────────────────────────────
+        # ── 8a. "Did you mean ...?" ──────────────────────────────────────────
         # Nothing claimed it, but the brain NEARLY knew: a skill ranked top
         # with a raw similarity over brain.ask_threshold, and that skill's own
         # slots can run the sentence. Asking costs one short question; the
@@ -1472,6 +1549,7 @@ class VoiceAssistant:
         # prompt rule cut that from 4 cases to 1; only refusing deterministically
         # makes it zero.
         if _is_unsupported_action(text):
+            self._note("unsupported")
             log.info(f"[unsupported-action] {text}")
             self._respond(
                 "I can't do that one yet. I'll tell you when I can, rather "
@@ -1488,6 +1566,7 @@ class VoiceAssistant:
                 pass
 
         # ── 10. LLM fallback (streaming) ──────────────────────────────────────
+        self._note("conversation" if self._brain_chat else "llm")
         self.set_state("thinking")
         self._stream_response(text, rag_context=rag_ctx)
 
@@ -1547,6 +1626,7 @@ class VoiceAssistant:
                      f"rival {m.get('rival')}, {ms:.0f}ms)")
             return False
         log.info(f"[brain] reflex {d.skill.name}@{d.confidence:.2f} {d.args} ({ms:.0f}ms)")
+        self._note("reflex", d.skill.name, d.confidence, m.get("text"))
         try:
             d.skill.run(self, text, d.args)
         except Exception as exc:
@@ -1657,6 +1737,7 @@ class VoiceAssistant:
         if hit is not None:
             phrase, steps, sim = hit
             log.info(f"[brain] taught phrase {phrase!r}@{sim:.2f}: {len(steps)} step(s)")
+            self._note("phrase", phrase, sim)
             for step in steps:
                 self._run_step(step["text"])
             return True
@@ -1748,6 +1829,7 @@ class VoiceAssistant:
             return False
         label = sk.label or sk.name.split(".", 1)[-1].replace("_", " ")
         self._brain_offer = {"text": text, "skill": sk.name, "args": u["args"]}
+        self._note("ask", sk.name, u.get("confidence"))
         log.info(f"[brain] asking: did you mean {sk.name}? (top {u['top']}, "
                  f"confidence {u['confidence']})")
         self._respond(f"Did you mean {label}?")
@@ -1763,6 +1845,7 @@ class VoiceAssistant:
         if not r or not r.get("said"):
             return False
         log.info(f"[math] {r.get('expr')!r} = {r.get('value')}")
+        self._note("math")
         self._respond(r["said"])
         return True
 
@@ -2035,6 +2118,7 @@ class VoiceAssistant:
         text = text.strip()
         if not text:
             return
+        self._mark_first()
         self._last_response = text
         self._begin_conversation()
         self.memory.add_turn("assistant", text)
@@ -2421,6 +2505,8 @@ class VoiceAssistant:
 
         def on_token(token: str) -> None:
             nonlocal full_response, pending
+            if not full_response:
+                self._mark_first()
             full_response += token
             self.ws.stream_token(token)   # UI shows text live
             if stream_tts:

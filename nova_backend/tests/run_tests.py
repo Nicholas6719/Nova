@@ -110,6 +110,8 @@ SUITES = {
                 "no spoken promise nothing will keep; typed turns stay silent", False, False),
     "door":    ("test_unprompted.py",
                 "unprompted speech: one door, never twice, never a flood; watches kept", False, False),
+    "stats":   ("test_turnstats.py",
+                "every turn records what answered it; 'why?' is answered from that", False, False),
     "learn":   ("test_brain_learning.py",
                 "brain learns, asks, is taught and corrected — safely", False, False),
     "loop":    ("test_conversation_loop.py",
@@ -190,7 +192,7 @@ def main() -> int:
     if args.all:
         chosen = list(SUITES)
     elif args.quick:
-        chosen = ["env", "routing", "seeds", "brain", "learn", "honesty", "door", "loop", "wake", "cache", "rag", "tts",
+        chosen = ["env", "routing", "seeds", "brain", "learn", "honesty", "door", "stats", "loop", "wake", "cache", "rag", "tts",
                   "weather", "music", "views", "home", "sounds", "market",
                   "act", "conf", "echo"]
     else:

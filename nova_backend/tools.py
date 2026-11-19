@@ -277,6 +277,16 @@ class NovaTools:
         low = re.sub(r"^(?:hey\s+)?nova\b[,.!]?\s*", "", low)
         low = re.sub(r"(?<!\d),|,(?!\d)", " ", low)
         low = re.sub(r"\s+", " ", low).strip()
+        # A trailing courtesy is not part of the app name: "open spotify
+        # please" was refused as an unsupported action, because the launch
+        # rule tried to open an app called "spotify please".
+        for _ in range(2):
+            low = re.sub(r"[\s,]+(?:please|for me|right now|now|thanks|thank you|nova)[.!?]*$",
+                         "", low).strip()
+        # A reading is a REQUEST: "my battery died yesterday" read his battery,
+        # "what does a CPU actually do" read his CPU (shape.py).
+        import shape
+        reading_ok = shape.reads(low)
         self.pending_confirm = None
         self.pending_offer = None
 
@@ -342,6 +352,13 @@ class NovaTools:
         # it fall through to the music section rather than moving system audio.
         # "the volume of work is insane" is not a request. The word has to be
         # paired with something to DO to it, or a question about it.
+        # "turn the sound down" says the same thing as "volume down".
+        low_v = re.sub(r"\b(turn|crank|bring)\s+(up|down)\s+the\s+(?:sound|audio)\b",
+                       r"\1 the volume \2", low)
+        low_v = re.sub(r"\b(turn|crank|bring)\s+the\s+(?:sound|audio)\s+(up|down)\b",
+                       r"\1 the volume \2", low_v)
+        if low_v != low:
+            low = low_v
         if "volume" in low and not re.search(r"\b(music|spotify|song|track)\b", low) \
            and re.search(r"\b(?:up|down|louder|quieter|softer|increase|raise|"
                          r"decrease|lower|max|full|mute|off|silent|set|what|"
@@ -362,7 +379,8 @@ class NovaTools:
             return self._volume_query()
 
         # ── 7. Battery ──────────────────────────────────────────────────────
-        if any(p in low for p in ("battery", "how much charge", "power level", "how charged")):
+        if reading_ok and any(p in low for p in ("battery", "how much charge",
+                                                 "power level", "how charged")):
             return self._battery_status()
 
         # ── 8. System stats ─────────────────────────────────────────────────
@@ -370,11 +388,11 @@ class NovaTools:
         # terrible these days", "in memory of my grandfather", "I need more
         # space in my closet" and "we should give the team some space" — all
         # answered with a system stat.
-        if self._MEMORY_STAT_RE.search(low) and not re.search(r"\bremember\b", low):
+        if reading_ok and self._MEMORY_STAT_RE.search(low) and not re.search(r"\bremember\b", low):
             return self._memory_status()
-        if re.search(r"\bcpu\b|\bprocessor\s+usage\b", low):
+        if reading_ok and re.search(r"\bcpu\b|\bprocessor\s+usage\b", low):
             return self._cpu_status()
-        if self._DISK_STAT_RE.search(low):
+        if reading_ok and self._DISK_STAT_RE.search(low):
             return self._disk_status()
         if re.search(r"\bsystem\s+stats?\b|\bhow.*\b(mac|computer)\b.*\bdoing\b", low):
             return self._all_stats()
@@ -1844,7 +1862,8 @@ class NovaTools:
     # Playback mode, as a command rather than a word in a sentence.
     _SHUFFLE_RE = re.compile(
         r"^\s*(?:hey\s+)?(?:nova[,\s]+)?(?:please\s+)?"
-        r"(?:(?:turn|switch)\s+(?:on|off)\s+)?"
+        # "turn repeat on" as well as "turn on repeat" (2026-11-19).
+        r"(?:(?:turn|switch)\s+(?:(?:on|off)\s+)?)?"
         r"(shuffle|repeat|loop)\b"
         r"(?:\s+(?:mode|on|off|this|it|the\s+(?:song|track|album|playlist)))?"
         r"\s*[.?!]*\s*$"

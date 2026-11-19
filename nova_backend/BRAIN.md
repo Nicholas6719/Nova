@@ -154,6 +154,7 @@ matrices (mistake #9).
 | `tests/test_routing_corpus.py` | the regex chain alone (the `regex` column) |
 | `tests/test_honesty.py` | no spoken promise or false "done"; typed turns stay silent |
 | `tests/test_unprompted.py` | the single door, ceilings, restarts, standing watches |
+| `tests/test_turnstats.py` | every turn recorded with its path; "why?" answered from the record |
 
 Scoring counts a WRONG action (did something, not what he meant) apart from a
 miss (fell to conversation or an honest refusal). Sentences whose canonical form
@@ -194,7 +195,7 @@ hybrid is what ships, and Stage 2's learning is how "brain alone" grows.
 
 Where it runs: stage **2b′** (`_brain_lessons`, before navigation, so none of
 these can be re-read as a new command), the learning hook after a regex stage
-claims a fallen-through sentence, and **8c** (`_offer_brain_guess`) before the
+claims a fallen-through sentence, and **8a** (`_offer_brain_guess`) before the
 unsupported-action refusal.
 
 - **Learning** (`Brain.learn`). Nova's LLM has NO tools, so JARVIS's teacher
@@ -290,24 +291,78 @@ Telegram delivery, briefs, news significance, the scanner desk.
 Tests: `test_unprompted.py` 36/36, `test_honesty.py` 31/31, corpus 289/289
 (arithmetic and watches added regression-first).
 
-**Stage 5 — better than JARVIS.** From evidence: the `[brain-disagree]` log
-and his real turns.
+**Stage 5 — from evidence. First round DONE (2026-11-19).**
+
+The evidence was his 243 distinct real turns (Aug 2026) and what Nova replied
+to each, replayed through `main` and through this branch
+(`NOVA_DATA_DIR/brain_replay_report.md`, local only — it quotes him):
+
+| his 229 labelled turns | correct | miss | wrong action |
+| --- | --- | --- | --- |
+| `main` | 201 | 23 | 5 |
+| now | **220** | 7 | **2** |
+
+The two wrong actions left are Nova hearing her own voice (one is caught today
+by `_sounds_like_me`; the other was never her reply). What the replay showed
+the model had said, and what now happens instead: "what's 10 times 10 minus
+4" was answered with the clock; a tip on $95.82 was given as $14.29 (15 percent
+is $14.37); "is music playing?" got "No, music is not playing" without
+looking; "how long will it take for me to get to CVS?" got "I'm not aware of
+your current location".
+
+Fixed, each regression-first:
+- **A statement is not a request** (`shape.py`, one definition shared by the
+  brain's skills and the regex read stages): "I asked Nova what the weather
+  was, it kept it on the screen..." fetched a forecast; "my battery died
+  yesterday" read the battery; "Apple stock is way too expensive" fetched a
+  quote. Definitions ("what does a CPU actually do", "what is a stock split")
+  are not readings, and "tell me WHEN ..." is never a reading of now.
+- A trailing courtesy defeated every launch/quit rule ("open spotify please"
+  was refused as unsupported); "turn the sound down", "turn repeat on" and
+  "hide everything on home" (claimed by MINIMIZE — every app) now land.
+- **Skill-level, not just stage-level, correctness for tools.** Stage scoring
+  hid two: "close, brave" reflexed as `tools.open_app` (right action, wrong
+  story in the log and in "why?"), and — held-out — "play some jazz" as the
+  fixed "play music" command (the WRONG action: resume whatever was on). A
+  tool skill now refuses when the dry run says the action belongs to another
+  skill; a new gate in `test_brain_intent` fails on any disagreement.
+
+Beyond JARVIS:
+- **Turn records** (`turnstats.py`, table `turn_stats`): every turn's path
+  (reflex / regex stage / math / watch / phrase / ask / LLM ...), skill,
+  confidence, matched example, time to decide, time to first word. Nova had no
+  such record, which is why this round had to replay old text; the next one
+  starts from what actually happened. Local, beside the conversation history.
+- **"Why did you do that?"** — Nova explains her last decision from that
+  record ("I took that as a request to tell you the time, because it was
+  closest to something I already know: what time is it, 98 percent sure. It
+  took me 5 milliseconds to decide."). Never invented.
+- **"How often do you answer things by yourself?" / "what have you learned?"**
+  — a report from the same record: share handled without the model, median
+  time to first word for each, and the latest phrasing learned.
+
+Ideas that need his OK (they change what Nova does unprompted or touch
+privacy), not built:
+- night school (Stage 3), including paraphrase distillation, which runs the
+  model overnight without being asked;
+- stock / weather standing watches (poll the network unprompted);
+- a weekly spoken "here's what I learned" — unprompted speech;
+- turning the `[brain-disagree]` log into a weekly review of regex stages the
+  brain has fully matched, so they can be retired.
 
 ## Known gaps
 
-Regex false positives the brain does not yet veto (its `general` match is
-below 0.82 on them), each a wrong ACTION:
-- "my battery died on the way to work" → battery reading
-- "hide everything on the home screen" → tools minimises every app
-- "what's the weather like on Mars" / "the weather has been so weird this
-  year" → a forecast
-- "I'm thinking of buying Tesla stock" / "what is a stock split" → a quote
-- "what does a CPU actually do" → a CPU reading
-
-Misses both routers share: "do I have plans tonight", "when is my next
-appointment", "turn the sound up", "turn shuffle on", "open Xcode please"
-(trailing "please" defeats the launch regex), "tell me what app I have open in
-front" (claimed by tools' running-apps instead of screen).
+Remaining misses both routers share: "do I have plans tonight", "what's the
+stock price of Netflix", "give me a quote on Microsoft", "where did I save my
+tax return", "go to reddit dot com". Real turns still missed: "Pull up
+Spider-Man No Way Home in Disney Plus", "find me, tickets to Spider-Man brand
+new day", "Open AMC in the browser" (none of these sites are in
+browser_control.SITES), "You didn't close the brave browser, please close the
+brave browser", "Nova, got to sleep" (a mishear of the sign-off).
 
 "open notes" goes to file search, not the Notes app — in both routers, from
 file_intents treating "notes" as a file noun.
+
+The pre-existing `echo` suite fails on `main` as well: the canceller removes
+0.0 dB where it measured 27-36 dB when built — an environment regression,
+unrelated to the brain, worth its own investigation.

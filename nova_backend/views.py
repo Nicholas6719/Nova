@@ -302,6 +302,9 @@ def _move_match(text: str):
 _CLEAR_RE = re.compile(
     _LEAD + r"(?:clear|hide|empty)\s+(?:the\s+|my\s+)?"
     r"(?:home|screen|home\s*screen|everything|cards|the\s+cards|panels)"
+    # "hide everything on home" was claimed by the tools MINIMIZE rule
+    # (minimize every app) — the home surface is what he meant.
+    r"(?:\s+(?:on|from)\s+(?:the\s+|my\s+)?home(?:\s*screen)?)?"
     r"\s*[.?!]?$",
     re.IGNORECASE,
 )

@@ -108,6 +108,11 @@ class NovaMarket:
         t = text.strip()
         if _NOT_MARKET_RE.search(t):
             return None
+        # "Apple stock is way too expensive" is an opinion and "what is a stock
+        # split" a definition; neither is a request for a quote (shape.py).
+        import shape
+        if not shape.reads(t):
+            return None
 
         if _MARKET_RE.search(t):
             return "market"

@@ -491,3 +491,27 @@ stop watching my battery  ==>  watch
 tell me about my battery  ==>  tools
 let me know what you think  ==>  llm
 tell me when you're ready  ==>  llm
+# ── Stage 5, from evidence (2026-11-19) ─────────────────────────────────────
+# A trailing courtesy defeated every launch/quit pattern: "open spotify
+# please" was refused as an unsupported action.
+open spotify please  ==>  tools
+launch safari for me  ==>  tools
+close spotify please  ==>  tools
+# A STATEMENT about a thing is not a request to read it. His real turn: "I
+# asked Nova what the weather was, it kept it on the screen..." fetched a
+# forecast. CLAUDE.md's rule for tools — shaped like a command — applied to
+# every read stage.
+I asked Nova what the weather was, it kept it on the screen after telling it to me  ==>  llm
+the weather was awful last week  ==>  llm
+my battery died yesterday  ==>  llm
+Apple stock is way too expensive  ==>  llm
+# ...and a question about what a thing IS is not a reading of it.
+what does a CPU actually do  ==>  llm
+what is a stock split  ==>  llm
+# "hide everything" on HOME is the home surface, not every app on his Mac.
+hide everything on home  ==>  view
+# Same requests, other word orders.
+turn the sound down  ==>  tools
+turn repeat on  ==>  tools
+# "Let me know when ..." asks about LATER, never for a reading now.
+let me know when the weather clears up  ==>  llm

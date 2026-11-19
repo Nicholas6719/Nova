@@ -12,6 +12,9 @@ Every sentence is READ-ONLY on purpose: a reflex runs the real handler, so
 changes a setting, opens an app or touches the network except the market
 quote (Yahoo — invariant 3's market exception, a ticker and nothing else).
 
+Afterwards it reads the process's turn_stats table: every turn above must have
+left a row naming the path that answered it.
+
 What it proves that the unit suites cannot:
   - _init_brain runs at real startup and loads in the background
   - reflexes answer through the real _respond path, in milliseconds
@@ -63,6 +66,10 @@ TURNS = [
     ("tell me when my cpu goes above 99 percent", "watch"),
     ("what are you watching", "watch"),
     ("cancel all watches", "watch"),
+    # ── Stage 5 ── ("what time is it" was corrected above, so it is rejected
+    # for fast.time now and goes to the regex fast path: a different sentence)
+    ("what's my battery at", "reflex:tools.battery"),
+    ("why did you do that", "explain"),
 ]
 
 
@@ -141,7 +148,9 @@ def main() -> int:
             conf = re.search(r"\[brain\] confirmed: .* -> (\S+)", seg)
             phrase = re.search(r"\[brain\] taught phrase", seg)
             corrected = re.search(r"\[brain\] corrected:", seg)
-            if "[math]" in seg:
+            if sentence == "why did you do that":
+                got, ms = ("explain" if "already know" in last else "?"), "-"
+            elif "[math]" in seg:
                 got, ms = "math", "-"
             elif re.search(r"\[watch\]|I'll tell you when|watching|stopped all|stopped watching", last):
                 got, ms = "watch", "-"
@@ -170,6 +179,12 @@ def main() -> int:
             print(f"        -> {(answer.group(1) if answer else '(no answer logged)')[:90]}")
             if dis:
                 print(f"        {dis.group(0)[:110]}")
+        import sqlite3
+        with sqlite3.connect(Path(data) / "nova_memory.db") as c:
+            rows = c.execute("SELECT path, COUNT(*) FROM turn_stats GROUP BY path").fetchall()
+        print(f"  turn_stats rows by path: {dict(rows)}")
+        if sum(n for _, n in rows) < len(TURNS):
+            fails.append(f"turn_stats has {sum(n for _, n in rows)} rows for {len(TURNS)} turns")
         errors = [l for l in log_path.read_text().splitlines()
                   if "Traceback" in l or "[brain] decide failed" in l
                   or "failed:" in l and "[brain]" in l]

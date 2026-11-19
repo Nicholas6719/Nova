@@ -245,6 +245,27 @@ def main() -> int:
                             "=" if ok(exp, h) else "x")
                     print(f"      {flag} {phrase[:52]:<52} exp {exp:<10} "
                           f"regex {r:<10} hybrid {h:<10} {hd}")
+    # SKILL-LEVEL, not just stage-level: a tool reflex must name the skill
+    # whose action the dry run says will happen. Stage scoring hid "close,
+    # brave" reflexing as tools.open_app (the replay of his real turns found
+    # it): the right stage, the wrong story in the log and in "why?".
+    import skills as S
+    with T.NoSideEffects(va):
+        clashes = []
+        for label_, (summary_, detail_) in results.items():
+            for phrase, exp, r, b_, bd, h, hd in detail_:
+                if not hd.startswith("tools."):
+                    continue
+                skill = hd.split("@")[0]
+                act = va.tools.detect(phrase)
+                fam = {l for l, f in S._TOOL_FAMILY.items() if skill in f}
+                if act in S._TOOL_FAMILY and act not in fam:
+                    clashes.append(f"{label_}: {phrase!r} reflexed as {skill}, tools would {act}")
+        print(f"\n  tool reflexes whose skill disagrees with the action: {len(clashes)}")
+        for c in clashes:
+            print(f"    {c}")
+            fails.append(c)
+
     # "Did you mean ...?" on CONVERSATION is an interruption, not help. With
     # JARVIS's raw ask bar alone, all 6 offers on his real turns were wrong.
     with T.NoSideEffects(va):

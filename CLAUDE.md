@@ -32,6 +32,8 @@ Nova has two parts:
     honesty.py               no spoken promise / false "done" from the LLM
     delivery.py              the single door for anything unprompted
     standing.py              "tell me when ..." watches, kept across restarts
+    shape.py                 is a sentence SHAPED like a request? (shared)
+    turnstats.py             per-turn record: path, skill, timings; "why?"
     config.json              all tuneables
     system_prompt.py         Nova's personality
     stt_engine.py            mic capture, wake dispatch, transcription
@@ -146,6 +148,10 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 
 **`standing.py`** — "Tell me when my battery is fully charged / my CPU goes above 90", list, cancel. Rows in `standing_watches`, one-shot, delivered through the door, survive restarts; an already-true condition is answered, not stored. **Local readings only** — a stock or weather watch would poll the network unprompted (invariant 3, his call). Stage 2e-0b.
 
+**`shape.py`** — One definition of "shaped like a request", shared by the brain's skills and the regex read stages (weather, market, tools readings): a request opens with a question word or a verb, or ends in "?"; a statement ("my battery died yesterday", "I asked Nova what the weather was...") is not one; nor is a definition ("what does a CPU actually do"), nor "tell me WHEN ..." (a watch, not a reading of now).
+
+**`turnstats.py`** — A row per turn in `turn_stats`: the path that answered (reflex / regex stage / math / watch / phrase / ask / LLM...), skill, confidence, matched example, time to decide and to first word. The evidence the next round of routing work starts from. Answers "why did you do that?" from the record, and "how often do you answer things by yourself?". Bookkeeping never costs a turn.
+
 **`ws_server.py`** — Bridge between Python and Swift. HTTP server on :5001, WebSocket server on :8766. Swift connects here to receive state changes, message content, streaming tokens, and **which screen to show** in real time. The current view and its data are held like the current state, so a client that connects — or reconnects after an app relaunch — is told immediately instead of coming up blank.
 
 **`requirements.txt`** — All Python dependencies. Install with `pip install -r requirements.txt`.
@@ -155,13 +161,12 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 ## Pipeline Routing Order (nova.py — first match wins)
 
 1. System commands — sleep / wake / mute (always intercepted first)
-2. Calendar follow-up offer — answers a "want to hear what's coming up?" with yes/no
-2b. Pending file question — "which one?" / "move it to Documents?" answered before routing
 1b. Destructive-action confirmation — a power command's strict yes/no
 2. Calendar follow-up offer — answers a "want to hear what's coming up?" with yes/no
 2b. Pending file question — "which one?" / "move it to Documents?" answered before routing
 2b′. The brain's lessons — an answer to "did you mean X?", a correction of the last
     reflex, teaching / forgetting / listing a phrase, and a taught phrase itself
+2b″. "Why did you do that?" / "how often do you answer by yourself?" (turnstats)
 2c. UI navigation (regex, anchored both ends) — go home / the menu / a named screen /
     work mode, plus the home surface: clear home, restore home, move a card to a slot
 2d. Pending actuation question — "that would send it, want me to?"
@@ -172,7 +177,7 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 2f-8. **Regex command stages, the fallback** (`_regex_commands`), unchanged in order:
     actuation (work mode) → calendar → screen → weather → market → files →
     memory → fast path → tools
-8c. "Did you mean <label>?" — nothing claimed it, but the brain nearly knew
+8a. "Did you mean <label>?" — nothing claimed it, but the brain nearly knew
 8b. Unsupported action — refused honestly, never left to the LLM to fake
 9. RAG context enrichment — query personal documents for context
 10. LLM fallback — MLX streaming with sentence-chunked TTS overlap
@@ -272,6 +277,7 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | `test_brain_seeds.py` | no two skills own a canonical seed; every seed executable by its own skill | real skills + real slot extractors |
 | `test_brain_intent.py` | brain vs regex on corpus, 5-fold held-out, two paraphrase sets, his real turns; no NEW wrong action | real brain + real embedder, throwaway DB |
 | `test_brain_learning.py` | the brain learns, asks, is taught and corrected — and nothing goes wrong silently | real `_handle_turn_impl`, stage runners recorded |
+| `test_turnstats.py` | every turn records what answered it; "why?" is answered from that | real `_handle_turn_impl`, stage runners recorded |
 | `test_honesty.py` | no spoken promise nothing keeps; typed turns stay silent | real `_stream_response`, scripted LLM |
 | `test_unprompted.py` | one door for unprompted speech: never twice, ceilings, watches kept across restarts | real delivery/proactive/standing, throwaway DB |
 | `brain_live_check.py` | the brain inside the REAL process: reflexes, timings, LLM still answers after, did-you-mean, taught phrase, correction | real process, read-only sentences, silent turns |

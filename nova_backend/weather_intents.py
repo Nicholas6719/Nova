@@ -87,6 +87,12 @@ class NovaWeather:
             return None
         if not _WEATHER_RE.search(text):
             return None
+        # A STATEMENT about the weather is not a request for a forecast: his
+        # real turn "I asked Nova what the weather was, it kept it on the
+        # screen..." fetched one (shape.py, 2026-11-19).
+        import shape
+        if not shape.asks(text) or shape.asks_for_later(text):
+            return None
         if _WEEK_RE.search(text):
             return "week"
         if _TOMORROW_RE.search(text):
