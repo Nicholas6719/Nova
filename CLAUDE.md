@@ -268,6 +268,29 @@ what Nova is doing.
   child process, runs it from the REPO path so Python-only changes need only an
   app relaunch), `NovaAPIClient` (HTTP + WS), `LocationProvider`.
 
+**Installing NovaOS.app (what he launches from Applications / the Dock).**
+The app runs the backend from the REPO (`nova_backend/nova.py`, whatever
+branch is checked out) with miniforge's python3 — the first interpreter that
+imports `mlx_lm`; it must also have everything in requirements.txt
+(`fastembed` included). Built and installed 2026-11-19:
+
+```bash
+xcodebuild -project Nova.xcodeproj -scheme Nova -configuration Release -derivedDataPath /tmp/novabuild build
+ditto /tmp/novabuild/Build/Products/Release/NovaOS.app /Applications/NovaOS.app
+```
+
+That needs his "Mac Development" certificate (team GVCGVNM4PS); on
+2026-11-19 the keychain had none and Xcode's account login was rejected, so
+it was built AD-HOC (`CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual
+DEVELOPMENT_TEAM="" REGISTER_APP_GROUPS=NO`), which keeps every entitlement
+the target generates (audio input, calendars, location, network). **The trap:**
+macOS keys privacy grants to the signature, so a newly signed app is a
+stranger — on first launch the backend FROZE on its very first `open()` of
+`nova.py` (the repo lives in ~/Documents) until he clicked Allow on the
+Documents prompt; no log line, 0% CPU, nothing on :5001. An ad-hoc build
+re-prompts after every rebuild; a team-signed one keeps its grants. Pinned
+in the Dock. Logs: `~/Library/Logs/Nova/backend.log`.
+
 **The Xcode target takes its files from disk** (`PBXFileSystemSynchronizedRootGroup`).
 Anything under `Nova/` is in the build because it exists — there is no list to
 forget to update.
