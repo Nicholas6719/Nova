@@ -34,6 +34,9 @@ Nova has two parts:
     standing.py              "tell me when ..." watches, kept across restarts
     shape.py                 is a sentence SHAPED like a request? (shared)
     turnstats.py             per-turn record: path, skill, timings; "why?"
+    world_facts.py           timeless facts: looked up, verified, served (Stage 3)
+    wiki.py                  Wikipedia, the one source facts come from
+    night_school.py          overnight: fact audit, curiosity, paraphrase learning
     config.json              all tuneables
     system_prompt.py         Nova's personality
     stt_engine.py            mic capture, wake dispatch, transcription
@@ -152,6 +155,10 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 
 **`turnstats.py`** — A row per turn in `turn_stats`: the path that answered (reflex / regex stage / math / watch / phrase / ask / LLM...), skill, confidence, matched example, time to decide and to first word. The evidence the next round of routing work starts from. Answers "why did you do that?" from the record, and "how often do you answer things by yourself?". Bookkeeping never costs a turn.
 
+**`world_facts.py`** + **`wiki.py`** — **Stage 3: facts that can never change**, ported from JARVIS's fact store (BRAIN_ROADMAP.md realm 1). A general-knowledge question that reaches the LLM stage is looked up on **Wikipedia** first (one request, ~0.5-0.9s, hard 2s timeout) and the sentences that answer it go to the model as reference — measured on the real 3B: right 9/9 with them, 8/9 without ("324 metres" for the Eiffel Tower). After the turn, off the live path, a one-sentence answer is synthesised at temperature 0 and STORED only if every number and nearly every word is in the source, it is not changeable, and it is not a "why". Next time it is answered from the store in ~20ms with no model and no request. **The 3B cannot judge "timeless"** — measured, it called 6 of 8 changeable facts timeless (Apple's CEO, Japan's population) — so a deterministic realm-2 screen decides and the model may only veto. **Serving is guarded by words, not just similarity:** at JARVIS's 0.90 cosine bar "who directed jaws 2" scored 0.937 against "who directed jaws" and "how wide is the mariana trench" 0.943 against "how deep"; a fact is served only when the question kind AND the content words match too (tall = high = height). **Privacy guard before any request:** nothing in the first/second person, no name he has told Nova about, no contact details — counted at the network boundary in the tests. Relevance floor 0.70 (measured: right pages 0.795-0.898, another question's pages ≤0.564). "How do you know that?" cites the article and when it was last checked; "that's wrong" demotes the fact and it is never stored again. Wikipedia rate-limits bursts (429 after ~10 quick requests): `Retry-After` is honoured. Tables `world_facts` / `world_lookups` in nova_memory.db (`facts` is memory.py's). `facts.enabled: false` stops every request.
+
+**`night_school.py`** — What Nova does while he sleeps (JARVIS's night school), **silent** — reported only when he asks "what did you learn last night?". Runs in `facts.night_hours` (01-06), after 45 idle minutes, at most once a day, on mains power only, every model call a background job, stopping between items the moment he is back. Three jobs: **the audit** — Wikipedia revision ids mean one request re-checks every stored fact and an unedited page is confirmed without reading it; an edited page is re-read, and if the answer is no longer in it the model may say CHANGED (demote) but may never confirm (measured: the 3B said SAME against an unrelated sentence) — two strikes demote; **curiosity** (his option C) — general, timeless questions he asked this week that the model answered from memory are looked up and offered to the store, each sent at most once ever, nothing personal or changeable sent; **paraphrase distillation** (local) — sentences a regex stage had to handle are paraphrased and taught to the brain through `brain.learn`'s full bar.
+
 **`ws_server.py`** — Bridge between Python and Swift. HTTP server on :5001, WebSocket server on :8766. Swift connects here to receive state changes, message content, streaming tokens, and **which screen to show** in real time. The current view and its data are held like the current state, so a client that connects — or reconnects after an app relaunch — is told immediately instead of coming up blank.
 
 **`requirements.txt`** — All Python dependencies. Install with `pip install -r requirements.txt`.
@@ -167,6 +174,8 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 2b′. The brain's lessons — an answer to "did you mean X?", a correction of the last
     reflex, teaching / forgetting / listing a phrase, and a taught phrase itself
 2b″. "Why did you do that?" / "how often do you answer by yourself?" (turnstats)
+2b‴. World-fact lessons — "how do you know that?", "that's wrong" about a fact,
+    "what did you learn last night?"
 2c. UI navigation (regex, anchored both ends) — go home / the menu / a named screen /
     work mode, plus the home surface: clear home, restore home, move a card to a slot
 2d. Pending actuation question — "that would send it, want me to?"
@@ -179,6 +188,9 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
     memory → fast path → tools
 8a. "Did you mean <label>?" — nothing claimed it, but the brain nearly knew
 8b. Unsupported action — refused honestly, never left to the LLM to fake
+8c. World facts — a verified fact answered from the store; otherwise a general-
+    knowledge question is looked up on Wikipedia and the answering sentences go
+    to the LLM as reference (stored afterwards if timeless, off the live path)
 9. RAG context enrichment — query personal documents for context
 10. LLM fallback — MLX streaming with sentence-chunked TTS overlap
 
@@ -278,6 +290,8 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | `test_brain_intent.py` | brain vs regex on corpus, 5-fold held-out, two paraphrase sets, his real turns; no NEW wrong action | real brain + real embedder, throwaway DB |
 | `test_brain_learning.py` | the brain learns, asks, is taught and corrected — and nothing goes wrong silently | real `_handle_turn_impl`, stage runners recorded |
 | `test_turnstats.py` | every turn records what answered it; "why?" is answered from that | real `_handle_turn_impl`, stage runners recorded |
+| `test_world_facts.py` | facts looked up, kept only if timeless and grounded, never served for another question, nothing personal sent; night school's audit, curiosity, gates | real store/night school/embedder + real pipeline; Wikipedia canned (real captured responses), model scripted |
+| `world_facts_live.py` | the real 3B answers better with the reference; real lookups, intake, audit; the real process looks up, stores, serves, cites | real model + real Wikipedia + real process (NOVA_TEST_LIVE=1, ~8 requests) |
 | `test_honesty.py` | no spoken promise nothing keeps; typed turns stay silent | real `_stream_response`, scripted LLM |
 | `test_unprompted.py` | one door for unprompted speech: never twice, ceilings, watches kept across restarts | real delivery/proactive/standing, throwaway DB |
 | `brain_live_check.py` | the brain inside the REAL process: reflexes, timings, LLM still answers after, did-you-mean, taught phrase, correction | real process, read-only sentences, silent turns |
@@ -356,13 +370,15 @@ small change — Nicholas asked for this explicitly and it is faster and sharper
 
 1. **Ports are 5001 (HTTP) and 8766 (WS).** These differ from Jarvis (3000/8765) intentionally so both apps can run simultaneously. Do not change them.
 2. **LLM n_ctx stays at 4096.** Do not raise the context window without explicit instruction.
-3. **No cloud dependencies — TWO narrow, documented exceptions.** Nova is local and private: no API keys, and the LLM/STT/TTS/memory NEVER leave the machine. The exceptions:
+3. **No cloud dependencies — FIVE narrow, documented exceptions.** Nova is local and private: no API keys, and the LLM/STT/TTS/memory NEVER leave the machine. The exceptions:
    - `maps_engine.py` — "how far is the nearest X" and travel times are Apple MapKit network lookups; getting a location fix sends an approximate position to Apple.
    - `spotify_search.py` — **added 2026-08-13, his explicit choice** after being shown the alternatives (hand off to Spotify's own search with no key; automate Spotify's UI). Name→URI lookup only; the words he asked for are what leaves the machine. Playback is local.
    - `market_engine.py` — **added 2026-08-17, his explicit choice.** Market data only; he ruled out any access to his real accounts. Yahoo needs no key at all; Finnhub's free tier needs one, stored at `NOVA_DATA_DIR/finnhub_credentials.json` and never in the committed config. What leaves the machine is a ticker or a company name he said out loud. **The privacy wrinkle he was told about and accepted: weather leaks an approximate location, but a stock query leaks what he is invested in.** `finance.enabled: false` disables it.
    - `weather_engine.py` — **added 2026-08-13, Nicholas's explicit choice** after being shown WeatherKit (needs a paid developer account), weather.gov (grid lookup) and browser scraping. Open-Meteo needs **no API key and no account**, so nothing ties a request to him beyond the IP any HTTP call carries. What leaves the machine is an approximate coordinate (rounded to ~100m) or a place name he said aloud.
 
-   Both are used ONLY when he asks that kind of question, touch neither the LLM nor memory, are never stored, and degrade honestly ("I can't get your location", "I couldn't reach the weather service") rather than guessing. `weather.enabled: false` disables the second entirely. **Do not widen further without asking him — this is his privacy line, and he decides where it sits.**
+   - `wiki.py` (Stage 3: `world_facts.py`, `night_school.py`) — **added 2026-11-19, his explicit choice: option C** of three he was shown (A local only, B lookups only when he asks, C B plus overnight research on his past questions). Wikipedia needs **no key and no account**; the User-Agent names nobody. What leaves the machine: the words of a general-knowledge question he asked; overnight, his own past general-knowledge questions the model answered from memory (each at most once, ever) and the page ids of facts already stored, to re-check them. **Never**: anything in the first or second person, any name he has told Nova about, memory, documents or the conversation — refused before the request, and logged in `world_lookups` so "what did you look up?" is answerable. Stored facts are Wikipedia's, never his. `facts.enabled: false` stops every request; `facts.night_school: false` keeps on-demand lookups and stops the overnight part.
+
+   Each is used ONLY for that kind of question (night school only for what he already asked), none sends his memory, and they degrade honestly ("I can't get your location", "I couldn't reach the weather service") rather than guessing. `weather.enabled: false` disables the second entirely. **Do not widen further without asking him — this is his privacy line, and he decides where it sits.**
 4. **Memory summarization runs on a daemon thread.** It must never block the main pipeline or the voice loop.
 5. **RAG loads in the background.** Queries must fail gracefully (return empty string) if the index is not yet ready.
 6. **TTS and LLM overlap.** The sentence-chunked streaming pipeline in `nova.py._stream_response` must not be changed to a blocking pattern.
@@ -415,8 +431,9 @@ The MLX model (~2GB) downloads automatically on first run.
    Remaining: the other tabs (finance, calendar, files, memory, conversations
    all still render generically), and a health screen that needs the phone.
 5. iOS app — far back burner, separate on-device architecture
-6. The brain, Stages 2-5 (see `nova_backend/BRAIN.md`): learning from LLM turns,
-   "did you mean...?", taught phrases and corrections; the fact store and night
-   school (needs a privacy decision from him); one door for anything unprompted,
-   honesty filter, standing watches, arithmetic in code; then evidence-driven work.
+6. The brain (see `nova_backend/BRAIN.md`): Stages 1-5 are built. Remaining:
+   explanations ("why ...") are looked up but never stored; Wikipedia lead
+   sections only (no "why is the sky blue" answer in them); a real night of
+   night school has not yet run on his Mac; regex stages retire only on
+   `[brain-disagree]` evidence from real use.
 

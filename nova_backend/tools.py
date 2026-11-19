@@ -1362,7 +1362,7 @@ class NovaTools:
              or re.search(r"\b(?:where|how\s+close)\s+is\s+the\s+(?:nearest|closest)\s+(.+)", low)
              or re.search(r"\b(?:where'?s)\s+the\s+(?:nearest|closest)\s+(.+)", low)
              or re.search(r"\b(?:nearest|closest)\s+(.+?)(?:\s+from\s+here)?$", low))
-        if m:
+        if m and not self._not_a_trip(m.group(1)):
             return self._maps_eta(low, m.group(1))
 
         # ── Navigation: open Maps with the destination ──────────────────
@@ -1383,6 +1383,22 @@ class NovaTools:
                     else f"I couldn't open directions to {spoken}.")
 
         return None
+
+    # "How far is X" is a trip from HIM only when X is somewhere he could go.
+    # A distance between two other places ("chicago from new york", "the moon
+    # from earth") or to something in the sky is a general-knowledge question:
+    # it belongs to the world-fact stage, and sending it to MapKit as a search
+    # near his location measured nonsense and leaked where he was for nothing.
+    _SKY = re.compile(r"^(?:the\s+)?(?:moon|sun|mars|venus|mercury|jupiter|saturn|uranus|"
+                      r"neptune|pluto|earth|stars?|nearest\s+star|milky\s+way|"
+                      r"andromeda|horizon|space|outer\s+space|iss|international\s+space\s+"
+                      r"station)\b", re.I)
+    _FROM_ELSEWHERE = re.compile(r"\bfrom\s+(?!here\b|my\s+(?:location|place|house|home)\b|"
+                                 r"me\b|where\s+i\s+am\b)\S", re.I)
+
+    def _not_a_trip(self, raw_place: str) -> bool:
+        p = (raw_place or "").strip()
+        return bool(self._SKY.search(p) or self._FROM_ELSEWHERE.search(p))
 
     def _maps_eta(self, low: str, raw_place: str) -> Optional[str]:
         """Speak how far/long away a place is, then offer directions."""

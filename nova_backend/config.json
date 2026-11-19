@@ -25,6 +25,22 @@
     "_note": "The learned intent router (brain.py, skills.py), ported from JARVIS. A sentence is embedded (bge-small, local ONNX, ~4ms) and matched to the nearest example phrasing; a confident match whose skill can extract its arguments runs directly with no LLM. confidence = top similarity, cut by (margin - gap) * margin_penalty when another skill's best example is within `margin` of it. threshold/ask_threshold/margin/margin_penalty are JARVIS's values, tuned on real speech with this same embedder: change them only with measurements (tests/test_brain_intent.py). enabled=false is an instant rollback to the regex chain exactly as it was.",
     "_ask_note": "\"Did you mean ...?\" is asked only when the raw top similarity >= ask_threshold (JARVIS) AND the margin-adjusted confidence >= ask_min_confidence (Nova). With the raw bar alone, all 6 offers on his real turns were wrong; 0.70 separated useful from useless offers on everything measured (2026-11-19)."
   },
+  "facts": {
+    "enabled": true,
+    "lookup_timeout_s": 2.0,
+    "serve_threshold": 0.90,
+    "relevance_floor": 0.70,
+    "night_school": true,
+    "night_hours": [1, 6],
+    "idle_minutes": 45,
+    "min_gap_hours": 20,
+    "fact_budget": 20,
+    "curiosity_budget": 5,
+    "distill_budget": 8,
+    "request_spacing_s": 15,
+    "recheck_days": 3,
+    "_note": "Stage 3 (world_facts.py, wiki.py, night_school.py). Wikipedia is invariant 3's fifth exception, his explicit choice 2026-11-19 (option C). enabled=false: no lookups at all. night_school=false: keeps on-demand lookups, stops the overnight audit, research and paraphrase learning."
+  },
   "stt": {
     "model": "base.en",
     "language": "en",

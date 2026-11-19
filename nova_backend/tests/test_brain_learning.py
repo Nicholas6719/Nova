@@ -67,7 +67,8 @@ class Recorder:
             setattr(va, name, self._mk(name))
         va._finish_tool = lambda resp: self.calls.append(("_finish_tool", resp))
         va._respond = lambda text: self.said.append(text)
-        va._stream_response = lambda text, rag_context="": self.calls.append(("llm", text))
+        va._stream_response = lambda text, rag_context="", reference="": \
+            self.calls.append(("llm", text))
         va.set_state = lambda *a, **k: None
         va._rag_ready = False
 

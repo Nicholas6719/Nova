@@ -42,6 +42,8 @@ Wake word ("Nova", openWakeWord)
   → [1b] Power confirmation         strict yes/no
   → [2]  Calendar follow-up         "want to hear what's coming up?"
   → [2b] Pending file question      "which one?" / "move it to Documents?"
+  → [2b‴] World-fact lessons       "how do you know that?", "that's wrong",
+                                    "what did you learn last night?"
   → [2c] UI navigation (regex)      home / menu / screens / home surface
   → [2d] Pending actuation question "that would send it, want me to?"
   → [2e] THE BRAIN                  brain.py + skills.py: a confident skill runs
@@ -51,6 +53,10 @@ Wake word ("Nova", openWakeWord)
                                     calendar → screen → weather → market →
                                     files → memory → fast path → tools
   → [8b] Unsupported action         refused honestly, never faked
+  → [8c] World facts                world_facts.py: a verified fact from the
+                                    store; else a general question is looked
+                                    up on Wikipedia (wiki.py) and the answering
+                                    sentences go to the LLM as reference
   → [9]  RAG context enrichment
   → [10] LLM (MLX streaming, carried prompt cache) → sentence chunks → Kokoro TTS
 ```

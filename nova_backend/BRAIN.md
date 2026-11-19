@@ -155,6 +155,8 @@ matrices (mistake #9).
 | `tests/test_honesty.py` | no spoken promise or false "done"; typed turns stay silent |
 | `tests/test_unprompted.py` | the single door, ceilings, restarts, standing watches |
 | `tests/test_turnstats.py` | every turn recorded with its path; "why?" answered from the record |
+| `tests/test_world_facts.py` | Stage 3: detection, the privacy guard (counted at the network), relevance, intake rules, the word guard, disputes, 429 handling, night school's audit / curiosity / gates / distillation, the real pipeline |
+| `tests/world_facts_live.py` | Stage 3 with the real 3B, real Wikipedia and the real process (NOVA_TEST_LIVE=1) |
 
 Scoring counts a WRONG action (did something, not what he meant) apart from a
 miss (fell to conversation or an honest refusal). Sentences whose canonical form
@@ -241,12 +243,66 @@ corpus (78), his real turns (67), and both paraphrase sets (30, 20);
 `brain_live_check.py` runs the full did-you-mean → yes → reflex round trip, a
 taught phrase and a correction inside the real process.
 
-**Stage 3 — answering from its own knowledge.** The fact store (timeless,
-web-verified facts with sources) and night school (re-verify facts, research
-questions answered from memory, widen routing with paraphrases). Paraphrase
-distillation is local and allowed. Web verification and overnight research
-need the network UNPROMPTED — beyond invariant 3's exceptions. That is his
-decision; ask before building it.
+**Stage 3 — answering from its own knowledge. DONE (2026-11-19).** He chose
+**option C** of the three he was shown (A local only; B Wikipedia lookups
+only when he asks; C B plus overnight research on his past questions). It is
+invariant 3's fifth exception, written up in CLAUDE.md.
+
+`world_facts.py` (store), `wiki.py` (the one source), `night_school.py`.
+Pipeline: stage 2b‴ (receipts, disputes, the night report) and 8c (serve from
+the store, otherwise look up and hand the answering sentences to the model).
+
+What is different from JARVIS's fact store, each from a measurement:
+
+- **Nova's LLM has no tools**, so nothing researches mid-answer. A general-
+  knowledge question that reaches the LLM stage is looked up FIRST (one
+  combined request: search, lead sections, page ids, revision ids) and the
+  sentences that answer it — ranked locally by bge-small — go to the model as
+  reference. Real 3B, nine canned questions: right 9/9 with the reference,
+  8/9 without (it said the Eiffel Tower is "approximately 324 meters").
+- **The word guard.** JARVIS serves at cosine 0.90. With Nova's embedder that
+  would answer "who directed jaws 2" (0.937), "how wide is the mariana
+  trench" (0.943) and "who starred in jaws" (0.921) with the wrong fact. A
+  fact is served only if the question KIND (who / when / where / why / count
+  / other) and the CONTENT WORDS also match, after a small synonym map. All
+  ten measured near-misses are refused; three real paraphrases are missed,
+  which costs a live lookup, never a wrong answer.
+- **The 3B cannot judge "timeless".** JARVIS asks its 20B. Nova's 3B said YES
+  to 6 of 8 changeable facts (Apple's CEO, the tallest building, Japan's
+  population, the newest iPhone, the 100 m record, the last World Cup). The
+  deterministic realm-2 screen (JARVIS's trigger words + present-tense "who
+  is / holds / leads", "last", "won", growing counts) catches all 8; the
+  model only ever vetoes.
+- **Grounding.** Every number in a stored answer must be in the Wikipedia
+  text, and 80% of its words must trace back to it — fact_reconciler's rule
+  for what he says, applied to the world.
+- **No "why" is stored.** Synthesised to one sentence, "why is the sky blue"
+  became "due to a phenomenon called sky radiation": grounded, and no answer.
+- **Relevance floor 0.70, not 0.80.** On real Wikipedia text the right pages
+  score 0.795-0.898 and another question's pages at most 0.564; 0.80 would
+  have discarded the Spielberg sentence for "who directed jaws".
+- **Privacy guard before every request**: nothing first or second person, no
+  name from his memory (relations, his own), no contact details. Tested by
+  counting what reaches the network boundary.
+- **The audit uses revision ids**: one request re-checks up to fifty facts,
+  an unedited page is confirmed without reading it. An edited page that no
+  longer contains the answer can be demoted by the model (CHANGED) but never
+  confirmed — measured, the 3B said SAME for a fact against a sentence about
+  cinema screens. Two strikes demote.
+- **Silent**: night school never speaks. "What did you learn last night?",
+  "how do you know that?" and "that's wrong" are how he sees and steers it.
+
+Measured live (tests/world_facts_live.py): real lookups 0.84-0.91s; in the
+real process a new question was looked up and answered (first word 2.7s, the
+lookup ~1-2s of it before ranking was shortlisted to ≤14 sentences — ranking
+alone fell from 220-640ms to 65-220ms with the top sentence unchanged on all
+12 fixtures), stored ~3s later off the live path, and asked again another way
+answered from the store in 22ms; the Apple CEO question was looked up live
+(Wikipedia knew what the 3B could not) and never stored; the overnight audit
+confirmed a stored fact against the live page.
+
+Not verified: a real night (the window, idle and power gates are tested with
+a clock; the run itself was forced in-process).
 
 **Stage 4 — the rest of JARVIS. DONE (2026-11-19), local parts.**
 
@@ -343,8 +399,6 @@ Beyond JARVIS:
 
 Ideas that need his OK (they change what Nova does unprompted or touch
 privacy), not built:
-- night school (Stage 3), including paraphrase distillation, which runs the
-  model overnight without being asked;
 - stock / weather standing watches (poll the network unprompted);
 - a weekly spoken "here's what I learned" — unprompted speech;
 - turning the `[brain-disagree]` log into a weekly review of regex stages the
@@ -359,6 +413,12 @@ Spider-Man No Way Home in Disney Plus", "find me, tickets to Spider-Man brand
 new day", "Open AMC in the browser" (none of these sites are in
 browser_control.SITES), "You didn't close the brave browser, please close the
 brave browser", "Nova, got to sleep" (a mishear of the sign-off).
+
+Stage 3: explanations are looked up but never stored, and Wikipedia's lead
+sections do not contain every answer ("why is the sky blue" gets colour-swatch
+sentences; the model then answers from memory as before). Present-tense
+"who's the author of X" is refused by the store on purpose (same shape as
+"who's the director of the FBI") and gets a live lookup instead.
 
 "open notes" goes to file search, not the Notes app — in both routers, from
 file_intents treating "notes" as a file noun.

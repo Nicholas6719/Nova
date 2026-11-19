@@ -288,6 +288,11 @@ class VoiceAssistant:
         self._last_reflex = None         # what "no, I meant ..." would correct
         self._last_turn = None           # turnstats: the last decision, for "why?"
         self.turnstats = None
+        self.facts = None                # world_facts.py; set by _init_facts
+        self.night = None                # night_school.py
+        self._turn_basis = None          # this turn: what the answer rested on
+        self._last_basis = None          # the last answer's, for "how do you know?"
+        self._last_active = time.time()  # night school waits until he's been away
         self._rag_ready       = False
         self._rag             = None
         # Set by a "return to wake mode" voice command to drop out of
@@ -351,6 +356,7 @@ class VoiceAssistant:
         self.ws.on_interrupt = self._barged_in
         self._init_views()          # after _init_ws: it needs the WS server
         self._init_brain()          # last: its skills reach every engine above
+        self._init_facts()          # after the brain: it shares the embedder
         self._verify_engines()
         self._show_home()
         self._warm_prompt_cache()
@@ -798,6 +804,7 @@ class VoiceAssistant:
         self._start_home_ticker()
         self._start_proactive()
         self._init_standing()
+        self._start_night_school()
 
     def _start_proactive(self) -> None:
         """Let Nova speak first, occasionally.
@@ -1332,8 +1339,10 @@ class VoiceAssistant:
         self._turn_depth = depth + 1
         if depth == 0:
             self._turn_t0 = time.time()
+            self._last_active = self._turn_t0
             self._turn_note = None
             self._turn_first = None
+            self._turn_basis = None
         try:
             self._route_turn(text)
         finally:
@@ -1360,6 +1369,14 @@ class VoiceAssistant:
         row = {"text": text.strip(), **note, "first_ms": getattr(self, "_turn_first", None)}
         if note.get("path") != "explain":
             self._last_turn = row
+            self._last_basis = getattr(self, "_turn_basis", None)
+        # "No, I meant ..." corrects the LAST reflex only while it is the last
+        # thing Nova did. It used to stay armed for 90 seconds through other
+        # turns, so "open safari", a question, then "that's wrong" about the
+        # ANSWER un-learned the safari example.
+        if note.get("path") not in ("reflex", "lesson", "explain"):
+            self._last_reflex = None
+        self._last_active = time.time()
         try:
             if getattr(self, "turnstats", None) is None:
                 from turnstats import TurnStats
@@ -1455,6 +1472,14 @@ class VoiceAssistant:
             except Exception as exc:
                 log.warning(f"brain report failed: {exc}")
                 self._respond("I couldn't put that together just now.")
+            return
+
+        # ── 2b‴. World facts: receipts, disputes, the night-school report ────
+        # "How do you know that?" is answered from what the last answer
+        # actually rested on; "that's wrong" about a fact stops Nova trusting
+        # it; "what did you learn last night?" reads night school's record.
+        if self._world_lessons(text):
+            self._note("explain")
             return
 
         # ── 2c. UI navigation ────────────────────────────────────────────────
@@ -1557,6 +1582,20 @@ class VoiceAssistant:
             )
             return
 
+        # ── 8c. World facts (Stage 3) ────────────────────────────────────────
+        # A general-knowledge question Nova has already verified is answered
+        # from the store in milliseconds. Otherwise it is looked up on
+        # Wikipedia (his choice; wiki.py) and the sentences that answer it go
+        # to the model as reference, so the answer rests on a source instead
+        # of a 3B's memory. After the turn, off the live path, the answer may
+        # become a stored fact (world_facts.consider decides).
+        ref = None
+        if self.facts is not None:
+            fact = self._world_fact(text)
+            if fact is not None:
+                return
+            ref = self._world_reference(text)
+
         # ── 9. RAG context enrichment ────────────────────────────────────────
         rag_ctx = ""
         if self._rag_ready and self._rag:
@@ -1566,9 +1605,205 @@ class VoiceAssistant:
                 pass
 
         # ── 10. LLM fallback (streaming) ──────────────────────────────────────
-        self._note("conversation" if self._brain_chat else "llm")
+        if ref is not None:
+            self._note("wiki")
+        else:
+            self._note("conversation" if self._brain_chat else "llm")
         self.set_state("thinking")
-        self._stream_response(text, rag_context=rag_ctx)
+        self._stream_response(text, rag_context=rag_ctx,
+                              reference=(ref or {}).get("context", ""))
+        if ref is not None:
+            self._world_consider(ref)
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # World facts and night school (Stage 3 of the brain port)
+    # ═════════════════════════════════════════════════════════════════════════════
+    _RELATION_WORDS = re.compile(
+        r"name|sister|brother|mother|father|mom|mum|dad|wife|husband|partner|girlfriend|"
+        r"boyfriend|fianc|friend|son|daughter|family|cousin|aunt|uncle|grand|niece|nephew|"
+        r"pet|dog|cat|boss|manager|coworker|colleague|roommate|neighbo", re.I)
+
+    def _private_names(self) -> set:
+        """Names that must never be sent to Wikipedia: his own, and anyone or
+        anything he has told Nova about as a relation (his sister's name, his
+        dog's). Read fresh, so a fact learned today protects tonight."""
+        names = set()
+        u = self.config.get("user", {})
+        for v in (u.get("name"), u.get("address_as"), "Coppola"):
+            if v:
+                names.update(re.findall(r"[A-Za-z']{3,}", v))
+        try:
+            for f in self.memory.all_facts():
+                if self._RELATION_WORDS.search(f"{f.get('category', '')} {f.get('key', '')}"):
+                    names.update(w for w in re.findall(r"[A-Za-z']{3,}", str(f.get("value", "")))
+                                 if w[0].isupper() or f.get("key", "").endswith("name"))
+        except Exception as exc:
+            log.debug(f"facts: could not read names ({exc})")
+        return names
+
+    def _init_facts(self) -> None:
+        self.facts = None
+        cfg = self.config.get("facts", {})
+        if not cfg.get("enabled", True):
+            log.info("[facts] disabled in config: no Wikipedia lookups")
+            return
+        try:
+            from world_facts import WorldFacts
+            embedder = None
+            if self.brain is not None:
+                embedder = self.brain._get_embedder
+            else:
+                from brain import EMBED_MODEL, MODEL_DIR
+                _holder: dict = {}
+
+                def embedder():
+                    if "m" not in _holder:
+                        from fastembed import TextEmbedding
+                        _holder["m"] = TextEmbedding(EMBED_MODEL, cache_dir=str(MODEL_DIR),
+                                                     local_files_only=True)
+                    return _holder["m"]
+            self.facts = WorldFacts(DATA_DIR / "nova_memory.db", self.config,
+                                    embedder=embedder, names=self._private_names)
+        except Exception as exc:
+            log.warning(f"[facts] unavailable: {exc}")
+            self.facts = None
+
+    def _llm_generate(self, system: str, user: str, temperature: float = 0.0,
+                      max_tokens: int = 120) -> str:
+        """A blocking model call from anywhere: direct on the nova-llm thread
+        (MLX is thread-local), otherwise as a BACKGROUND job there, so a turn
+        he is waiting on always goes first."""
+        if threading.current_thread().name == "nova-llm":
+            return self.llm.generate(system_prompt=system, history=[], user_message=user,
+                                     temperature=temperature, max_tokens=max_tokens)
+        out: dict = {}
+
+        def job():
+            try:
+                out["v"] = self.llm.generate(system_prompt=system, history=[], user_message=user,
+                                             temperature=temperature, max_tokens=max_tokens)
+            except Exception as exc:
+                out["e"] = exc
+        self._submit_job(job, wait=True)
+        if "e" in out:
+            raise out["e"]
+        return out.get("v", "")
+
+    def _world_fact(self, text: str) -> Optional[dict]:
+        """Answer from the store, if it holds this exact fact."""
+        try:
+            fact = self.facts.lookup(text)
+        except Exception as exc:
+            log.warning(f"[facts] lookup failed, answering normally: {exc}")
+            return None
+        if fact is None:
+            return None
+        self._note("fact", confidence=fact.get("score"), matched=fact["question"])
+        self._turn_basis = self.facts.last
+        self._respond(fact["answer"])
+        return fact
+
+    def _world_reference(self, text: str) -> Optional[dict]:
+        """Look a general-knowledge question up. None unless it found
+        sentences that answer it; never raises, never delays a non-question."""
+        try:
+            ref = self.facts.reference(text)
+        except Exception as exc:
+            log.warning(f"[facts] reference failed, answering normally: {exc}")
+            return None
+        if not ref.get("ok"):
+            return None
+        log.info(f"[facts] looked up: {len(ref['sentences'])} sentence(s), best {ref['best']:.3f}")
+        self._turn_basis = self.facts.last
+        return ref
+
+    def _world_consider(self, ref: dict) -> None:
+        """After the answer: maybe store it. Background priority, so the next
+        thing he says jumps ahead of it."""
+        def job():
+            try:
+                self.facts.consider(ref, self._llm_generate, origin="asked")
+            except Exception as exc:
+                log.warning(f"[facts] intake failed: {exc}")
+        self._submit_job(job)
+
+    def _world_lessons(self, text: str) -> bool:
+        import world_facts as W
+        import night_school as N
+        if N.wants_report(text):
+            rep = self.night.last_report() if self.night is not None else None
+            label = (lambda s: self.brain.by_name[s].label
+                     if self.brain is not None and s in self.brain.by_name else s)
+            self._respond(N.spoken(rep, label))
+            return True
+        basis = getattr(self, "_last_basis", None)
+        last = getattr(self, "_last_turn", None) or {}
+        if W.wants_source(text):
+            said = W.receipt(basis)
+            if said is None and last.get("path") in ("llm", "conversation"):
+                said = ("I didn't look that one up. It came from what I already know, "
+                        "so I could be wrong.")
+            if said is None and last:
+                # After a command, "how do you know" means "why did you do
+                # that" — answered from the record, never left to the model.
+                import turnstats
+                said = turnstats.explain(last, self.brain)
+            if said is None:
+                return False
+            self._respond(said)
+            return True
+        if W.says_wrong(text) and basis and self.facts is not None \
+                and time.time() - basis.get("ts", 0) <= self.CORRECTION_WINDOW_S:
+            q = basis["fact"]["question"] if basis["how"] == "stored" else basis.get("question", "")
+            n = self.facts.dispute(q)
+            log.info(f"[facts] disputed {q!r} ({n} demoted)")
+            self._last_basis = None
+            self._respond("Thanks. I've stopped trusting that one, and I won't keep it.")
+            return True
+        return False
+
+    def _start_night_school(self) -> None:
+        self.night = None
+        if self.facts is None or not self.config.get("facts", {}).get("night_school", True):
+            return
+        try:
+            from night_school import NightSchool
+
+            def acts(p: str) -> bool:
+                b = self.brain
+                return bool(b is not None and b.ready and b.decide(p, va=self) is not None)
+
+            def learn(p: str, skill: str) -> bool:
+                out: dict = {}
+
+                def job():
+                    try:
+                        out["v"] = self.brain.learn(p, skill, source="night_school", va=self)
+                    except Exception as exc:
+                        log.warning(f"[night] learn failed: {exc}")
+                self._submit_job(job, wait=True)
+                return bool(out.get("v"))
+
+            def skill_for(t: str) -> Optional[str]:
+                from skills import skill_for_regex
+                stage, intent = self._regex_intent(t)
+                if stage in ("llm", "unsupported", None):
+                    return None
+                return skill_for_regex(self, t, stage, intent)
+
+            def on_power() -> Optional[bool]:
+                r = self.tools.battery_reading()
+                return None if r is None else bool(r.get("ac"))
+
+            here = lambda: time.time() - self._last_active < 120
+            self.night = NightSchool(
+                DATA_DIR / "nova_memory.db", self.config, self.facts, self._llm_generate,
+                here=here, learn=learn if self.brain is not None else None,
+                acts=acts, skill_for=skill_for, on_power=on_power)
+            self.night.start(idle_for=lambda: time.time() - self._last_active)
+        except Exception as exc:
+            log.warning(f"[night] not started: {exc}")
+            self.night = None
 
     # ═════════════════════════════════════════════════════════════════════════════
     # Routing: the brain, and the regex stages behind it
@@ -2434,7 +2669,8 @@ class VoiceAssistant:
     _TTS_CLAUSE_END = re.compile(r"[,;:](?=\s)")
     _TTS_FIRST_CHUNK_MIN_WORDS = 4
 
-    def _stream_response(self, user_text: str, rag_context: str = "") -> None:
+    def _stream_response(self, user_text: str, rag_context: str = "",
+                         reference: str = "") -> None:
         """
         Stream LLM tokens to the UI and speak sentences AS they complete, so
         Nova starts talking on sentence 1 while it's still generating the rest
@@ -2446,7 +2682,7 @@ class VoiceAssistant:
         path — an instant, code-free rollback if playback ever starves.
         """
         memory_ctx    = self.memory.get_context_for_llm()
-        system_prompt = self._build_system_prompt(memory_ctx, rag_context)
+        system_prompt = self._build_system_prompt(memory_ctx, rag_context, reference)
         history       = self.memory.get_recent_turns(n=10)
         stream_tts    = self.config["tts"].get("stream_while_generating", True)
         split_first   = self.config["tts"].get("split_first_clause", True)
@@ -2550,9 +2786,10 @@ class VoiceAssistant:
 
         self.set_state("idle")
 
-    def _build_system_prompt(self, memory_ctx: str, rag_ctx: str) -> str:
+    def _build_system_prompt(self, memory_ctx: str, rag_ctx: str, reference: str = "") -> str:
         from system_prompt import build_system_prompt
-        return build_system_prompt(self.config, memory_context=memory_ctx, rag_context=rag_ctx)
+        return build_system_prompt(self.config, memory_context=memory_ctx, rag_context=rag_ctx,
+                                   reference_context=reference)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────────

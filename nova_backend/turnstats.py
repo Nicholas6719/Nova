@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS turn_stats (
     text      TEXT NOT NULL,
     path      TEXT NOT NULL,     -- reflex | regex:<stage> | math | watch | phrase |
                                  -- lesson | ask | conversation | unsupported | llm |
-                                 -- system | view | pending | explain
+                                 -- fact | wiki | system | view | pending | explain
     skill     TEXT,
     confidence REAL,
     matched   TEXT,              -- the example the brain matched (canonical)
@@ -103,7 +103,8 @@ class TurnStats:
             rows = db.execute("SELECT path, decide_ms, first_ms FROM turn_stats "
                               "WHERE ts >= ? AND path != 'explain'", (since,)).fetchall()
         total = len(rows)
-        own = sum(1 for r in rows if not r["path"] in ("llm", "conversation"))
+        model = ("llm", "conversation", "wiki")
+        own = sum(1 for r in rows if r["path"] not in model)
         reflex = sum(1 for r in rows if r["path"] == "reflex")
         llm = total - own
 
@@ -112,9 +113,9 @@ class TurnStats:
             return xs[len(xs) // 2] if xs else None
         return {"total": total, "own": own, "reflex": reflex, "llm": llm,
                 "own_first_ms": median(r["first_ms"] for r in rows
-                                       if r["path"] not in ("llm", "conversation")),
+                                       if r["path"] not in model),
                 "llm_first_ms": median(r["first_ms"] for r in rows
-                                       if r["path"] in ("llm", "conversation"))}
+                                       if r["path"] in model)}
 
 
 def wants_explanation(text: str) -> bool:
@@ -157,6 +158,12 @@ def explain(last: Optional[dict], brain=None) -> str:
     if p == "unsupported":
         return ("That sounded like something you wanted done that I can't do yet, "
                 "so I said so instead of pretending.")
+    if p == "fact":
+        return ("I already knew that one. I looked it up on Wikipedia before, and it's "
+                "been checked since, so I answered from what I'd stored.")
+    if p == "wiki":
+        return ("That was a general knowledge question, so I looked it up on Wikipedia "
+                "and answered from what it said.")
     if p == "conversation":
         return "I was confident that was conversation, not a command, so I just talked."
     if p == "llm":

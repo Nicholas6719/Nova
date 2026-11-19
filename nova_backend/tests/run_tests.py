@@ -114,6 +114,9 @@ SUITES = {
                 "every turn records what answered it; 'why?' is answered from that", False, False),
     "learn":   ("test_brain_learning.py",
                 "brain learns, asks, is taught and corrected — safely", False, False),
+    "facts":   ("test_world_facts.py",
+                "world facts: looked up, kept only if timeless, never mis-served, nothing personal sent",
+                False, False),
     "loop":    ("test_conversation_loop.py",
                 "conversation state machine (real loop, scripted mic)", False, False),
     "cache":   ("test_prompt_cache.py",
@@ -165,6 +168,9 @@ CANNOT_VERIFY = [
     "the brain on what he ACTUALLY says next — its held-out scores are "
     "sentences written for a test; [brain] and [brain-disagree] in the log "
     "are the real measure",
+    "night school at 3am on his Mac: the window, idle and power gates are "
+    "tested with a clock, and a forced run was measured against real Wikipedia "
+    "(tests/world_facts_live.py, NOVA_TEST_LIVE=1), but no real night has run",
 ]
 
 
@@ -192,7 +198,7 @@ def main() -> int:
     if args.all:
         chosen = list(SUITES)
     elif args.quick:
-        chosen = ["env", "routing", "seeds", "brain", "learn", "honesty", "door", "stats", "loop", "wake", "cache", "rag", "tts",
+        chosen = ["env", "routing", "seeds", "brain", "learn", "facts", "honesty", "door", "stats", "loop", "wake", "cache", "rag", "tts",
                   "weather", "music", "views", "home", "sounds", "market",
                   "act", "conf", "echo"]
     else:

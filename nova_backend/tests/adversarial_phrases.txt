@@ -515,3 +515,21 @@ turn the sound down  ==>  tools
 turn repeat on  ==>  tools
 # "Let me know when ..." asks about LATER, never for a reading now.
 let me know when the weather clears up  ==>  llm
+
+# ── General-knowledge questions (Stage 3, 2026-11-19) — they must reach the
+#    world-fact stage (8c, inside "llm"), never a command handler. "how far is
+#    X" was claimed by maps: "the moon from earth" would have gone to MapKit as
+#    a nearby search from HIS location, and "chicago from new york" measured
+#    the distance from him to a place called "chicago from new york". ────────
+how far is the moon from earth  ==>  llm
+how far away is the sun  ==>  llm
+how far is chicago from new york  ==>  llm
+how far is mars from the sun  ==>  llm
+how tall is the eiffel tower  ==>  llm
+who wrote pride and prejudice  ==>  llm
+what is photosynthesis  ==>  llm
+when did the berlin wall fall  ==>  llm
+how many legs does a spider have  ==>  llm
+who painted the mona lisa  ==>  llm
+how far is the nearest cvs  ==>  tools
+how far is boston  ==>  tools
