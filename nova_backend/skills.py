@@ -1078,3 +1078,114 @@ SKILLS: list[Skill] = (VIEW_SKILLS + ACT_SKILLS + CAL_SKILLS + SCREEN_SKILLS
                        + WEATHER_SKILLS + MARKET_SKILLS + FILE_SKILLS
                        + MEMORY_SKILLS + FAST_SKILLS + TOOL_SKILLS + [GENERAL])
 SKILL_BY_NAME = {s.name: s for s in SKILLS}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# The teacher: which skill a regex stage's claim corresponds to
+# ═══════════════════════════════════════════════════════════════════════════════
+# Nova's LLM has no tools, so JARVIS's lesson — "the LLM solved this with
+# exactly one tool" — has no Nova equivalent. The regex chain behind the brain
+# is the teacher instead: a sentence the brain fell through on and a regex stage
+# then claimed. This maps that claim to ONE skill, or None when it cannot say
+# which (brain.learn still applies its whole bar afterwards).
+_CAL_SKILL = {"read_today": "cal.today", "read_upcoming": "cal.upcoming",
+              "read_rest_of_week": "cal.upcoming", "read_reminders": "cal.reminders",
+              "read_reminders_lookahead": "cal.reminders"}
+_FILE_SKILL = {"file_find": "files.find", "file_open": "files.open",
+               "file_describe": "files.describe", "file_move": "files.move",
+               "file_copy": "files.copy", "file_rename": "files.rename",
+               "list_folder": "files.list", "file_delete": "files.delete"}
+_MARKET_SKILL = {"market": "market.overview", "quote": "market.quote",
+                 "analysts": "market.analysts", "news": "market.news"}
+_ACT_SKILL = {"type": "act.type", "key": "act.key", "click": "act.click",
+              "scroll": "act.scroll"}
+# tools.detect() labels -> the skills that can produce them. A tool lesson is
+# taken only when the brain's own best tools guess is in the family the dry run
+# names, so a volume sentence can never be learned as a brightness one.
+_TOOL_FAMILY = {
+    "volume": {"tools.volume_query", "tools.volume_up", "tools.volume_down",
+               "tools.volume_max", "tools.mute", "tools.unmute", "tools.volume_set"},
+    "brightness": {"tools.brightness_up", "tools.brightness_down", "tools.brightness_set"},
+    "timer": {"tools.timer_set", "tools.timer_cancel"},
+    "open_app": {"tools.open_app"}, "quit_app": {"tools.quit_app"},
+    "minimize": {"tools.minimize"}, "web_search": {"tools.web_search"},
+    "spotify_search": {"tools.play_named"},
+    "maps_engine.nearest": {"tools.maps_eta"},
+    "maps_engine.open_directions": {"tools.maps_directions"},
+    "browser_control.open_url": {"tools.open_site", "tools.site_search", "tools.web_search"},
+    "browser_control.navigate_history": {"tools.back", "tools.forward"},
+    "browser_control.reload_page": {"tools.reload"},
+    "browser_control.new_tab": {"tools.new_tab"},
+    "browser_control.close_tab": {"tools.close_tab"},
+    "browser_control.where_am_i": {"tools.where_am_i"},
+    "browser_control.list_tabs": {"tools.list_tabs"},
+    "browser_control.scroll": {"act.scroll"},
+}
+
+
+def _memory_kind(va, text: str) -> Optional[str]:
+    t = text or ""
+    if va._SAVE_RE.search(t):
+        return "memory.save"
+    if va._NOTE_SAVE_RE.match(t):
+        return "memory.note"
+    if va._UPDATE_RE.search(t):
+        return "memory.update"
+    if va._FORGET_RE.search(t):
+        return "memory.forget"
+    if va._NOTE_FORGET_RE.match(t):
+        return "memory.unnote"
+    if va._RECALL_RE.search(t):
+        return "memory.recall"
+    if any(p in t.lower() for p in va._META_RECALL):
+        return "memory.meta"
+    return None
+
+
+def _fast_kind(va, text: str) -> Optional[str]:
+    low = (text or "").lower()
+    if _greet_slots(va, text) is not None:
+        return "fast.greet"
+    if re.search(r"say that again|repeat (?:that|yourself|it)|come again|what did you (?:just )?say", low):
+        return "fast.repeat"
+    clock = _clock_slots("both")(va, text) is not None
+    if clock:
+        return "fast.datetime"
+    if _clock_slots("time")(va, text) is not None:
+        return "fast.time"
+    if _clock_slots("date")(va, text) is not None:
+        return "fast.date"
+    return None
+
+
+def skill_for_regex(va, text: str, stage: str, intent) -> Optional[str]:
+    if stage == "calendar":
+        return _CAL_SKILL.get(intent, "cal.write" if intent in _CAL_WRITES else None)
+    if stage == "files":
+        return _FILE_SKILL.get(intent)
+    if stage == "market":
+        return _MARKET_SKILL.get(intent)
+    if stage == "weather":
+        return "weather"
+    if stage == "screen":
+        return "screen.context" if intent == "context" else "screen.describe"
+    if stage == "actuation":
+        return _ACT_SKILL.get(intent)
+    if stage == "memory":
+        return _memory_kind(va, text)
+    if stage == "fastpath":
+        return _fast_kind(va, text)
+    if stage == "tools":
+        family = _TOOL_FAMILY.get(intent or "")
+        if not family or va.brain is None:
+            return None
+        # The brain's own best guess, restricted to tool skills.
+        saved = (va.brain.last_match, va.brain.unsure, va.brain.conversation)
+        try:
+            exclude = {sk.name for sk in SKILLS if sk.name not in family}
+            name, _ = va.brain.classify(text, exclude=exclude)
+        finally:
+            va.brain.last_match, va.brain.unsure, va.brain.conversation = saved
+        return name if name in family else None
+    return None          # views claim at 2c, ahead of the brain: nothing to learn
+

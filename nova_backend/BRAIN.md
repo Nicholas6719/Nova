@@ -149,7 +149,8 @@ matrices (mistake #9).
 | --- | --- |
 | `tests/test_brain_seeds.py` | no two skills own a canonical seed; every seed executable by its own skill; held-out overlap reported |
 | `tests/test_brain_intent.py` | brain vs regex vs hybrid on: corpus, 5-fold held-out corpus, paraphrases v1, sealed paraphrases v2, his real turns (local only). Gates: hybrid ≥ regex on the corpus; no NEW wrong action on any set |
-| `tests/brain_live_check.py` | inside the real process: load, reflex timings, LLM still answers after reflexes |
+| `tests/test_brain_learning.py` | Stage 2 through the real pipeline: the learning bar, persistence (placeholder rows survive), no lingering SQLite lock, regex-taught reflexes, did-you-mean yes/no/restart, taught phrases, corrections |
+| `tests/brain_live_check.py` | inside the real process: load, reflex timings, LLM still answers after reflexes, a did-you-mean round trip, a taught phrase, a correction |
 | `tests/test_routing_corpus.py` | the regex chain alone (the `regex` column) |
 
 Scoring counts a WRONG action (did something, not what he meant) apart from a
@@ -187,20 +188,55 @@ hybrid is what ships, and Stage 2's learning is how "brain alone" grows.
 
 **Stage 1 — the router. DONE (2026-11-19).** All of the above.
 
-**Stage 2 — learning and honest uncertainty. NEXT.**
-- `learn()` from turns the LLM solved with exactly one tool — but Nova's LLM
-  has NO tools (it streams text; every action is deterministic). So there is
-  no "the LLM used tool X" signal to learn from. What Nova has instead: the
-  regex chain behind the brain. A turn the brain fell through on and a regex
-  stage then handled is the equivalent lesson (`[brain]` fallthrough + a stage
-  claim), subject to the same bar: only if the skill's own slots can execute
-  the sentence, never a bare answer, ≤ 14 words, not when `general` was ≥ 0.7.
-- "Did you mean <label>?" from `brain.unsure`; yes runs it and stores a
-  `user` example; no calls `reject()` (persisted).
-- Phrases taught by voice ("when I say lights out, mute and lock") —
-  `brain_commands`, near-exact match only (0.92).
-- Corrections ("no, I meant ...") that un-learn the learned example behind a
-  wrong reflex. Seeds are never un-learned.
+**Stage 2 — learning and honest uncertainty. DONE (2026-11-19).**
+
+Where it runs: stage **2b′** (`_brain_lessons`, before navigation, so none of
+these can be re-read as a new command), the learning hook after a regex stage
+claims a fallen-through sentence, and **8c** (`_offer_brain_guess`) before the
+unsupported-action refusal.
+
+- **Learning** (`Brain.learn`). Nova's LLM has NO tools, so JARVIS's teacher
+  ("the LLM solved it with exactly one tool") does not exist here. The teacher
+  is the regex chain behind the brain: a sentence the brain fell through on
+  (not "surely conversation") that a regex stage then claimed.
+  `skills.skill_for_regex` maps the claim to ONE skill (tools via the dry-run
+  label's family, intersected with the brain's own best tools guess). The bar,
+  each from a JARVIS mistake: ≤ 14 words; never a bare answer; the skill's own
+  slots must execute BOTH the sentence and the canonical form that will be
+  stored (mistake #2); never a seed's canonical form; not when `general` was
+  ≥ 0.7; and — Nova's addition — **two judges must agree**: the brain's own
+  rank-1 guess must already be that skill, because the regex makes its own
+  wrong calls ("my battery died on the way to work" claims a battery reading).
+- **"Did you mean <label>?"** when nothing claimed the sentence but the brain
+  nearly knew: raw top ≥ `ask_threshold` 0.66 (JARVIS) AND margin-adjusted
+  confidence ≥ `ask_min_confidence` 0.70 (Nova). With JARVIS's bar alone, all
+  6 offers on his real turns were wrong; 0.70 separated useful from useless on
+  everything measured (9 good kept, 12 bad dropped, 3 good lost — tuned on that
+  data, re-measure as turns accumulate). Yes → runs the skill and stores the
+  sentence as `source=user`. No → `reject()`, persisted, keyed on sentence AND
+  skill. "No, I meant X" → reject, then route X. Anything else drops the
+  question and routes normally.
+- **Rejections now bind decide() too**, not only offers: a skill he said no to
+  for a sentence is excluded from that sentence's candidates for good.
+- **Taught phrases** (`brain_commands`): "when I say status check, what's my
+  battery at and what time is it". Every step must be something Nova can
+  already do (brain or a regex stage), nothing high-consequence (no shutdown
+  behind a shortcut), at most six steps. Matched near-exact only (cosine ≥ 0.92
+  or exact) because a phrase runs several actions; steps run through the brain,
+  else the regex stages, never the LLM. "What phrases have I taught you",
+  "forget the phrase status check". The confidence gate treats a phrase as
+  consequential as its strictest step.
+- **Corrections**: within 90s of a reflex, "no, I meant X" / "that's wrong"
+  rejects that sentence for that skill and un-learns the example behind it if
+  it was learned or taught (`unlearn`). Seeds are never deleted; the rejection
+  keeps the sentence away from them. Skipped while an actuation question is
+  open — "no, the other button" answers that.
+
+Measured: `test_brain_learning.py` 44/44 (driven through the real
+`_handle_turn_impl`); "did you mean" fires on 0 conversation sentences in the
+corpus (78), his real turns (67), and both paraphrase sets (30, 20);
+`brain_live_check.py` runs the full did-you-mean → yes → reflex round trip, a
+taught phrase and a correction inside the real process.
 
 **Stage 3 — answering from its own knowledge.** The fact store (timeless,
 web-verified facts with sources) and night school (re-verify facts, research

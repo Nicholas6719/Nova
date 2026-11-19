@@ -283,6 +283,9 @@ class VoiceAssistant:
         self._tool_confirm: Optional[Callable[[], str]] = None
         self.brain = None                # brain.py; set by _init_brain
         self._brain_chat = False         # this turn: brain sure it's conversation
+        self._brain_fell_through = False # this turn: brain declined (learnable)
+        self._brain_offer = None         # pending "did you mean X?"
+        self._last_reflex = None         # what "no, I meant ..." would correct
         self._rag_ready       = False
         self._rag             = None
         # Set by a "return to wake mode" voice command to drop out of
@@ -1301,6 +1304,14 @@ class VoiceAssistant:
                 self._respond(resp)
                 return
 
+        # ── 2b′. The brain's own questions and lessons ───────────────────────
+        # An answer to "did you mean X?", a correction of the last reflex
+        # ("no, I meant ..."), teaching or forgetting a phrase ("when I say
+        # lights out, mute the sound and lock my Mac"), and a taught phrase
+        # itself. All before routing, so none can be re-read as a new command.
+        if self._brain_lessons(text):
+            return
+
         # ── 2c. UI navigation ────────────────────────────────────────────────
         # "go home", "show me the menu", "go to finance". BEFORE calendar,
         # weather, files and tools, all of which would otherwise claim these:
@@ -1336,7 +1347,23 @@ class VoiceAssistant:
         # Skipped only when the brain is CONFIDENT the sentence is
         # conversation — as sure as it would need to be to act. The
         # unsupported-action refusal below still runs either way.
-        if not self._brain_chat and self._regex_commands(text):
+        if not self._brain_chat:
+            claim = self._regex_intent(text) if self._brain_fell_through else None
+            if self._regex_commands(text):
+                # The brain fell through and a regex stage knew what this
+                # was: that is a lesson (brain.learn applies the bar).
+                if claim is not None:
+                    self._learn_from_regex(text, claim)
+                return
+
+        # ── 8c. "Did you mean ...?" ──────────────────────────────────────────
+        # Nothing claimed it, but the brain NEARLY knew: a skill ranked top
+        # with a raw similarity over brain.ask_threshold, and that skill's own
+        # slots can run the sentence. Asking costs one short question; the
+        # alternative is the LLM guessing, or "I can't do that" for something
+        # Nova can do. A yes runs it and teaches the brain (source=user); a no
+        # is remembered so the same wrong guess is never offered again.
+        if self._offer_brain_guess(text):
             return
 
         # ── 8b. Unsupported ACTION request ───────────────────────────────────
@@ -1394,6 +1421,7 @@ class VoiceAssistant:
         # Per turn, never carried over: a stale verdict from the last turn must
         # not skip the regex stages for this one (nor while loading).
         self._brain_chat = False
+        self._brain_fell_through = False
         b = self.brain
         if b is None or not b.ready:
             return False
@@ -1405,6 +1433,11 @@ class VoiceAssistant:
             return False
         ms = (time.time() - t0) * 1000
         self._brain_chat = d is None and b.conversation
+        self._brain_fell_through = d is None and not b.conversation
+        if d is not None:
+            # What a correction ("no, I meant ...") would be correcting.
+            self._last_reflex = {"text": text, "skill": d.skill.name,
+                                 "match": dict(b.last_match or {}), "ts": time.time()}
         m = b.last_match or {}
         if self.config.get("brain", {}).get("log_disagreements", True):
             regex = self._regex_route(text)
@@ -1426,36 +1459,236 @@ class VoiceAssistant:
             self._respond("Something went wrong doing that.")
         return True
 
-    def _regex_route(self, text: str) -> str:
-        """Which regex stage WOULD claim this, with no side effects. Logging
-        only — the disagreement log is how the brain earns the removal of a
-        regex stage, or shows it has not."""
+    # ── Stage 2: learning, "did you mean", taught phrases, corrections ───────
+    _YES_RE = re.compile(r"^\s*(?:yes|yeah|yep|yup|sure|please|do it|go ahead|"
+                         r"that'?s right|correct|right|exactly|uh huh)\b", re.I)
+    _NO_RE = re.compile(r"^\s*(?:no|nope|nah|not that|wrong|neither)\b", re.I)
+    _MEANT_RE = re.compile(
+        r"^\s*(?:no|nope|nah|wrong|not that)\b[,.!]?\s*(?:,\s*)?"
+        r"(?:i\s+(?:meant|mean|said|wanted|asked(?:\s+for)?)|"
+        r"that'?s\s+not\s+what\s+i\s+(?:meant|said|asked(?:\s+for)?))\b[,:]?\s*(?P<rest>.*)$",
+        re.I)
+    _WRONG_RE = re.compile(
+        r"^\s*(?:no[,.!]?\s+)?(?:that'?s\s+(?:wrong|not\s+right|not\s+what\s+i\s+"
+        r"(?:meant|said|asked(?:\s+for)?))|wrong\s+one|that\s+was\s+wrong)[.!]*\s*$", re.I)
+    _TEACH_RE = re.compile(
+        r"^\s*(?:from\s+now\s+on[,\s]+)?when(?:ever)?\s+i\s+say\s+[\"']?(?P<rest>.+)$", re.I)
+    _FORGET_CMD_RE = re.compile(
+        r"^\s*(?:forget|delete|remove|stop\s+using)\s+(?:the\s+)?(?:phrase|command|"
+        r"shortcut)\s+[\"']?(?P<p>.+?)[\"']?[.!?]*\s*$"
+        r"|^\s*forget\s+what\s+(?:to\s+do|you\s+do|i\s+said)\s+when\s+i\s+say\s+"
+        r"[\"']?(?P<q>.+?)[\"']?[.!?]*\s*$", re.I)
+    _LIST_CMD_RE = re.compile(
+        r"^\s*what\s+(?:phrases|commands|shortcuts)\s+(?:have\s+i\s+taught\s+you|"
+        r"do\s+(?:you\s+know|i\s+have))\b", re.I)
+    CORRECTION_WINDOW_S = 90.0
+
+    def _brain_lessons(self, text: str) -> bool:
+        b = self.brain
+        if b is None or not b.ready:
+            self._brain_offer = None
+            return False
+        # An answer to "did you mean X?" — one shot: anything else drops it.
+        offer, self._brain_offer = self._brain_offer, None
+        if offer is not None:
+            m = self._MEANT_RE.match(text)
+            if m:
+                b.reject(offer["text"], offer["skill"])
+                rest = m.group("rest").strip()
+                if rest:
+                    self._handle_turn_impl(rest)
+                else:
+                    self._respond("Okay. What did you mean?")
+                return True
+            if self._YES_RE.match(text):
+                sk = b.by_name.get(offer["skill"])
+                if sk is not None:
+                    b.learn(offer["text"], sk.name, source="user", va=self)
+                    log.info(f"[brain] confirmed: {offer['text']!r} -> {sk.name}")
+                    self._last_reflex = None      # he chose it; nothing to correct
+                    sk.run(self, offer["text"], offer["args"])
+                    return True
+            if self._NO_RE.match(text):
+                b.reject(offer["text"], offer["skill"])
+                self._respond("Okay.")
+                return True
+            # not an answer: route normally
+
+        # A correction of the last reflex. Not while an actuation question is
+        # open: "no, the other button" answers THAT question (stage 2d).
+        last = self._last_reflex
+        if last is not None and self.actuation.pending is None \
+                and time.time() - last["ts"] <= self.CORRECTION_WINDOW_S:
+            m = self._MEANT_RE.match(text)
+            if m or self._WRONG_RE.match(text):
+                self._last_reflex = None
+                b.reject(last["text"], last["skill"])
+                removed = b.unlearn(last["match"])
+                log.info(f"[brain] corrected: {last['text']!r} was not {last['skill']}"
+                         + (f" (unlearned the {removed} example)" if removed else ""))
+                rest = m.group("rest").strip() if m else ""
+                if rest:
+                    self._handle_turn_impl(rest)
+                else:
+                    self._respond("Sorry about that. What did you mean?")
+                return True
+
+        # Teaching, forgetting and listing taught phrases.
+        if self._LIST_CMD_RE.match(text):
+            cmds = b.commands()
+            if not cmds:
+                self._respond("You haven't taught me any phrases yet.")
+            else:
+                parts = [f"{c['phrase']}, which {self._steps_spoken(c['steps'])}"
+                         for c in cmds]
+                self._respond("You've taught me " + "; ".join(parts) + ".")
+            return True
+        m = self._FORGET_CMD_RE.match(text)
+        if m:
+            phrase = (m.group("p") or m.group("q") or "").strip()
+            if b.forget_command(phrase):
+                self._respond(f"Done. {phrase} doesn't do anything special any more.")
+            else:
+                self._respond(f"I don't have a phrase called {phrase}.")
+            return True
+        m = self._TEACH_RE.match(text)
+        if m:
+            self._respond(self._teach_phrase(m.group("rest")))
+            return True
+
+        # A taught phrase.
+        hit = b.match_command(text)
+        if hit is not None:
+            phrase, steps, sim = hit
+            log.info(f"[brain] taught phrase {phrase!r}@{sim:.2f}: {len(steps)} step(s)")
+            for step in steps:
+                self._run_step(step["text"])
+            return True
+        return False
+
+    def _teach_phrase(self, rest: str) -> str:
+        """"lights out, mute the sound and lock my Mac" -> a stored phrase.
+
+        Every step must be something Nova can already do (the brain or a regex
+        stage claims it), and nothing high-consequence: a shortcut that could
+        shut the Mac down on a near-miss of a casual phrase is not worth having.
+        """
+        b = self.brain
+        m = re.match(r"(?P<phrase>.+?)[\"']?\s*(?:,|\s+then\s+|\s+do\s+|\s+you\s+should\s+|"
+                     r"\s+i\s+want\s+you\s+to\s+)\s*(?:please\s+)?(?P<steps>.+)$", rest.strip(), re.I)
+        if not m:
+            return ("Say it like this: when I say lights out, mute the sound and "
+                    "lock my Mac.")
+        phrase = m.group("phrase").strip().strip("\"'").strip()
+        raw_steps = [x.strip(" .!") for x in re.split(
+            r",\s*(?:and\s+)?(?:then\s+)?|\s+and\s+then\s+|\s+then\s+|\s+and\s+",
+            m.group("steps").strip(" .!")) if x.strip(" .!")]
+        if not phrase or not raw_steps:
+            return "I didn't catch what you want that phrase to do."
+        if len(raw_steps) > 6:
+            return "That's a lot of steps for one phrase. Try six or fewer."
+        steps = []
+        for st in raw_steps:
+            d = b.decide(st, self)
+            if d is not None:
+                if d.skill.tier == "high":
+                    return (f"I won't put {st} behind a shortcut. Things that can't "
+                            "be undone should always be asked for directly.")
+                steps.append({"text": st, "skill": d.skill.name})
+                continue
+            stage, intent = self._regex_intent(st)
+            if stage in ("llm", "unsupported") or stage.startswith("error"):
+                return f"I don't know how to {st} yet, so I didn't save that phrase."
+            import confidence as C
+            if C.consequence(st) == C.HIGH:
+                return (f"I won't put {st} behind a shortcut. Things that can't "
+                        "be undone should always be asked for directly.")
+            steps.append({"text": st, "skill": f"regex:{stage}"})
+        b.teach_command(phrase, steps)
+        return f"Got it. When you say {phrase}, I'll {self._steps_spoken(steps, verb=False)}."
+
+    def _steps_spoken(self, steps: list, verb: bool = True) -> str:
+        """Each step as Nova would SAY it: the skill's label ("check your
+        battery"), not his words — "I'll what's my battery at" was the first
+        version of this sentence."""
+        b = self.brain
+        texts = []
+        for st in steps:
+            sk = b.by_name.get(st.get("skill")) if b is not None else None
+            texts.append(sk.label if sk is not None and sk.label else st["text"])
+        joined = texts[0] if len(texts) == 1 else ", ".join(texts[:-1]) + " and " + texts[-1]
+        return ("will " + joined) if verb else joined
+
+    def _run_step(self, text: str) -> None:
+        """One step of a taught phrase: the brain if it is sure, else the regex
+        stages. Never the LLM — a step that nothing claims says so."""
+        b = self.brain
+        d = b.decide(text, self) if b is not None and b.ready else None
+        if d is not None:
+            d.skill.run(self, text, d.args)
+            return
+        if not self._regex_commands(text):
+            self._respond(f"I couldn't {text}.")
+
+    def _learn_from_regex(self, text: str, claim: tuple) -> None:
+        b = self.brain
+        if b is None or not b.ready:
+            return
         try:
-            if self.views.detect_intent(text) is not None:
-                return "view"
-            if self.actuation.detect_intent(text) is not None:
-                return "actuation"
-            if self.calendar.detect_intent(text) is not None:
-                return "calendar"
-            if self.screen.detect_intent(text) is not None:
-                return "screen"
-            if self.weather.detect_intent(text) is not None:
-                return "weather"
-            if self.market.detect_intent(text) is not None:
-                return "market"
-            if self.files.detect_intent(text) is not None:
-                return "files"
-            if self._memory_would_claim(text):
-                return "memory"
-            if self._fast_path(text) is not None:
-                return "fastpath"
-            if self.tools.detect(text) is not None:
-                return "tools"
-            if _is_unsupported_action(text):
-                return "unsupported"
+            from skills import skill_for_regex
+            skill = skill_for_regex(self, text, claim[0], claim[1])
+            if skill and b.learn(text, skill, va=self):
+                log.info(f"[brain] learned from the {claim[0]} stage: {text!r} -> {skill}")
         except Exception as exc:
-            return f"error:{exc}"
-        return "llm"
+            log.warning(f"[brain] learning failed (turn unaffected): {exc}")
+
+    def _offer_brain_guess(self, text: str) -> bool:
+        b = self.brain
+        if b is None or not b.ready or not b.unsure or not self._brain_fell_through:
+            return False
+        u = b.unsure
+        sk = b.by_name.get(u["skill"])
+        if sk is None or b.was_rejected(text, sk.name):
+            return False
+        label = sk.label or sk.name.split(".", 1)[-1].replace("_", " ")
+        self._brain_offer = {"text": text, "skill": sk.name, "args": u["args"]}
+        log.info(f"[brain] asking: did you mean {sk.name}? (top {u['top']}, "
+                 f"confidence {u['confidence']})")
+        self._respond(f"Did you mean {label}?")
+        return True
+
+    def _regex_route(self, text: str) -> str:
+        """Which regex stage WOULD claim this, with no side effects."""
+        return self._regex_intent(text)[0]
+
+    def _regex_intent(self, text: str) -> tuple[str, Optional[str]]:
+        """(stage, intent) the regex chain WOULD give this, with no side
+        effects. Used to log disagreements — how the brain earns the removal
+        of a regex stage, or shows it has not — and as the TEACHER for
+        learning (skills.skill_for_regex maps it to a skill)."""
+        try:
+            for stage, det in (("view", self.views.detect_intent),
+                               ("actuation", self.actuation.detect_intent),
+                               ("calendar", self.calendar.detect_intent),
+                               ("screen", self.screen.detect_intent),
+                               ("weather", self.weather.detect_intent),
+                               ("market", self.market.detect_intent),
+                               ("files", self.files.detect_intent)):
+                got = det(text)
+                if got is not None:
+                    return stage, got
+            if self._memory_would_claim(text):
+                return "memory", None
+            if self._fast_path(text) is not None:
+                return "fastpath", None
+            got = self.tools.detect(text)
+            if got is not None:
+                return "tools", got
+            if _is_unsupported_action(text):
+                return "unsupported", None
+        except Exception as exc:
+            return f"error:{exc}", None
+        return "llm", None
 
     def _memory_would_claim(self, text: str) -> bool:
         """_handle_memory_intent's verdict WITHOUT its writes (it saves and

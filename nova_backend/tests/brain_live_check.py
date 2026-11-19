@@ -48,6 +48,15 @@ TURNS = [
     ("tell me a joke about computers", "llm"),
     ("what's the date", "reflex:fast.date"),
     ("explain what a black hole is in one sentence", "llm"),
+    # ── Stage 2, inside the real process (all read-only) ──
+    ("what does my day look like", "ask:cal.today"),     # did you mean ...?
+    ("yes", "confirmed:cal.today"),                      # runs it, learns it
+    ("what does my day look like", "reflex:cal.today"),  # now a reflex
+    ("when I say status check, what's my battery at and what time is it",
+     "taught"),
+    ("status check", "phrase"),
+    ("what time is it", "reflex:fast.time"),
+    ("that's wrong", "corrected"),
 ]
 
 
@@ -104,8 +113,14 @@ def main() -> int:
             seg = ""
             while time.time() < deadline:
                 seg = log_path.read_text()[mark:]
-                if "[brain]" in seg and "[state] → idle" in seg.split("[brain]", 1)[1]:
+                if "[brain" in seg and "[state] → idle" in seg.split("[brain", 1)[1]:
                     break
+                if "[nova]" in seg and time.time() > deadline - 85:
+                    # brain lessons answer before routing: no [brain] decide line
+                    if "→ idle" in seg or "[nova]" in seg:
+                        time.sleep(0.5)
+                        seg = log_path.read_text()[mark:]
+                        break
                 time.sleep(0.2)
             route = re.search(r"\[brain\] (?:reflex (\S+)@[\d.]+.*?\((\d+)ms\)|"
                               r"(?:fallthrough|conversation)[^\n]*?(\d+)ms\))", seg)
@@ -116,7 +131,21 @@ def main() -> int:
             except Exception:
                 last = ""
             answer = re.match(r"(.*)", last) if last else None
-            if route and route.group(1):
+            ask = re.search(r"\[brain\] asking: did you mean (\S+)\?", seg)
+            conf = re.search(r"\[brain\] confirmed: .* -> (\S+)", seg)
+            phrase = re.search(r"\[brain\] taught phrase", seg)
+            corrected = re.search(r"\[brain\] corrected:", seg)
+            if conf:
+                got, ms = f"confirmed:{conf.group(1)}", "-"
+            elif corrected:
+                got, ms = "corrected", "-"
+            elif phrase:
+                got, ms = "phrase", "-"
+            elif "Got it. When you say" in last:
+                got, ms = "taught", "-"
+            elif ask:
+                got, ms = f"ask:{ask.group(1)}", route.group(3) if route else "?"
+            elif route and route.group(1):
                 got, ms = f"reflex:{route.group(1)}", route.group(2)
             elif route:
                 got, ms = "llm", route.group(3)

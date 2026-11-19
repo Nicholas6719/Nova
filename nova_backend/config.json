@@ -15,11 +15,13 @@
     "enabled": true,
     "threshold": 0.82,
     "ask_threshold": 0.66,
+    "ask_min_confidence": 0.7,
     "margin": 0.06,
     "margin_penalty": 3.0,
     "embed_threads": 1,
     "log_disagreements": true,
-    "_note": "The learned intent router (brain.py, skills.py), ported from JARVIS. A sentence is embedded (bge-small, local ONNX, ~4ms) and matched to the nearest example phrasing; a confident match whose skill can extract its arguments runs directly with no LLM. confidence = top similarity, cut by (margin - gap) * margin_penalty when another skill's best example is within `margin` of it. threshold/ask_threshold/margin/margin_penalty are JARVIS's values, tuned on real speech with this same embedder: change them only with measurements (tests/test_brain_intent.py). enabled=false is an instant rollback to the regex chain exactly as it was."
+    "_note": "The learned intent router (brain.py, skills.py), ported from JARVIS. A sentence is embedded (bge-small, local ONNX, ~4ms) and matched to the nearest example phrasing; a confident match whose skill can extract its arguments runs directly with no LLM. confidence = top similarity, cut by (margin - gap) * margin_penalty when another skill's best example is within `margin` of it. threshold/ask_threshold/margin/margin_penalty are JARVIS's values, tuned on real speech with this same embedder: change them only with measurements (tests/test_brain_intent.py). enabled=false is an instant rollback to the regex chain exactly as it was.",
+    "_ask_note": "\"Did you mean ...?\" is asked only when the raw top similarity >= ask_threshold (JARVIS) AND the margin-adjusted confidence >= ask_min_confidence (Nova). With the raw bar alone, all 6 offers on his real turns were wrong; 0.70 separated useful from useless offers on everything measured (2026-11-19)."
   },
   "stt": {
     "model": "base.en",

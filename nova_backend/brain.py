@@ -69,6 +69,13 @@ log = logging.getLogger("nova.brain")
 # ── Defaults (config.json "brain" overrides) ───────────────────────────────────
 THRESHOLD = 0.82          # at or above: act, if the slots extract
 ASK_THRESHOLD = 0.66      # raw top similarity at or above this: "nearly knew"
+# ...AND the margin-adjusted confidence at or above this. Nova's addition: with
+# JARVIS's raw 0.66 alone, his REAL turns produced 6 "did you mean" questions
+# and all 6 were wrong ("when do I go to the gym?" -> "read your calendar?").
+# Measured 2026-11-19 over his turns + both paraphrase sets: every useful offer
+# scored >= 0.727, every useless one <= 0.68. 0.70 kept 9 good, dropped all 12
+# bad, lost 3 good. Tuned on that data, so re-measure as real turns accumulate.
+ASK_MIN_CONFIDENCE = 0.70
 MARGIN = 0.06             # how far ahead of the rival skill the top must be
 MARGIN_PENALTY = 3.0      # how hard a near-tie is punished
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
@@ -81,6 +88,14 @@ CREATE TABLE IF NOT EXISTS brain_examples (
     text      TEXT NOT NULL UNIQUE,     -- the CANONICAL form (_norm)
     skill     TEXT NOT NULL,
     source    TEXT NOT NULL DEFAULT 'seed',   -- seed | user | learned
+    embedding BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS brain_commands (
+    -- phrases he taught by voice: "when I say lights out, mute and lock"
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        REAL NOT NULL,
+    phrase    TEXT NOT NULL UNIQUE,     -- _light() form of what he says
+    steps     TEXT NOT NULL,            -- JSON [{"text": ..., "skill": ...}, ...]
     embedding BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS brain_rejections (
@@ -196,6 +211,7 @@ class Brain:
         self.cfg = cfg
         self.threshold = float(cfg.get("threshold", THRESHOLD))
         self.ask_threshold = float(cfg.get("ask_threshold", ASK_THRESHOLD))
+        self.ask_min_confidence = float(cfg.get("ask_min_confidence", ASK_MIN_CONFIDENCE))
         self.margin = float(cfg.get("margin", MARGIN))
         self.margin_penalty = float(cfg.get("margin_penalty", MARGIN_PENALTY))
         self.embed_threads = int(cfg.get("embed_threads", 1))
@@ -211,6 +227,9 @@ class Brain:
         self._sources: list[str] = []
         self._matrix: Optional[np.ndarray] = None
         self._rejected: set = set()
+        self._cmd_phrases: list[str] = []
+        self._cmd_steps: list[list[dict]] = []
+        self._cmd_matrix: Optional[np.ndarray] = None
         self.ready = False
         self.last_match: Optional[dict] = None
         # The near-miss from the last decide(): the right idea, scored too low
@@ -347,6 +366,8 @@ class Brain:
                     "SELECT text, skill, source, embedding FROM brain_examples").fetchall()
                 self._rejected = {(r[0], r[1]) for r in db.execute(
                     "SELECT text, skill FROM brain_rejections")}
+                crows = db.execute(
+                    "SELECT phrase, steps, embedding FROM brain_commands").fetchall()
             rows = [r for r in rows if r[1] in self.by_name]   # a removed skill's rows stay inert
             self._texts = [r[0] for r in rows]
             self._skills = [r[1] for r in rows]
@@ -354,6 +375,11 @@ class Brain:
             # .copy(): np.frombuffer is a READ-ONLY view (JARVIS mistake #9).
             self._matrix = (np.frombuffer(b"".join(r[3] for r in rows), dtype=np.float32)
                             .reshape(len(rows), -1).copy()) if rows else None
+            import json
+            self._cmd_phrases = [r[0] for r in crows]
+            self._cmd_steps = [json.loads(r[1]) for r in crows]
+            self._cmd_matrix = (np.frombuffer(b"".join(r[2] for r in crows), dtype=np.float32)
+                                .reshape(len(crows), -1).copy()) if crows else None
             self._get_embedder()
             self.ready = self._matrix is not None
             log.info(f"brain loaded: {len(rows)} examples across "
@@ -429,7 +455,10 @@ class Brain:
         self.conversation = False
         if not self.ready:
             return None
-        refused: set = set()
+        # A skill he said NO to for this sentence ("did you mean X?" — "no",
+        # or "no, I meant ..." after a reflex) is never chosen for it again.
+        canon = _norm(text)
+        refused: set = {sk for (c, sk) in self._rejected if c == canon}
         for attempt in range(3):
             name, conf = self.classify(text, exclude=refused or None)
             if attempt == 0 and (self.last_match or {}).get("skill") == "general" \
@@ -440,12 +469,12 @@ class Brain:
                 # "did you mean ...?" — never acted on here.
                 m = self.last_match or {}
                 top = float(m.get("top") or 0.0)
-                if name and top >= self.ask_threshold:
+                if name and top >= self.ask_threshold and conf >= self.ask_min_confidence:
                     sk = self.by_name.get(name)
                     args = self._slots(sk, va, text) \
                         if sk is not None and self._gate(sk, va) else None
                     if sk is not None and args is not None \
-                            and (_norm(text), name) not in self._rejected:
+                            and (canon, name) not in self._rejected:
                         self.unsure = {"skill": name, "rival": m.get("rival"),
                                        "confidence": conf, "top": top,
                                        "margin": m.get("margin"), "args": args}
@@ -469,6 +498,15 @@ class Brain:
         nearly free)."""
         saved = (self.last_match, self.unsure, self.conversation, dict(self.stats))
         try:
+            hit = self.match_command(text)
+            if hit is not None:
+                # A taught phrase is as consequential as its strictest step.
+                rank = {"low": 0, "medium": 1, "high": 2}
+                tiers = [self.by_name[st["skill"]].tier for st in hit[1]
+                         if st.get("skill") in self.by_name]
+                tiers += ["medium" for st in hit[1]
+                          if str(st.get("skill", "")).startswith("regex:")]
+                return max(tiers, key=lambda t: rank[t]) if tiers else None
             d = self.decide(text, va)
             return d.skill.tier if d is not None else None
         except Exception:
@@ -508,3 +546,201 @@ class Brain:
             return False
         probe = re.sub(r"\bN\b", "10", text)
         return self._slots(sk, self.va, probe) is not None
+
+    # ── Stage 2: learning ─────────────────────────────────────────────────────
+    MAX_LEARN_WORDS = 14
+
+    def learn(self, text: str, skill: str, source: str = "learned",
+              va=None) -> bool:
+        """Store a sentence as a new example of `skill`. True if stored.
+
+        JARVIS's learner learned from the LLM's single tool call. Nova's LLM
+        has no tools, so the teacher is the regex chain behind the brain: a
+        sentence the brain fell through on and a regex stage then claimed.
+        The bar is JARVIS's (BRAIN.md "How it learns"), every rule from a real
+        mistake there:
+          - at most 14 words;
+          - never a bare answer ("yes" was once learned as "render again");
+          - only what the skill's OWN slots can execute — checked on the raw
+            sentence AND on the canonical form that will be stored, because
+            load() re-validates the stored form (mistake #2);
+          - never a sentence that contradicts a seed (seeds are ground truth);
+          - not when the brain was already fairly sure it was conversation
+            (general >= 0.7): the claim was the regex's whim.
+        `source="user"` (a yes to "did you mean ...?") skips the last three:
+        he said so himself.
+        """
+        va = va if va is not None else self.va
+        t = _norm(text)
+        sk = self.by_name.get(skill)
+        if not t or sk is None or sk.run is None or skill == "general":
+            return False
+        if len(t.split()) > self.MAX_LEARN_WORDS or _ANSWER_ONLY.fullmatch(t):
+            return False
+        seed_owner = self.canonical_seeds().get(t)
+        if seed_owner is not None:
+            return False                      # already a seed (of this or another skill)
+        if source != "user":
+            if self._slots(sk, va, text) is None or not self._executable(t, skill):
+                return False
+            saved = (self.last_match, self.unsure, self.conversation)
+            try:
+                self.classify(text)
+                m = self.last_match or {}
+                if m.get("skill") == "general" and float(m.get("confidence") or 0) >= 0.7:
+                    return False
+                # TWO JUDGES MUST AGREE. The teacher here is the regex chain,
+                # and the regex chain makes its own wrong calls ("my battery
+                # died on the way to work" claims a battery reading). JARVIS
+                # mistake #4 — the teacher's choice is not ground truth — so a
+                # regex lesson is taken only when the brain's OWN best guess,
+                # however unsure, already points at the same skill.
+                if m.get("skill") != skill:
+                    return False
+            finally:
+                self.last_match, self.unsure, self.conversation = saved
+        with self._lock:
+            if t in self._texts:
+                i = self._texts.index(t)
+                if self._skills[i] == skill:
+                    return False
+                if self._sources[i] == "user" and source != "user":
+                    return False              # his word beats the regex's
+                self._drop_index(i)           # replace a weaker, contradicting row
+            v = self._embed([t])[0]
+            with self._db() as db:
+                db.execute("DELETE FROM brain_examples WHERE text=?", (t,))
+                db.execute(
+                    "INSERT INTO brain_examples (ts, text, skill, source, embedding) "
+                    "VALUES (?,?,?,?,?)", (time.time(), t, skill, source, v.tobytes()))
+            self._texts.append(t)
+            self._skills.append(skill)
+            self._sources.append(source)
+            self._matrix = v[None, :] if self._matrix is None else np.vstack([self._matrix, v])
+            self.stats["learned"] += 1
+        log.info(f"brain learned ({source}): {t!r} -> {skill}")
+        return True
+
+    def _drop_index(self, i: int) -> None:
+        with self._db() as db:
+            db.execute("DELETE FROM brain_examples WHERE text=?", (self._texts[i],))
+        self._texts.pop(i)
+        self._skills.pop(i)
+        self._sources.pop(i)
+        self._matrix = np.delete(self._matrix, i, axis=0) if self._texts else None
+
+    def reject(self, text: str, skill: str) -> None:
+        """He said no to <skill> for this sentence: never choose or offer it
+        for this sentence again. Persisted — being asked the same wrong
+        question tomorrow is the same annoyance as twice in a row. Keyed on
+        sentence AND skill, so the other readings stay available."""
+        t = _norm(text)
+        if not t or not skill:
+            return
+        try:
+            with self._db() as db:
+                db.execute("INSERT OR IGNORE INTO brain_rejections (text, skill, ts) "
+                           "VALUES (?,?,?)", (t, skill, time.time()))
+            self._rejected.add((t, skill))
+            log.info(f"brain will not use {skill} for {t!r} again")
+        except Exception as exc:
+            # A rejection that cannot be stored must never cost him the turn.
+            log.warning(f"brain: could not store a rejection: {exc}")
+
+    def was_rejected(self, text: str, skill: str) -> bool:
+        return (_norm(text), skill) in self._rejected
+
+    def unlearn(self, match: Optional[dict]) -> Optional[str]:
+        """A correction: the reflex behind `match` was wrong. Drops the stored
+        example that caused it if it was LEARNED or taught by him; a seed is
+        never dropped (seeds are ground truth — the rejection that goes with a
+        correction is what keeps the sentence away from it). Returns the skill
+        whose example was removed, or None."""
+        if not match:
+            return None
+        if match.get("skill") == "command":
+            return "command" if self.forget_command(match.get("text", "")) else None
+        if match.get("source") not in ("learned", "user"):
+            return None
+        with self._lock:
+            t = match.get("text")
+            if t in self._texts:
+                i = self._texts.index(t)
+                skill = self._skills[i]
+                self._drop_index(i)
+                log.info(f"brain unlearned {t!r} ({skill})")
+                return skill
+        return None
+
+    def learned(self, limit: int = 25) -> list[dict]:
+        """Most recent non-seed examples, newest first (for the log/UI)."""
+        with self._db() as db:
+            rows = db.execute(
+                "SELECT ts, text, skill, source FROM brain_examples WHERE source != 'seed' "
+                "ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+        return [{"ts": r[0], "text": r[1], "skill": r[2], "source": r[3]} for r in rows]
+
+    # ── Stage 2: phrases taught by voice ──────────────────────────────────────
+    COMMAND_MATCH = 0.92      # near-exact only: a taught phrase runs SEVERAL actions
+
+    def teach_command(self, phrase: str, steps: list[dict]) -> None:
+        import json
+        p = _light(phrase)
+        if not p or not steps:
+            raise ValueError("a taught phrase needs words and at least one step")
+        with self._lock:
+            v = self._embed([p])[0]
+            with self._db() as db:
+                db.execute("INSERT OR REPLACE INTO brain_commands (ts, phrase, steps, embedding) "
+                           "VALUES (?,?,?,?)", (time.time(), p, json.dumps(steps), v.tobytes()))
+            if p in self._cmd_phrases:
+                i = self._cmd_phrases.index(p)
+                self._cmd_steps[i] = steps
+                self._cmd_matrix[i] = v        # writable: copied at load
+            else:
+                self._cmd_phrases.append(p)
+                self._cmd_steps.append(steps)
+                self._cmd_matrix = v[None, :] if self._cmd_matrix is None \
+                    else np.vstack([self._cmd_matrix, v])
+        log.info(f"brain taught command {p!r} -> {steps}")
+
+    def match_command(self, text: str) -> Optional[tuple[str, list[dict], float]]:
+        """(phrase, steps, similarity) for a taught phrase, near-exact only."""
+        if self._cmd_matrix is None or not (text or "").strip():
+            return None
+        p = _light(text)
+        if not p:
+            return None
+        with self._lock:
+            if p in self._cmd_phrases:
+                i = self._cmd_phrases.index(p)
+                return self._cmd_phrases[i], self._cmd_steps[i], 1.0
+            q = self._embed([p])[0]
+            sims = self._cmd_matrix @ q
+            i = int(np.argmax(sims))
+            if float(sims[i]) >= self.COMMAND_MATCH:
+                return self._cmd_phrases[i], self._cmd_steps[i], float(sims[i])
+        return None
+
+    def forget_command(self, phrase: str) -> bool:
+        p = _light(phrase)
+        with self._lock:
+            if p not in self._cmd_phrases:
+                # tolerate "forget lights out" when he taught "lights out please"
+                hit = self.match_command(phrase)
+                if not hit:
+                    return False
+                p = hit[0]
+            i = self._cmd_phrases.index(p)
+            with self._db() as db:
+                db.execute("DELETE FROM brain_commands WHERE phrase=?", (p,))
+            self._cmd_phrases.pop(i)
+            self._cmd_steps.pop(i)
+            self._cmd_matrix = np.delete(self._cmd_matrix, i, axis=0) \
+                if self._cmd_phrases else None
+        log.info(f"brain forgot command {p!r}")
+        return True
+
+    def commands(self) -> list[dict]:
+        return [{"phrase": p, "steps": st} for p, st in zip(self._cmd_phrases, self._cmd_steps)]
+

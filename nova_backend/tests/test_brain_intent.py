@@ -239,6 +239,28 @@ def main() -> int:
                             "=" if ok(exp, h) else "x")
                     print(f"      {flag} {phrase[:52]:<52} exp {exp:<10} "
                           f"regex {r:<10} hybrid {h:<10} {hd}")
+    # "Did you mean ...?" on CONVERSATION is an interruption, not help. With
+    # JARVIS's raw ask bar alone, all 6 offers on his real turns were wrong.
+    with T.NoSideEffects(va):
+        va.brain = brain
+        print("\n  did you mean ...? on sentences that are conversation:")
+        for label, data in (("corpus", corpus), ("real", real_all),
+                            ("paraphrases", para_all), ("paraphrases-v2", v2_all)):
+            if not data:
+                continue
+            bad = []
+            for p, e in data:
+                if e != "llm" or va.views.detect_intent(p) is not None:
+                    continue
+                if brain.decide(p, va) is None and brain.unsure \
+                        and not brain.conversation and T.route_of(va, p) in QUIET:
+                    bad.append(f"{p!r} -> {brain.unsure['skill']}")
+            n = sum(1 for _, e in data if e == "llm")
+            print(f"    {label:<15} {len(bad)} of {n}" + ("" if not bad else ":"))
+            for x in bad:
+                print(f"      {x}")
+            if bad and label in ("corpus", "real"):
+                fails.append(f"{label}: 'did you mean' asked on conversation {bad}")
     print("\n  legend: + brain fixed it   - brain broke it   x both wrong")
     if fails:
         print("\n  GATE FAILURES:")
