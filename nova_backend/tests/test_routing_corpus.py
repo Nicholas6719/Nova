@@ -26,6 +26,15 @@ sys.path.insert(0, str(BACKEND))
 sys.path.insert(0, str(TESTS_DIR))
 os.chdir(BACKEND)
 
+# A DATA DIR OF ITS OWN. This suite used to open his real nova_memory.db (its
+# mtime moved on every run), and now that the memory stage is run for real
+# rather than approximated, routing a "remember that my X is Y" phrase would
+# WRITE that fact into his memory. Set before nova is imported, because nova
+# resolves DATA_DIR at import. Forced, not setdefault: whatever launched us,
+# a routing test has no business near his data.
+import tempfile as _tempfile
+os.environ["NOVA_DATA_DIR"] = _tempfile.mkdtemp(prefix="nova-routing-")
+
 PASS = FAIL = 0
 FAILURES: list[str] = []
 
@@ -158,12 +167,12 @@ def route_of(va, text: str) -> str:
         return "memory"
     if va._fast_path(text) is not None:
         return "fastpath"
-    try:
-        if va.tools.match(text) is not None:
-            return "tools"
-    except Exception:
-        # A handler that blew up on stubbed output still CLAIMED the phrase,
-        # which is what routing is about.
+    # tools.detect(), not match(): it runs the same match() in dry mode and
+    # stops at the first thing that would act (tools.py, "DETECT WITHOUT
+    # DOING"). The stubbed match() this used before reported success for
+    # `open -a` on ANY name, so "open the lease PDF" counted as an app launch
+    # that macOS would in fact refuse.
+    if va.tools.detect(text) is not None:
         return "tools"
     if (nova_mod._ACTION_REQUEST_RE.match(text)
             and not nova_mod._HYPOTHETICAL_RE.search(text)):
@@ -172,11 +181,19 @@ def route_of(va, text: str) -> str:
 
 
 def _memory_would_fire(va, text: str) -> bool:
-    low = text.lower().strip()
-    if re.match(r"^\s*(remember|forget)\b", low):
-        return True
-    m = va._RECALL_RE.search(low)
-    return bool(m) and va.tools.match(text) is None
+    """Run the REAL memory stage, against the throwaway data dir.
+
+    This used to approximate it with two regexes: "starts with remember or
+    forget" and "a recall that tools would not have claimed". Both lied, in
+    opposite directions, which is rule 2 (stub side effects, never verdicts):
+      - "remember that I like tea" was reported as memory while the real
+        handler returns None and the sentence goes to the LLM;
+      - "what's my memory usage" was reported as TOOLS, because the
+        approximation asked tools first — while the real pipeline runs memory
+        first, and memory answered "I don't have your memory usage stored
+        yet." The corpus said 257/257 with that bug live.
+    """
+    return va._handle_memory_intent(text) is not None
 
 
 def main() -> int:

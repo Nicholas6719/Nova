@@ -102,6 +102,10 @@ SUITES = {
                 "engines import and MLX generates", False, False),
     "routing": ("test_routing_corpus.py",
                 "every phrase that has broken Nova before", False, False),
+    "seeds":   ("test_brain_seeds.py",
+                "brain seeds: no cross-skill clash, each one executable", False, False),
+    "brain":   ("test_brain_intent.py",
+                "brain vs regex: >= on the corpus, no new wrong actions", False, False),
     "loop":    ("test_conversation_loop.py",
                 "conversation state machine (real loop, scripted mic)", False, False),
     "cache":   ("test_prompt_cache.py",
@@ -150,6 +154,9 @@ CANNOT_VERIFY = [
     "ACCESSIBILITY are granted to the app bundle, not to this interpreter",
     "that a click lands on the right pixels in a real app — the Vision "
     "bottom-left to screen top-left flip needs a real window and his eyes",
+    "the brain on what he ACTUALLY says next — its held-out scores are "
+    "sentences written for a test; [brain] and [brain-disagree] in the log "
+    "are the real measure",
 ]
 
 
@@ -170,14 +177,14 @@ def main() -> int:
     for key in SUITES:
         ap.add_argument(f"--{key}", action="store_true", help=SUITES[key][1])
     ap.add_argument("--quick", action="store_true",
-                    help="every fast suite: env, routing, loop, wake, cache, rag, tts, weather, music, views, home, echo (no audio)")
+                    help="every fast suite: env, routing, seeds, brain, loop, wake, cache, rag, tts, weather, music, views, home, echo (no audio)")
     ap.add_argument("--all", action="store_true", help="every suite")
     args = ap.parse_args()
 
     if args.all:
         chosen = list(SUITES)
     elif args.quick:
-        chosen = ["env", "routing", "loop", "wake", "cache", "rag", "tts",
+        chosen = ["env", "routing", "seeds", "brain", "loop", "wake", "cache", "rag", "tts",
                   "weather", "music", "views", "home", "sounds", "market",
                   "act", "conf", "echo"]
     else:

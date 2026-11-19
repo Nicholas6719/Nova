@@ -77,7 +77,13 @@ _SUBJECT_RE = re.compile(
     r"|\bhow(?:'?s| is| are)\s+(?P<h>[\w.&]+(?:\s+[\w.&]+)?)\s+"
     r"(?:stock\s+)?(?:doing|trading|performing)"
     r"|\b(?P<t>[A-Z]{1,5})\s+(?:stock|shares?|ticker)\b"
-    r"|\b(?:stock|shares?|price|ticker)\s+(?:of|for)\s+(?P<p>[\w.&]+(?:\s+[\w.&]+)?)",
+    r"|\b(?:stock|shares?|price|ticker)\s+(?:of|for)\s+(?P<p>[\w.&]+(?:\s+[\w.&]+)?)"
+    # "what's Nvidia trading at" — _STOCK_RE has always accepted this shape,
+    # but nothing here could pull the company out, so it was silently dropped.
+    # Never a possessive: "what's my battery at" is a system question.
+    r"|\bwhat(?:'?s| is)\s+(?!(?:my|your|our|his|her|the|it|this|that)\b)"
+    r"(?P<w>[\w.&]+(?:\s+[\w.&]+)?)\s+(?:stock\s+|shares?\s+)?"
+    r"(?:trading\s+at|at|worth)\b",
     re.I,
 )
 

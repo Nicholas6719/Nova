@@ -423,3 +423,40 @@ I press my shirts on sundays  ==>  llm
 the press has been brutal lately  ==>  llm
 scroll through my photos sometime  ==>  llm
 send a text to mom  ==>  unsupported
+
+# ── Memory keys with an apostrophe were never stored or recalled (found
+#    2026-11-19 when the harness began running the REAL memory stage instead
+#    of approximating it). "[\w ]" cannot match the ' in "sister's", so the save
+#    regex failed, the sentence went to the LLM, and the LLM said "got it".
+remember that my sister's name is Emma  ==>  memory
+what's my sister's name  ==>  memory
+forget my sister's name  ==>  memory
+
+# ── Whisper puts commas where he pauses (his real turns, Aug 2026). "close\s+"
+#    cannot match "close, brave", so these were refused as unsupported actions.
+Nova, open, brave, browser  ==>  tools
+Close, brave  ==>  tools
+Nova, close, brave  ==>  tools
+# ...and it hears "iMessage" as "eye message"
+Nova, open eye message  ==>  tools
+# ── "is music playing?" reached the LLM, which answered "No, music is not
+#    playing" without looking. Nova can look.
+is music playing  ==>  tools
+# ── An ordinary sentence the brain must not turn into navigation
+#    (found by brain paraphrase scoring, 2026-11-19, before it shipped).
+we should go home soon  ==>  llm
+# ...and a STATEMENT about his calendar is not a request to read it (found by
+# held-out brain scoring, 2026-11-19, before it shipped).
+my next meeting is at three  ==>  llm
+# ── Found 2026-11-19 by checking that every brain seed is executable by its
+#    own skill — each was a gap in the tools regex itself.
+# His real sentence (Aug 2026); the LLM answered "I'm not aware of your
+# current location" because "will it take for me to" matched no pattern.
+how long will it take for me to get to CVS  ==>  tools
+lock my mac  ==>  tools
+make the music quieter  ==>  tools
+where's the closest grocery store  ==>  tools
+# ── _STOCK_RE recognised "what's X trading at" but _SUBJECT_RE had no way to
+#    pull X out of it, so the question was dropped (found 2026-11-19 while
+#    building the brain's market skill on the same extractor).
+what's Nvidia trading at  ==>  market

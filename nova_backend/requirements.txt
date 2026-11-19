@@ -61,3 +61,4 @@ pyobjc-framework-Vision>=12.2.1
 # Echo cancellation, so Nova can be interrupted while speaking.
 # Optional: without it stt.echo_cancellation simply stays off.
 pywebrtc-audio>=0.1.0
+fastembed>=0.9.1           # the brain: bge-small sentence embeddings (local ONNX)

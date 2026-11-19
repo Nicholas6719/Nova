@@ -138,14 +138,30 @@ class Decision:
                 f"score={self.score:.2f}>")
 
 
-def decide(text: str, score: Optional[float]) -> Decision:
+_RANK = {LOW: 0, MEDIUM: 1, HIGH: 2}
+
+
+def stricter(a: str, b: Optional[str]) -> str:
+    """The higher of two consequence tiers (None means no opinion)."""
+    if b not in _RANK:
+        return a
+    return a if _RANK[a] >= _RANK[b] else b
+
+
+def decide(text: str, score: Optional[float],
+           min_tier: Optional[str] = None) -> Decision:
     """What Nova should do with a transcript of this quality.
 
     `score` is the utterance's avg_logprob, or None when confidence could not
     be computed — in which case Nova behaves exactly as she did before this
     module existed and simply acts. A missing signal must not make her deaf.
+
+    `min_tier` is the brain's opinion of what this sentence would DO (the
+    matched skill's tier). Two independent questions — was the transcript
+    right, and which intent is it — and the bar is the stricter of the two
+    answers: the brain can raise it, never lower it.
     """
-    tier = consequence(text)
+    tier = stricter(consequence(text), min_tier)
     if score is None:
         return Decision(ACT, tier, 0.0)
 

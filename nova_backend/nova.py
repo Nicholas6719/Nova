@@ -125,6 +125,12 @@ _HYPOTHETICAL_RE = re.compile(
     re.I,
 )
 
+
+def _is_unsupported_action(text: str) -> bool:
+    """Phrased as an action, and no handler claimed it: Nova must refuse it
+    honestly rather than let the LLM say it already did it (stage 8b)."""
+    return bool(_ACTION_REQUEST_RE.match(text) and not _HYPOTHETICAL_RE.search(text))
+
 # An imperative that survived every handler. The verbs are ones Nova either
 # performs deterministically or cannot perform at all — so if one reaches the
 # LLM stage, the honest answer is "I can't", never the model's guess.
@@ -275,6 +281,8 @@ class VoiceAssistant:
         # (shutdown / restart / sleep). Unlike the soft offer, anything that
         # isn't a clear yes cancels it — we never guess about powering off.
         self._tool_confirm: Optional[Callable[[], str]] = None
+        self.brain = None                # brain.py; set by _init_brain
+        self._brain_chat = False         # this turn: brain sure it's conversation
         self._rag_ready       = False
         self._rag             = None
         # Set by a "return to wake mode" voice command to drop out of
@@ -337,6 +345,7 @@ class VoiceAssistant:
         # the build and is now simply not on the critical path.
         self.ws.on_interrupt = self._barged_in
         self._init_views()          # after _init_ws: it needs the WS server
+        self._init_brain()          # last: its skills reach every engine above
         self._verify_engines()
         self._show_home()
         self._warm_prompt_cache()
@@ -732,7 +741,13 @@ class VoiceAssistant:
         # getattr, not attribute access: a missing signal is designed to mean
         # "behave exactly as before", and that must not become a crash in the
         # voice loop just because an STT implementation predates this.
-        decision = C.decide(text, getattr(self.stt, "last_confidence", None))
+        # The brain's view of what this sentence would DO can only raise the
+        # bar (a file move the regex tier read as chat), never lower it.
+        min_tier = None
+        if self.brain is not None and self.brain.ready:
+            min_tier = self.brain.tier_for(text, self)
+        decision = C.decide(text, getattr(self.stt, "last_confidence", None),
+                            min_tier=min_tier)
         log.info(f"[confidence] {decision.score:.2f} tier={decision.tier} "
                  f"-> {decision.action}")
 
@@ -1296,7 +1311,7 @@ class VoiceAssistant:
         # fall straight through to conversation.
         view_intent = self.views.detect_intent(text)
         if view_intent is not None:
-            self._respond(self.views.handle(view_intent, text))
+            self._run_view(view_intent, text)
             return
 
         # ── 2d. Actuation confirmation ────────────────────────────────────────
@@ -1308,121 +1323,20 @@ class VoiceAssistant:
                 self._respond(resp)
                 return
 
-        # ── 2e. Actuation ─────────────────────────────────────────────────────
-        # Typing and clicking, WORK MODE ONLY. Before tools, whose "open X" and
-        # "search X" rules would claim some of this phrasing.
-        act_intent = self.actuation.detect_intent(text)
-        if act_intent is not None:
-            self._respond(self.actuation.handle(act_intent, text))
+        # ── 2e. THE BRAIN ─────────────────────────────────────────────────────
+        # A learned intent router (brain.py, skills.py). A confident match
+        # whose skill can extract its arguments runs directly — the same stage
+        # method the regex below would call, no LLM. Anything else falls to the
+        # regex command stages exactly as they were, which stay as the fallback
+        # until the brain has matched each of them on the corpus.
+        if self._brain_turn(text):
             return
 
-        # ── 3. Calendar / reminders intents ──────────────────────────────────
-        # BEFORE memory + fast-path + tools: detection is strict (needs an
-        # unambiguous calendar word), and running it early stops the greedy
-        # memory-recall regex ("what's my X") from swallowing "what's my
-        # calendar today" and the tool regexes ("find X"/"open X") from
-        # grabbing calendar phrasing.
-        cal_intent = self.calendar.detect_intent(text)
-        if cal_intent is not None:
-            resp = self.calendar.handle(cal_intent, text)
-            # A read handler may arm a soft follow-up (e.g. read_rest_of_week).
-            followup = self.calendar.pending_intent
-            self.calendar.pending_intent = None
-            if followup:
-                self._calendar_offer = lambda fi=followup: self.calendar.handle(fi, "")
-            self._emit_panel(self.calendar)
-            self._respond(resp)
-            return
-
-        # ── 4. Screen awareness ──────────────────────────────────────────────
-        # BEFORE files: "screen" is not a file stopword, so "read my screen"
-        # would otherwise become a file search for a document named "screen".
-        # Detection is strict — it needs an explicit screen phrase.
-        screen_intent = self.screen.detect_intent(text)
-        if screen_intent is not None:
-            self._respond(self.screen.handle(screen_intent, text))
-            return
-
-        # ── 4b. Weather ───────────────────────────────────────────────────────
-        # BEFORE files and tools: "what's the weather" contains no file words,
-        # but "is it going to rain tomorrow" would otherwise fall through to
-        # the LLM, which would happily invent a forecast. Detection is strict:
-        # a weather word must appear, and an action verb rules it out.
-        weather_intent = self.weather.detect_intent(text)
-        if weather_intent is not None:
-            resp = self.weather.handle(text, weather_intent)
-            self._emit_panel(self.weather)
-            self._respond(resp)
-            return
-
-        # ── 4c. Market data ───────────────────────────────────────────────────
-        # AFTER weather (both answer "how's the X") and BEFORE files and tools,
-        # whose "find X" and "open X" rules would swallow "what's Apple stock
-        # at". Detection needs a finance word AND a resolvable subject, so
-        # "how are you doing" and "I had apple pie" fall straight through.
-        market_intent = self.market.detect_intent(text)
-        if market_intent is not None:
-            resp = self.market.handle(market_intent, text)
-            self._emit_panel(self.market)
-            self._respond(resp)
-            return
-
-        # ── 5. File management intents ───────────────────────────────────────
-        # BEFORE memory and tools. Tools' web-search rule ("find X") and app
-        # launch ("open X") would both swallow file phrasing, and memory recall
-        # ("what's my X") would answer "I don't have your resume stored yet".
-        # Detection is strict — it needs a file word AND a searchable name —
-        # so ordinary conversation still falls straight through.
-        file_intent = self.files.detect_intent(text)
-        if file_intent is not None:
-            resp = self.files.handle(file_intent, text)
-            if self.files.pending_offer is not None:
-                self._calendar_offer = self.files.pending_offer
-                self.files.pending_offer = None
-            self._emit_panel(self.files)
-            self._respond(resp)
-            return
-
-        # ── 6. Memory intents ────────────────────────────────────────────────
-        resp = self._handle_memory_intent(text)
-        if resp is not None:
-            self._respond(resp)
-            return
-
-        # ── 7. Fast-path intents ─────────────────────────────────────────────
-        resp = self._fast_path(text)
-        if resp is not None:
-            self._respond(resp)
-            return
-
-        # ── 8. Tool intents ──────────────────────────────────────────────────
-        resp = self.tools.match(text)
-        if resp is not None:
-            # A destructive tool (power) asks first and hands back the action
-            # to run only if the user confirms on the next turn.
-            self._tool_confirm = self.tools.pending_confirm
-            self.tools.pending_confirm = None
-            # A SOFT offer ("want me to pull up directions?") reuses the same
-            # one-shot slot as the calendar follow-up: yes runs it, anything
-            # else just drops it and routes normally.
-            if self.tools.pending_offer is not None:
-                self._calendar_offer = self.tools.pending_offer
-                self.tools.pending_offer = None
-            # She just did something on his Mac, so she steps aside into the
-            # corner — the second way into work mode, alongside asking for it.
-            if getattr(self.tools, "touched_mac", False):
-                self.tools.touched_mac = False
-                self.set_work_mode(True, reason="acted on the Mac")
-            # He asked what his CPU was doing: the number she just said should
-            # also be a number he can see, so the status row comes back for a
-            # while and then settles away on its own.
-            if getattr(self.tools, "showed_system", False):
-                self.tools.showed_system = False
-                try:
-                    self.views.recall_system()
-                except Exception as exc:
-                    log.warning(f"could not recall status row: {exc}")
-            self._respond(resp)
+        # ── 2f-8. Regex command stages (the fallback) ────────────────────────
+        # Skipped only when the brain is CONFIDENT the sentence is
+        # conversation — as sure as it would need to be to act. The
+        # unsupported-action refusal below still runs either way.
+        if not self._brain_chat and self._regex_commands(text):
             return
 
         # ── 8b. Unsupported ACTION request ───────────────────────────────────
@@ -1434,7 +1348,7 @@ class VoiceAssistant:
         # replied "I've opened the coding projects folder for you." A system
         # prompt rule cut that from 4 cases to 1; only refusing deterministically
         # makes it zero.
-        if (_ACTION_REQUEST_RE.match(text) and not _HYPOTHETICAL_RE.search(text)):
+        if _is_unsupported_action(text):
             log.info(f"[unsupported-action] {text}")
             self._respond(
                 "I can't do that one yet. I'll tell you when I can, rather "
@@ -1453,6 +1367,265 @@ class VoiceAssistant:
         # ── 10. LLM fallback (streaming) ──────────────────────────────────────
         self.set_state("thinking")
         self._stream_response(text, rag_context=rag_ctx)
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Routing: the brain, and the regex stages behind it
+    # ═════════════════════════════════════════════════════════════════════════════
+    def _init_brain(self) -> None:
+        """The learned router. Loads in the background (the first run embeds
+        ~700 seeds, ~4s; later runs read them from nova_memory.db). Until it
+        is ready, and whenever it is disabled or fails, every turn takes the
+        regex chain exactly as before."""
+        self.brain = None
+        if not self.config.get("brain", {}).get("enabled", True):
+            log.info("[brain] disabled in config; regex routing only")
+            return
+        try:
+            from brain import Brain
+            from skills import SKILLS
+            self.brain = Brain(DATA_DIR / "nova_memory.db", SKILLS, self.config, va=self)
+            self.brain.load_background()
+        except Exception as exc:
+            log.warning(f"[brain] unavailable, regex routing only: {exc}")
+            self.brain = None
+
+    def _brain_turn(self, text: str) -> bool:
+        """Route through the brain. True if it handled the turn."""
+        # Per turn, never carried over: a stale verdict from the last turn must
+        # not skip the regex stages for this one (nor while loading).
+        self._brain_chat = False
+        b = self.brain
+        if b is None or not b.ready:
+            return False
+        t0 = time.time()
+        try:
+            d = b.decide(text, self)
+        except Exception as exc:
+            log.warning(f"[brain] decide failed, falling back: {exc}")
+            return False
+        ms = (time.time() - t0) * 1000
+        self._brain_chat = d is None and b.conversation
+        m = b.last_match or {}
+        if self.config.get("brain", {}).get("log_disagreements", True):
+            regex = self._regex_route(text)
+            mine = d.skill.stage if d is not None else ("llm" if b.conversation else None)
+            if mine is not None and regex != mine:
+                log.info(f"[brain-disagree] {text!r}: brain {mine} "
+                         f"({m.get('skill')}@{m.get('confidence')}), regex {regex}")
+        if d is None:
+            log.info(f"[brain] {'conversation' if b.conversation else 'fallthrough'} "
+                     f"(top {m.get('skill')}@{m.get('confidence')}, "
+                     f"rival {m.get('rival')}, {ms:.0f}ms)")
+            return False
+        log.info(f"[brain] reflex {d.skill.name}@{d.confidence:.2f} {d.args} ({ms:.0f}ms)")
+        try:
+            d.skill.run(self, text, d.args)
+        except Exception as exc:
+            # The skill's handler raised. Never cost him the turn: say so.
+            log.exception(f"[brain] {d.skill.name} failed: {exc}")
+            self._respond("Something went wrong doing that.")
+        return True
+
+    def _regex_route(self, text: str) -> str:
+        """Which regex stage WOULD claim this, with no side effects. Logging
+        only — the disagreement log is how the brain earns the removal of a
+        regex stage, or shows it has not."""
+        try:
+            if self.views.detect_intent(text) is not None:
+                return "view"
+            if self.actuation.detect_intent(text) is not None:
+                return "actuation"
+            if self.calendar.detect_intent(text) is not None:
+                return "calendar"
+            if self.screen.detect_intent(text) is not None:
+                return "screen"
+            if self.weather.detect_intent(text) is not None:
+                return "weather"
+            if self.market.detect_intent(text) is not None:
+                return "market"
+            if self.files.detect_intent(text) is not None:
+                return "files"
+            if self._memory_would_claim(text):
+                return "memory"
+            if self._fast_path(text) is not None:
+                return "fastpath"
+            if self.tools.detect(text) is not None:
+                return "tools"
+            if _is_unsupported_action(text):
+                return "unsupported"
+        except Exception as exc:
+            return f"error:{exc}"
+        return "llm"
+
+    def _memory_would_claim(self, text: str) -> bool:
+        """_handle_memory_intent's verdict WITHOUT its writes (it saves and
+        forgets as it matches, like tools.match did)."""
+        if self._SAVE_RE.search(text) or self._NOTE_SAVE_RE.match(text) \
+                or self._UPDATE_RE.search(text) or self._FORGET_RE.search(text) \
+                or self._NOTE_FORGET_RE.match(text):
+            return True
+        m = self._RECALL_RE.search(text)
+        if m:
+            key = m.group(1).strip()
+            if self.memory.find_fact(key):
+                return True
+            return not (self._is_system_query(key) or self.tools.detect(text) is not None)
+        return any(p in text.lower() for p in self._META_RECALL)
+
+    def _regex_commands(self, text: str) -> bool:
+        """Stages 2f-8: the regex chain as it was, behind the brain. True if
+        a stage claimed the turn."""
+        # ── 2f. Actuation ─────────────────────────────────────────────────────
+        # Typing and clicking, WORK MODE ONLY. Before tools, whose "open X" and
+        # "search X" rules would claim some of this phrasing.
+        act_intent = self.actuation.detect_intent(text)
+        if act_intent is not None:
+            self._run_actuation(act_intent, text)
+            return True
+
+        # ── 3. Calendar / reminders intents ──────────────────────────────────
+        # BEFORE memory + fast-path + tools: detection is strict (needs an
+        # unambiguous calendar word), and running it early stops the greedy
+        # memory-recall regex ("what's my X") from swallowing "what's my
+        # calendar today" and the tool regexes ("find X"/"open X") from
+        # grabbing calendar phrasing.
+        cal_intent = self.calendar.detect_intent(text)
+        if cal_intent is not None:
+            self._run_calendar(cal_intent, text)
+            return True
+
+        # ── 4. Screen awareness ──────────────────────────────────────────────
+        # BEFORE files: "screen" is not a file stopword, so "read my screen"
+        # would otherwise become a file search for a document named "screen".
+        # Detection is strict — it needs an explicit screen phrase.
+        screen_intent = self.screen.detect_intent(text)
+        if screen_intent is not None:
+            self._run_screen(screen_intent, text)
+            return True
+
+        # ── 4b. Weather ───────────────────────────────────────────────────────
+        # BEFORE files and tools: "what's the weather" contains no file words,
+        # but "is it going to rain tomorrow" would otherwise fall through to
+        # the LLM, which would happily invent a forecast. Detection is strict:
+        # a weather word must appear, and an action verb rules it out.
+        weather_intent = self.weather.detect_intent(text)
+        if weather_intent is not None:
+            self._run_weather(weather_intent, text)
+            return True
+
+        # ── 4c. Market data ───────────────────────────────────────────────────
+        # AFTER weather (both answer "how's the X") and BEFORE files and tools,
+        # whose "find X" and "open X" rules would swallow "what's Apple stock
+        # at". Detection needs a finance word AND a resolvable subject, so
+        # "how are you doing" and "I had apple pie" fall straight through.
+        market_intent = self.market.detect_intent(text)
+        if market_intent is not None:
+            self._run_market(market_intent, text)
+            return True
+
+        # ── 5. File management intents ───────────────────────────────────────
+        # BEFORE memory and tools. Tools' web-search rule ("find X") and app
+        # launch ("open X") would both swallow file phrasing, and memory recall
+        # ("what's my X") would answer "I don't have your resume stored yet".
+        # Detection is strict — it needs a file word AND a searchable name —
+        # so ordinary conversation still falls straight through.
+        file_intent = self.files.detect_intent(text)
+        if file_intent is not None:
+            self._run_files(file_intent, text)
+            return True
+
+        # ── 6. Memory intents ────────────────────────────────────────────────
+        resp = self._handle_memory_intent(text)
+        if resp is not None:
+            self._respond(resp)
+            return True
+
+        # ── 7. Fast-path intents ─────────────────────────────────────────────
+        resp = self._fast_path(text)
+        if resp is not None:
+            self._respond(resp)
+            return True
+
+        # ── 8. Tool intents ──────────────────────────────────────────────────
+        resp = self.tools.match(text)
+        if resp is not None:
+            self._finish_tool(resp)
+            return True
+
+        return False
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Stage runners — ONE code path per handler
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Each is what a routing stage does once it has decided the utterance is
+    # its own. The regex chain calls them after detect_intent; the brain's
+    # skills (skills.py) call the SAME methods after classifying. Two copies of
+    # "what happens after a calendar read" would drift — the follow-up offer,
+    # the panel, work mode — and the drift would only show up in use.
+    def _run_view(self, intent: str, text: str) -> None:
+        self._respond(self.views.handle(intent, text))
+
+    def _run_actuation(self, intent: str, text: str) -> None:
+        self._respond(self.actuation.handle(intent, text))
+
+    def _run_calendar(self, intent: str, text: str) -> None:
+        resp = self.calendar.handle(intent, text)
+        # A read handler may arm a soft follow-up (e.g. read_rest_of_week).
+        followup = self.calendar.pending_intent
+        self.calendar.pending_intent = None
+        if followup:
+            self._calendar_offer = lambda fi=followup: self.calendar.handle(fi, "")
+        self._emit_panel(self.calendar)
+        self._respond(resp)
+
+    def _run_screen(self, intent: str, text: str) -> None:
+        self._respond(self.screen.handle(intent, text))
+
+    def _run_weather(self, intent: str, text: str) -> None:
+        resp = self.weather.handle(text, intent)
+        self._emit_panel(self.weather)
+        self._respond(resp)
+
+    def _run_market(self, intent: str, text: str) -> None:
+        resp = self.market.handle(intent, text)
+        self._emit_panel(self.market)
+        self._respond(resp)
+
+    def _run_files(self, intent: str, text: str) -> None:
+        resp = self.files.handle(intent, text)
+        if self.files.pending_offer is not None:
+            self._calendar_offer = self.files.pending_offer
+            self.files.pending_offer = None
+        self._emit_panel(self.files)
+        self._respond(resp)
+
+    def _finish_tool(self, resp: str) -> None:
+        """Everything that follows a tool answering, whoever routed to it."""
+        # A destructive tool (power) asks first and hands back the action
+        # to run only if the user confirms on the next turn.
+        self._tool_confirm = self.tools.pending_confirm
+        self.tools.pending_confirm = None
+        # A SOFT offer ("want me to pull up directions?") reuses the same
+        # one-shot slot as the calendar follow-up: yes runs it, anything
+        # else just drops it and routes normally.
+        if self.tools.pending_offer is not None:
+            self._calendar_offer = self.tools.pending_offer
+            self.tools.pending_offer = None
+        # She just did something on his Mac, so she steps aside into the
+        # corner — the second way into work mode, alongside asking for it.
+        if getattr(self.tools, "touched_mac", False):
+            self.tools.touched_mac = False
+            self.set_work_mode(True, reason="acted on the Mac")
+        # He asked what his CPU was doing: the number she just said should
+        # also be a number he can see, so the status row comes back for a
+        # while and then settles away on its own.
+        if getattr(self.tools, "showed_system", False):
+            self.tools.showed_system = False
+            try:
+                self.views.recall_system()
+            except Exception as exc:
+                log.warning(f"could not recall status row: {exc}")
+        self._respond(resp)
 
     # ── Unprompted announcements (timers) ─────────────────────────────────────────
     def _announce(self, text: str) -> None:
@@ -1659,14 +1832,31 @@ class VoiceAssistant:
     # ═════════════════════════════════════════════════════════════════════════════
     # Memory intents
     # ═════════════════════════════════════════════════════════════════════════════
-    _SAVE_RE    = re.compile(r"remember (?:that )?my ([\w][\w ]*?) is (.+)", re.I)
+    # [\w' ] not [\w ]: "my sister's name" has an apostrophe, and without it
+    # the save regex failed, the sentence fell to the LLM, and the LLM said
+    # "got it" for a fact nothing stored (found 2026-11-19).
+    _SAVE_RE    = re.compile(r"remember (?:that )?my ([\w][\w' ]*?) is (.+)", re.I)
     # "who's my favorite superhero" missed entirely and fell to the LLM, which
     # invented an answer ("Deadpool") for a fact Nova was supposed to know.
     # People ask about people with WHO, and about things with WHAT.
     _RECALL_RE  = re.compile(
-        r"(?:what|who)(?:'?s| is|'?re| are)\s+my\s+([\w][\w ]*?)[\s.?!]*$", re.I)
-    _UPDATE_RE  = re.compile(r"actually (?:my ([\w][\w ]*?) is |it'?s )(.+)", re.I)
-    _FORGET_RE  = re.compile(r"forget (?:that )?my ([\w][\w ]*?)$", re.I)
+        r"(?:what|who)(?:'?s| is|'?re| are)\s+my\s+([\w][\w' ]*?)[\s.?!]*$", re.I)
+    _UPDATE_RE  = re.compile(r"actually (?:my ([\w][\w' ]*?) is |it'?s )(.+)", re.I)
+    _FORGET_RE  = re.compile(r"forget (?:that )?my ([\w][\w' ]*?)[\s.?!]*$", re.I)
+    _META_RECALL = ("what do you know about me", "what do you remember",
+                    "what have i told you")
+    # Free-form notes: "remember that I like tea". Anchored at the start, and
+    # the things "remember ..." also introduces are excluded: a reminder
+    # ("remember to call mom" is the calendar's), a question ("remember when
+    # we...", "remember what I said"), and a bare pointer ("remember that").
+    _NOTE_SAVE_RE = re.compile(
+        r"^\s*(?:please\s+)?(?:remember|keep in mind)\s+(?:that\s+)?"
+        r"(?!(?:to|when|what|who|where|how|why|if|whether|me|this|it)\b)"
+        r"(?!that\s*[.?!]*$)(.{3,}?)[\s.?!]*$", re.I)
+    _NOTE_FORGET_RE = re.compile(
+        r"^\s*(?:please\s+)?forget\s+(?:that\s+|about\s+)?"
+        r"(?!(?:it|about it|everything|this|me)\b)(?!that\s*[.?!]*$)(.{3,}?)[\s.?!]*$",
+        re.I)
 
     # Explicit user-directed memory commands store under the 'explicit' category,
     # source='explicit', so they supersede by canonical key and sit alongside the
@@ -1707,6 +1897,15 @@ class VoiceAssistant:
             self._remember_fact(key, value)
             return f"Got it. I'll remember your {key} is {value}."
 
+        # Save a free-form note — "remember that I like tea". After the
+        # structured form, so "remember that my X is Y" keeps its key.
+        m = self._NOTE_SAVE_RE.match(text)
+        if m:
+            from memory import to_second_person
+            stored = self.memory.add_note(m.group(1))
+            if stored:
+                return f"Got it. I'll remember that {to_second_person(stored)}."
+
         # Recall — "what's my X" (searches EVERY category, not just 'explicit')
         m = self._RECALL_RE.search(text)
         if m:
@@ -1716,7 +1915,13 @@ class VoiceAssistant:
                 return f"Your {key} is {found[1]}."
             # Nothing stored. If this reads as a system question, fall through so
             # Tools can answer it; otherwise say honestly that it isn't stored.
-            if self._is_system_query(key):
+            # "what's my memory usage" answered "I don't have your memory
+            # usage stored yet": the word list below never knew "memory" or
+            # "usage", and the routing harness hid it by asking tools FIRST
+            # (the pipeline asks memory first). Asking tools itself — a dry
+            # run, nothing happens — cannot drift out of step with what tools
+            # can actually answer.
+            if self._is_system_query(key) or self.tools.detect(text) is not None:
                 return None
             return f"I don't have your {key} stored yet."
 
@@ -1744,9 +1949,16 @@ class VoiceAssistant:
                 return f"Done. I've forgotten your {key}."
             return f"I don't have your {key} stored, {name}."
 
+        # Forget a free-form note — "forget that I put my resume in Downloads"
+        m = self._NOTE_FORGET_RE.match(text)
+        if m:
+            if self.memory.forget_note(m.group(1)):
+                return "Done. I've forgotten that."
+            return f"I don't have that stored, {name}."
+
         # Meta-recall — "what do you know about me"
         low = text.lower()
-        if any(p in low for p in ("what do you know about me", "what do you remember", "what have i told you")):
+        if any(p in low for p in self._META_RECALL):
             facts = self.memory.facts_for_readback()
             if not facts:
                 return f"I don't have anything stored about you yet, {name}."
