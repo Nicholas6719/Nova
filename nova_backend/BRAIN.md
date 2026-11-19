@@ -152,6 +152,8 @@ matrices (mistake #9).
 | `tests/test_brain_learning.py` | Stage 2 through the real pipeline: the learning bar, persistence (placeholder rows survive), no lingering SQLite lock, regex-taught reflexes, did-you-mean yes/no/restart, taught phrases, corrections |
 | `tests/brain_live_check.py` | inside the real process: load, reflex timings, LLM still answers after reflexes, a did-you-mean round trip, a taught phrase, a correction |
 | `tests/test_routing_corpus.py` | the regex chain alone (the `regex` column) |
+| `tests/test_honesty.py` | no spoken promise or false "done"; typed turns stay silent |
+| `tests/test_unprompted.py` | the single door, ceilings, restarts, standing watches |
 
 Scoring counts a WRONG action (did something, not what he meant) apart from a
 miss (fell to conversation or an honest refusal). Sentences whose canonical form
@@ -245,10 +247,48 @@ distillation is local and allowed. Web verification and overnight research
 need the network UNPROMPTED — beyond invariant 3's exceptions. That is his
 decision; ask before building it.
 
-**Stage 4 — the rest of JARVIS.** One door for anything unprompted (timers,
-reminders, watches) with de-dup and hourly/daily ceilings; never speaking a
-promise nothing will keep; standing "tell me when ..." watches that survive a
-restart; arithmetic and unit conversion in code.
+**Stage 4 — the rest of JARVIS. DONE (2026-11-19), local parts.**
+
+Compared against JARVIS ARCHITECTURE.md "What it does without being asked" and
+"Rules the code is built around"; what Nova lacked and now has:
+
+- **Arithmetic and units in code** (`mathskill.py`, `units.py`, ported). Stage
+  2e-0, before the brain. No `eval`: number words → digits, operator words →
+  symbols, a small recursive-descent parser; a sentence is accepted only if
+  EVERY word is part of the sum, so "set the volume to 50 percent" and "I have
+  2 kids" never land there. Nova additions: "25% of 10%" answers "2.5 percent";
+  tips on a dollar amount (15/18/20 percent, or the rate he names). Evidence:
+  his own turns sent "what's 10 plus 10", "what's 25% of 10%", "what's the
+  square root of 10" and a tip on a $95.82 dinner to the 3B.
+- **Never a promise nothing keeps** (`honesty.py`, ported + extended). Nova's
+  LLM runs no tools, so on that path EVERY "I'll keep an eye on it / remind
+  you / let you know" is unbacked, and so is every "I've opened / set / sent"
+  (the 3B once said "I've opened the coding projects folder for you"). Checked
+  per sentence before it is spoken (streaming untouched); the first becomes the
+  truth, later ones are dropped, and history stores what she SAID.
+  `llm.honesty_filter: false` rolls back. Also fixed on the way: typed (silent)
+  turns that reached the LLM were spoken aloud.
+- **One door for anything unprompted** (`delivery.py`). Timers, the proactive
+  monitor and watches all go through `deliver()`: a UNIQUE row is claimed and
+  committed before a word is said (never twice — across threads and restarts);
+  hard ceilings for unprompted kinds (`delivery.max_per_hour` 4,
+  `max_per_day` 12, counted from the table); over a ceiling or in
+  `quiet_hours` an item is SHOWN, never dropped; what he asked for (timers,
+  watches) is never held by a ceiling. The proactive monitor's "never twice"
+  was an in-memory set that a restart forgot — now it claims through the door.
+- **Standing watches** (`standing.py`), stage 2e-0b. "Tell me when my battery
+  is fully charged", "warn me if my CPU goes above 90", "what are you
+  watching", "cancel all watches". Rows in `standing_watches`, checked every
+  30s, one-shot, fired once through the door, survive restarts; a condition
+  already true is answered now, not stored. **Local readings only** (battery,
+  CPU, memory): a stock or weather watch would poll the network unprompted,
+  which is his call.
+
+Not brought across (specific to JARVIS's Windows PC, phone or scanner):
+Telegram delivery, briefs, news significance, the scanner desk.
+
+Tests: `test_unprompted.py` 36/36, `test_honesty.py` 31/31, corpus 289/289
+(arithmetic and watches added regression-first).
 
 **Stage 5 — better than JARVIS.** From evidence: the `[brain-disagree]` log
 and his real turns.

@@ -28,6 +28,10 @@ Nova has two parts:
     brain.py                 THE BRAIN: learned intent router (see BRAIN.md)
     skills.py                every skill the brain can run without the LLM
     BRAIN.md                 the brain: design, stages, numbers, what's next
+    mathskill.py, units.py   arithmetic, percentages, tips, conversions in CODE
+    honesty.py               no spoken promise / false "done" from the LLM
+    delivery.py              the single door for anything unprompted
+    standing.py              "tell me when ..." watches, kept across restarts
     config.json              all tuneables
     system_prompt.py         Nova's personality
     stt_engine.py            mic capture, wake dispatch, transcription
@@ -134,6 +138,14 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 
 **`brain.py`** + **`skills.py`** — **The brain**, ported from JARVIS (MiniPCJarvis `docs/BRAIN.md`); full write-up in `nova_backend/BRAIN.md`. A nearest-neighbour classifier over example sentences: each request type is a SKILL (seeds, a slot function that extracts arguments or refuses, a runner, a consequence tier). A sentence is normalised (lowercase, wake word and politeness stripped, numbers → `N`), embedded with **bge-small via fastembed** (local ONNX, ~4ms; model downloaded once to `nova_backend/models/`, gitignored), and matched against ~675 examples. **JARVIS's rule copied exactly:** `confidence = top if margin >= 0.06 else top - (0.06 - margin) * 3`, act at 0.82, "nearly knew" at 0.66 — same embedder, so the numbers still mean what they were tuned to mean. A confident match whose slots extract is a **reflex**: it runs the SAME `_run_*` stage method the regex chain calls (no LLM, so the MLX prompt cache is untouched), 5-45ms in the live process. A guard refusal hands the turn to the runner-up. Otherwise the old regex stages run unchanged behind it. **Slots are asymmetric on purpose:** reads are lenient; writes with no confirmation step (calendar writes, power, lock, app launch by name, web search) stay strict — the module's own regex must accept the sentence; file moves are lenient because file_intents asks before touching disk. **Shape guards** (each from a measured wrong action): a read must be SHAPED like a request ("my next meeting is at three" read his calendar), navigation like navigation ("we should go home soon" went home), and a transport command must name its object ("what's next" skipped his song). A **confident-conversation veto** (`general` skill ≥ 0.82) skips the regex command stages but never the unsupported-action refusal. `confidence.decide(min_tier=)` takes the skill's tier: the brain can raise the transcript bar, never lower it. Storage: `brain_examples` / `brain_rejections` in nova_memory.db, every write committed on a short-lived connection (JARVIS's 2,600-message night was one uncommitted write). `brain.enabled: false` is an instant rollback. **Stage 2 (learning):** the LLM has no tools, so the TEACHER is the regex chain — a sentence the brain fell through on that a regex stage then claimed is learned, only if the skill's own slots run it AND the brain's own top guess already agrees (the regex makes its own wrong calls). "Did you mean <label>?" when nothing claimed it and the brain nearly knew (raw top ≥ 0.66 AND confidence ≥ 0.70 — the second bar is Nova's, because the first alone was wrong on all 6 of his real offers); yes teaches it, no is remembered forever. Phrases taught by voice ("when I say status check, ..."), near-exact match, nothing high-consequence behind a shortcut. "No, I meant X" un-learns the example behind a wrong reflex (never a seed).
 
+**`mathskill.py`** + **`units.py`** — Arithmetic, percentages ("25% of 10%" → 2.5 percent), tips and unit conversion **in code, never by the model** (ported from JARVIS). No `eval`: a recursive-descent parser over a normalised sentence, which accepts it only when every word is part of the sum. Stage 2e-0.
+
+**`honesty.py`** — Nova's LLM runs NO tools, so every LLM sentence promising to watch / remind / follow up, or claiming "I've opened / set / sent", is false. Filtered per sentence in `_stream_response` before it is spoken (streaming untouched): the first becomes the truth, later ones are dropped, history stores what she said. `llm.honesty_filter`.
+
+**`delivery.py`** — **The single door for anything Nova says unprompted** (timers, the proactive monitor, watches). Claims a UNIQUE row and commits it before speaking (never twice, across threads and restarts), hard hourly/daily ceilings for unprompted kinds counted from the table, and over a ceiling or in quiet hours an item is SHOWN, never dropped. What he asked for (timers, watches) is never held. JARVIS rule 5, from its 2,600-message night.
+
+**`standing.py`** — "Tell me when my battery is fully charged / my CPU goes above 90", list, cancel. Rows in `standing_watches`, one-shot, delivered through the door, survive restarts; an already-true condition is answered, not stored. **Local readings only** — a stock or weather watch would poll the network unprompted (invariant 3, his call). Stage 2e-0b.
+
 **`ws_server.py`** — Bridge between Python and Swift. HTTP server on :5001, WebSocket server on :8766. Swift connects here to receive state changes, message content, streaming tokens, and **which screen to show** in real time. The current view and its data are held like the current state, so a client that connects — or reconnects after an app relaunch — is told immediately instead of coming up blank.
 
 **`requirements.txt`** — All Python dependencies. Install with `pip install -r requirements.txt`.
@@ -153,6 +165,8 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 2c. UI navigation (regex, anchored both ends) — go home / the menu / a named screen /
     work mode, plus the home surface: clear home, restore home, move a card to a slot
 2d. Pending actuation question — "that would send it, want me to?"
+2e-0. Arithmetic / tips / conversions in code (mathskill.py)
+2e-0b. Standing watches — "tell me when ...", list, cancel (standing.py)
 2e. **THE BRAIN** (`_brain_turn`) — a confident skill match runs directly; a confident
     "this is conversation" skips 2f-8 (never 8b); anything else falls through
 2f-8. **Regex command stages, the fallback** (`_regex_commands`), unchanged in order:
@@ -258,6 +272,8 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | `test_brain_seeds.py` | no two skills own a canonical seed; every seed executable by its own skill | real skills + real slot extractors |
 | `test_brain_intent.py` | brain vs regex on corpus, 5-fold held-out, two paraphrase sets, his real turns; no NEW wrong action | real brain + real embedder, throwaway DB |
 | `test_brain_learning.py` | the brain learns, asks, is taught and corrected — and nothing goes wrong silently | real `_handle_turn_impl`, stage runners recorded |
+| `test_honesty.py` | no spoken promise nothing keeps; typed turns stay silent | real `_stream_response`, scripted LLM |
+| `test_unprompted.py` | one door for unprompted speech: never twice, ceilings, watches kept across restarts | real delivery/proactive/standing, throwaway DB |
 | `brain_live_check.py` | the brain inside the REAL process: reflexes, timings, LLM still answers after, did-you-mean, taught phrase, correction | real process, read-only sentences, silent turns |
 | `test_conversation_loop.py` | when Nova keeps listening vs returns to wake | real `_main_loop`, scripted mic |
 | `test_prompt_cache.py` | the prompt cache changed speed and NOTHING else | real engine + real model |
@@ -381,7 +397,9 @@ The MLX model (~2GB) downloads automatically on first run.
 1. Describing IMAGES (photos) — screen awareness reads text and windows, it does not
    describe pictures. `file_intents` still says "I can't see inside images yet".
    Needs a real vision model; see screen_awareness.py for why Moondream was rejected.
-2. Proactive notifications — background monitor for upcoming events / due reminders
+2. Proactive notifications — BUILT (proactive.py: events about to start, overdue
+   reminders), now through the single door (delivery.py). Remaining: anything
+   beyond the calendar, and briefs.
 3. Barge-in over speakers — the canceller now EXISTS (`echo_canceller.py`, measured
    27-36 dB of Nova's voice removed) and `feat/barge-in` is the other half, but
    `stt.echo_cancellation` ships OFF: turning it on also keeps mic frames during

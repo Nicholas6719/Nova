@@ -1054,8 +1054,7 @@ def _general_seeds() -> list[str]:
         "explain quantum computing", "write me a poem", "what do you think",
         "who is Spider-Man", "what is the capital of France",
         "I had a long day", "can you hear me", "thank you", "thanks",
-        "never mind", "I'm just kidding", "what's 10 times 10 minus 4",
-        "what's the square root of 10", "how much should I tip",
+        "never mind", "I'm just kidding",
         # Command NOUNS used as TOPICS — the false-positive class CLAUDE.md
         # documents for every regex matcher that ever fired on one.
         "the weather was beautiful yesterday", "I love listening to music",

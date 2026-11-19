@@ -149,6 +149,12 @@ def route_of(va, text: str) -> str:
     # Nova does not have.
     if va.views.detect_intent(text) is not None:
         return "view"
+    import mathskill
+    if mathskill.slots(text):
+        return "math"
+    import standing
+    if standing.claims(text):
+        return "watch"
     if va.actuation.detect_intent(text) is not None:
         return "actuation"
     if va.calendar.detect_intent(text) is not None:

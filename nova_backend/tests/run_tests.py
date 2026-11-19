@@ -106,6 +106,10 @@ SUITES = {
                 "brain seeds: no cross-skill clash, each one executable", False, False),
     "brain":   ("test_brain_intent.py",
                 "brain vs regex: >= on the corpus, no new wrong actions", False, False),
+    "honesty": ("test_honesty.py",
+                "no spoken promise nothing will keep; typed turns stay silent", False, False),
+    "door":    ("test_unprompted.py",
+                "unprompted speech: one door, never twice, never a flood; watches kept", False, False),
     "learn":   ("test_brain_learning.py",
                 "brain learns, asks, is taught and corrected — safely", False, False),
     "loop":    ("test_conversation_loop.py",
@@ -186,7 +190,7 @@ def main() -> int:
     if args.all:
         chosen = list(SUITES)
     elif args.quick:
-        chosen = ["env", "routing", "seeds", "brain", "learn", "loop", "wake", "cache", "rag", "tts",
+        chosen = ["env", "routing", "seeds", "brain", "learn", "honesty", "door", "loop", "wake", "cache", "rag", "tts",
                   "weather", "music", "views", "home", "sounds", "market",
                   "act", "conf", "echo"]
     else:

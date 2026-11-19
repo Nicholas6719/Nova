@@ -57,6 +57,12 @@ TURNS = [
     ("status check", "phrase"),
     ("what time is it", "reflex:fast.time"),
     ("that's wrong", "corrected"),
+    # ── Stage 4 (read-only) ──
+    ("what's 25% of 10%", "math"),
+    ("My dinner was $95.82 before tax. How much should I tip?", "math"),
+    ("tell me when my cpu goes above 99 percent", "watch"),
+    ("what are you watching", "watch"),
+    ("cancel all watches", "watch"),
 ]
 
 
@@ -135,7 +141,11 @@ def main() -> int:
             conf = re.search(r"\[brain\] confirmed: .* -> (\S+)", seg)
             phrase = re.search(r"\[brain\] taught phrase", seg)
             corrected = re.search(r"\[brain\] corrected:", seg)
-            if conf:
+            if "[math]" in seg:
+                got, ms = "math", "-"
+            elif re.search(r"\[watch\]|I'll tell you when|watching|stopped all|stopped watching", last):
+                got, ms = "watch", "-"
+            elif conf:
                 got, ms = f"confirmed:{conf.group(1)}", "-"
             elif corrected:
                 got, ms = "corrected", "-"

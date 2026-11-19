@@ -581,7 +581,7 @@ class VoiceAssistant:
         from tools import NovaTools
         # on_announce lets a timer speak when it fires — nothing is asking at
         # that moment, so it needs its own safe path to the floor.
-        self.tools = NovaTools(self.config, on_announce=self._announce,
+        self.tools = NovaTools(self.config, on_announce=self._timer_fired,
                                on_progress=self._show_work,
                                on_activity=self.record_activity)
 
@@ -795,6 +795,7 @@ class VoiceAssistant:
             log.warning(f"could not show home at startup: {exc}")
         self._start_home_ticker()
         self._start_proactive()
+        self._init_standing()
 
     def _start_proactive(self) -> None:
         """Let Nova speak first, occasionally.
@@ -807,20 +808,91 @@ class VoiceAssistant:
         """
         try:
             from proactive import ProactiveMonitor
-            def _speak_and_show(text: str) -> None:
-                # On screen first: it costs nothing and _announce blocks until
-                # it finds a gap, which can be a while if she is mid-sentence.
-                try:
-                    self.views.flash_notice(text)
-                except Exception as exc:
-                    log.debug(f"could not show the notice: {exc}")
-                self._announce(text)
+            d = self._delivery()
 
-            self.proactive = ProactiveMonitor(self.config, self, _speak_and_show)
+            def _deliver(text: str, key: Optional[str] = None,
+                         kind: str = "proactive") -> None:
+                # Through the single door: claimed before it is said, counted
+                # against the ceilings, shown instead of spoken when over them.
+                if d is not None:
+                    d.deliver(kind, text, key=key, claimed=key is not None)
+                else:
+                    self._show_then_announce(text)
+
+            claim = (lambda key, kind, text: d.claim(key, kind, text)) if d else None
+            self.proactive = ProactiveMonitor(self.config, self, _deliver, claim=claim)
             self.proactive.start()
         except Exception as exc:
             log.warning(f"proactive monitor unavailable: {exc}")
             self.proactive = None
+
+    def _show_then_announce(self, text: str) -> None:
+        # On screen first: it costs nothing and _announce blocks until it
+        # finds a gap, which can be a while if she is mid-sentence.
+        try:
+            self.views.flash_notice(text)
+        except Exception as exc:
+            log.debug(f"could not show the notice: {exc}")
+        self._announce(text)
+
+    def _delivery(self):
+        """The single door for unprompted speech (delivery.py), made once."""
+        d = getattr(self, "delivery", None)
+        if d is not None:
+            return d
+        try:
+            from delivery import Delivery
+
+            def _show(text: str) -> None:
+                self.views.flash_notice(text)
+            self.delivery = Delivery(DATA_DIR / "nova_memory.db", self.config,
+                                     speak=self._announce, show=_show)
+        except Exception as exc:
+            log.warning(f"delivery unavailable, speaking directly: {exc}")
+            self.delivery = None
+        return self.delivery
+
+    def _init_standing(self) -> None:
+        """Standing watches, on the single door. Started with the proactive
+        monitor (after every engine exists); readings are local only."""
+        self.standing = None
+        try:
+            from standing import StandingWatches
+            d = self._delivery()
+
+            def _read(metric: str):
+                if metric == "battery":
+                    r = self.tools.battery_reading()
+                    return r and r.get("level")
+                if metric == "cpu":
+                    r = self.tools.cpu_reading()
+                    return r and r.get("busy")
+                if metric == "memory":
+                    r = self.tools.memory_reading()
+                    return r and r.get("pct")
+                return None
+
+            def _deliver(kind: str, text: str, key: str):
+                if d is not None:
+                    d.deliver(kind, text, key=key)
+                else:
+                    self._show_then_announce(text)
+
+            self.standing = StandingWatches(DATA_DIR / "nova_memory.db", _read, _deliver,
+                                            self.config)
+            self.standing.start()
+        except Exception as exc:
+            log.warning(f"standing watches unavailable: {exc}")
+            self.standing = None
+
+    def _timer_fired(self, msg: str) -> None:
+        """A timer he set has gone off: through the door (requested kind, so
+        never held by a ceiling), from the timer's own thread."""
+        d = self._delivery()
+        if d is not None:
+            d.deliver("timer", msg)
+        else:
+            self._announce(msg)
 
     def _start_home_ticker(self) -> None:
         """Keep home honest about the world while he is looking at it.
@@ -1334,6 +1406,30 @@ class VoiceAssistant:
                 self._respond(resp)
                 return
 
+        # ── 2e-0. Arithmetic, percentages, tips, unit conversion ─────────────
+        # In CODE (mathskill.py, units.py — ported from JARVIS), never by the
+        # model: a wrong number sounds exactly like a right one. The parser
+        # accepts a sentence only when every word of it is part of the sum,
+        # so "set the volume to 50 percent" and "I have 2 kids" never land here.
+        if self._run_math(text):
+            return
+
+        # ── 2e-0b. Standing watches ───────────────────────────────────────────
+        # "Tell me when my battery is charged" is a WATCH, not a question:
+        # stored, checked by a loop, said once through the single door
+        # (standing.py). Before the brain and the regex stages, both of which
+        # would read it as a battery question and answer with today's level.
+        st = getattr(self, "standing", None)
+        if st is not None:
+            try:
+                resp = st.handle(text)
+            except Exception as exc:
+                log.warning(f"[watch] failed, routing on: {exc}")
+                resp = None
+            if resp is not None:
+                self._respond(resp)
+                return
+
         # ── 2e. THE BRAIN ─────────────────────────────────────────────────────
         # A learned intent router (brain.py, skills.py). A confident match
         # whose skill can extract its arguments runs directly — the same stage
@@ -1657,6 +1753,19 @@ class VoiceAssistant:
         self._respond(f"Did you mean {label}?")
         return True
 
+    def _run_math(self, text: str) -> bool:
+        try:
+            import mathskill
+            r = mathskill.slots(text)
+        except Exception as exc:
+            log.warning(f"[math] parse failed, routing on: {exc}")
+            return False
+        if not r or not r.get("said"):
+            return False
+        log.info(f"[math] {r.get('expr')!r} = {r.get('value')}")
+        self._respond(r["said"])
+        return True
+
     def _regex_route(self, text: str) -> str:
         """Which regex stage WOULD claim this, with no side effects."""
         return self._regex_intent(text)[0]
@@ -1667,6 +1776,12 @@ class VoiceAssistant:
         of a regex stage, or shows it has not — and as the TEACHER for
         learning (skills.skill_for_regex maps it to a skill)."""
         try:
+            import mathskill
+            import standing
+            if mathskill.slots(text):
+                return "math", None
+            if standing.claims(text):
+                return "watch", None
             for stage, det in (("view", self.views.detect_intent),
                                ("actuation", self.actuation.detect_intent),
                                ("calendar", self.calendar.detect_intent),
@@ -2255,10 +2370,22 @@ class VoiceAssistant:
         full_response = ""
         pending       = ""            # tokens not yet emitted as a full sentence
         state         = {"spoke": False}
+        # Nova's LLM runs no tools, so a sentence promising to watch, remind or
+        # follow up — or claiming it already set/opened/sent something — is
+        # never true here (honesty.py). Checked per sentence BEFORE it is
+        # spoken, so the streaming overlap is untouched.
+        import honesty
+        honest = honesty.Filter() if self.config["llm"].get("honesty_filter", True) \
+            else (lambda x: x)
+        # Typed in, typed back — on this path too. _respond always honoured
+        # _silent_turn; this one spoke every LLM answer aloud, so a question
+        # he TYPED because he couldn't talk was read out through his speakers.
+        silent = bool(getattr(self, "_silent_turn", False))
 
         def _emit(text: str) -> None:
+            text = honest(text)
             text = _clean_for_tts(text)
-            if not text:
+            if not text or silent:
                 return
             if not state["spoke"]:
                 self.set_state("speaking")   # first audio → flip orb to speaking
@@ -2312,13 +2439,19 @@ class VoiceAssistant:
             _flush(force=True)            # speak the trailing partial sentence
         else:
             # Blocking fallback: whole reply generated, now speak it back-to-back.
-            self.set_state("speaking")
             for sentence in self._SENT_SPLIT.split(full_response.strip()):
                 s = sentence.strip()
                 if s:
-                    self.tts.speak(_clean_for_tts(s))
+                    _emit(s)
 
         self.tts.wait_until_done(timeout=60)
+
+        if getattr(honest, "replaced", None):
+            for said, truth in honest.replaced:
+                log.info(f"[honesty] replaced {said!r}")
+            # What is stored and shown is what she SAID, not what the model
+            # wrote: a promise kept in history would be repeated next turn.
+            full_response = honest.text
 
         self._last_response = full_response
         self._begin_conversation()

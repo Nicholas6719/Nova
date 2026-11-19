@@ -48,7 +48,7 @@ import test_routing_corpus as T          # noqa: E402  (sets NOVA_DATA_DIR first
 
 VERBOSE = "-v" in sys.argv
 ACTING = {"tools", "files", "calendar", "screen", "view", "market", "actuation",
-          "memory", "fastpath", "weather"}
+          "memory", "fastpath", "weather", "math", "watch"}
 QUIET = {"llm", "unsupported"}            # neither does anything on his Mac
 
 
@@ -107,6 +107,12 @@ def brain_route(va, brain, text: str, hybrid: bool) -> tuple[str, str]:
         return ("signoff" if not lead else "signoff+content"), ""
     if va.views.detect_intent(text) is not None:
         return "view", "regex-2c"
+    import mathskill
+    if mathskill.slots(text):
+        return "math", "2e-0"
+    import standing
+    if standing.claims(text):
+        return "watch", "2e-0"
     d = brain.decide(text, va)
     if d is not None:
         return d.skill.stage, f"{d.skill.name}@{d.confidence:.2f}"
