@@ -34,14 +34,26 @@ _ASK_OPENERS = {
     "stop", "resume", "mute", "unmute", "dim", "brighten", "lower", "raise",
     "crank", "throw", "close", "quit", "launch", "search", "google", "navigate",
     "cancel", "clear", "hide", "restore", "shuffle", "repeat", "next", "previous",
-    "volume", "louder", "quieter", "battery", "cpu", "weather", "forecast",
-    "hello", "hi", "hey", "good", "morning", "afternoon", "evening", "sorry",
-    "one", "come", "remember", "forget", "actually", "or", "and", "so", "ok",
-    "okay", "now", "also", "just", "please", "nova", "can", "could", "need",
-    "full", "max", "reload", "refresh", "new", "minimize", "lock", "screenshot",
-    "capture", "grab", "locate", "move", "copy", "rename", "drop", "drag",
-    "stick", "shove", "file", "delete", "trash", "duplicate", "change", "use",
+    "louder", "quieter", "hello", "hi", "hey", "sorry", "come", "remember", "forget",
+    "please", "nova", "can", "could", "need", "reload", "refresh", "minimize",
+    "lock", "screenshot", "capture", "grab", "locate", "move", "copy", "rename",
+    "drop", "drag", "stick", "shove", "file", "delete", "trash", "duplicate",
+    "change", "use",
 }
+# Nouns and fillers used to sit in the opener list ("battery", "weather",
+# "good", "so", "actually"...), so "battery is at like five percent lol" read
+# his battery and "good weather today huh" fetched a forecast (audit,
+# 2026-11-19). Fillers are now skipped before the opener is read, and a noun
+# phrase counts as a request only when it is TERSE and has no verb of its own
+# ("battery percentage", "apple stock price", "boston weather") — which main
+# answered and the opener list alone had started refusing.
+_FILLERS = {"so", "and", "now", "also", "just", "actually", "ok", "okay", "or", "oh",
+            "well", "um", "uh", "right", "alright", "hmm", "yeah"}
+_FINITE = re.compile(
+    r"\b(?:is|are|was|were|am|be|been|being|has|have|had|do|does|did|will|would|can|"
+    r"could|should|shall|may|might|must|went|got|said|made|took|came|saw|ran|broke|"
+    r"sucks|feels|looks|seems|lasts|keeps|kept|left|thought|told|felt|know|think|"
+    r"need|want|like|love|hate|guess|mean|\w+'s|\w+'re|\w+n't|\w{3,}ed)\b", re.I)
 
 
 _WAKE = re.compile(r"^\s*(?:(?:hey|hi|ok|okay|so)[,\s]+)?nova\b[,.!?\s]*(?=\S)", re.I)
@@ -59,11 +71,32 @@ def _first_word(text: str) -> str:
     return m.group(0) if m else ""
 
 
+def _opener(text: str) -> tuple[str, str]:
+    """(first real word, the text from it on), fillers skipped."""
+    t = _WAKE.sub("", (text or "").strip())
+    for _ in range(3):
+        t2 = _POLITE.sub("", t)
+        if t2 == t:
+            break
+        t = t2
+    words = re.findall(r"[a-z']+", t.lower())
+    i = 0
+    while i < len(words) - 1 and words[i] in _FILLERS:
+        i += 1
+    return (words[i] if words else ""), " ".join(words[i:])
+
+
 def asks(text: str) -> bool:
     t = (text or "").strip()
     if t.endswith("?"):
         return True
-    return _first_word(t) in _ASK_OPENERS
+    first, rest = _opener(t)
+    if first in _ASK_OPENERS:
+        return True
+    # Terse and verbless: a spoken command with the verb left off.
+    words = rest.split()
+    return 0 < len(words) <= 6 and not _FINITE.search(rest) \
+        and first not in ("i", "i'm", "my", "we", "our", "you", "your", "he", "she", "they")
 
 
 _DEFINITION = re.compile(

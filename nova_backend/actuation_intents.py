@@ -98,7 +98,10 @@ class NovaActuation:
         self._failed = False
 
     # ── Detection ─────────────────────────────────────────────────────────────
-    def detect_intent(self, text: str) -> Optional[str]:
+    def detect_intent(self, text: str, assume_work_mode: bool = False) -> Optional[str]:
+        """`assume_work_mode` judges the SENTENCE as if in work mode, without
+        flipping the shared flag (the brain's load-time check used to set
+        assistant.work_mode for a moment, which a concurrent turn could see)."""
         if not self.enabled or not text or not text.strip():
             return None
         # WORK MODE IS THE GATE, and it lives here rather than only in handle()
@@ -106,7 +109,7 @@ class NovaActuation:
         # down" drives the browser through tools when they are not working
         # together; claiming it here would have replaced that with "say work
         # with me first", which is a regression dressed as a safety feature.
-        if not getattr(self.assistant, "work_mode", False):
+        if not assume_work_mode and not getattr(self.assistant, "work_mode", False):
             return None
         t = text.strip()
         if _SAY_TYPE_RE.match(t):

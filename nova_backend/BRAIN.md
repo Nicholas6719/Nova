@@ -404,6 +404,46 @@ privacy), not built:
 - turning the `[brain-disagree]` log into a weekly review of regex stages the
   brain has fully matched, so they can be retired.
 
+## The audit (2026-11-19)
+
+Before the branch was pushed, four independent reviewers each took one area
+(router, pipeline, Stage 4 modules, Stage 3 + intent matchers) and proved
+defects by running the code. About thirty were real; all are fixed, and each
+is a check in `tests/test_audit_regressions.py` that was confirmed FAILING on
+the pre-fix commit. The ones that mattered most:
+
+- **A stale "did you mean" could lock his Mac.** The offer was only cleared
+  when routing reached the brain's lessons, with no time limit: "did you mean
+  lock your Mac?", "go to sleep", and hours later "right, what's on my
+  calendar" matched yes. Offers now expire (90s) and die with any other answer.
+- **Fixed-command skills ran the canonical phrase even when his words said
+  the opposite**: "shuffle off" ran "turn on shuffle"; "skip back a song"
+  skipped forward. A skill whose sentence tools can parse now runs HIS words;
+  the object-named fallback refuses words that ask for the reverse.
+- **Arithmetic ported from JARVIS added consecutive number words**: "two point
+  one five" was 2.6, "nineteen eighty four" 103. Small results were spoken as
+  "0", "minus 3 squared" was 9, "9/11" was divided.
+- **Privacy**: a stored name went to Wikipedia in the possessive ("Sarah's");
+  names the reconciler stores under relationship keys were never collected;
+  "what's Sarah at" went to Finnhub and Yahoo as a ticker; "which planet is
+  closest to the sun" went to MapKit with his location.
+- **Wrong facts**: "city", "country", "year", "first" were stopwords, so "what
+  city is the Eiffel Tower in" was served "France"; number words did not count
+  for grounding, so "three funnels" was grounded in "four funnels" — in the
+  audit too.
+- **Learned lessons deleted at start-up**: rows he confirmed failed the
+  re-validation of their own canonical form; one start with weather or finance
+  off deleted their learned examples (an enabled check lived in slots, not the
+  gate); night-school rows could never be un-learned.
+- **Threads**: the brain's per-turn verdicts were shared across the voice
+  loop, night school and the model thread (now thread-local); typed-vs-spoken
+  was a shared flag set at submit time (now travels with the turn); a probe
+  flipped work mode on the shared assistant (now a parameter).
+- **Watches** read every "is at / hits / gets to" as rising, so "tell me when
+  my battery is at 20" answered "it's already at 80".
+- **Honesty** missed "I'll set a reminder", "Reminder set for 5pm", "consider
+  it done", and replaced "I'll let you know what I think".
+
 ## Known gaps
 
 Remaining misses both routers share: "do I have plans tonight", "what's the

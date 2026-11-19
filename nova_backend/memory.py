@@ -215,10 +215,20 @@ class NovaMemory:
             conn = self._conn()
             rows = conn.execute("SELECT key FROM facts WHERE category = ?",
                                 (self.NOTE_CATEGORY,)).fetchall()
+        # EVERY word he said must be in the note, and any number or negation
+        # must agree. A 60% overlap alone deleted "I parked on level 3" for
+        # "forget that I parked on level 4", and "I like tea" for "forget that
+        # I don't like tea" (audit, 2026-11-19).
+        def marks(words: set) -> tuple:
+            return ({w for w in words if any(c.isdigit() for c in w)},
+                    bool(words & _NEGATION))
         scored = []
         for r in rows:
             have = set(r["key"].split("_")) - _NOTE_STOP
-            if not have:
+            if not have or not want <= have:
+                continue
+            (wn, wneg), (hn, hneg) = marks(want), marks(have)
+            if (wn and wn != hn) or wneg != hneg:
                 continue
             overlap = len(want & have) / max(len(want), len(have))
             scored.append((overlap, r["key"]))
@@ -313,6 +323,10 @@ def _norm(s: str) -> str:
 
 _NOTE_STOP = frozenset({"i", "my", "the", "a", "an", "that", "to", "in", "on",
                         "of", "is", "am", "me", "and", "it"})
+
+
+_NEGATION = frozenset({"not", "don't", "dont", "doesn't", "didn't", "isn't", "wasn't",
+                       "never", "no", "can't", "won't", "aren't"})
 
 
 def _note_key(statement: str) -> str:

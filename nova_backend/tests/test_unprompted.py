@@ -141,7 +141,8 @@ def main() -> int:
     print("\n── standing watches: parsing")
     for text, want in [
         ("tell me when my battery is fully charged", ("battery_full", ">=", 100.0)),
-        ("let me know when the battery hits 80", ("battery", ">=", 80.0)),
+        # no direction in the words: decided from the reading when it is set
+        ("let me know when the battery hits 80", ("battery", "auto", 80.0)),
         ("warn me if my battery drops below 15 percent", ("battery", "<=", 15.0)),
         ("tell me if my battery is low", ("battery", "<=", 20.0)),
         ("let me know if my cpu goes above 90 percent", ("cpu", ">=", 90.0)),
@@ -173,9 +174,16 @@ def main() -> int:
           f"{spoken}")
     w3 = S.StandingWatches(db, lambda m: level.get(m), deliver)   # restart again
     check(w3.check_once() == 0 and len(spoken) == 1, "a fired watch never fires again")
-    r = w3.handle("let me know when the battery hits 80")
+    r = w3.handle("let me know when the battery goes above 80")
     check(r == "It's already at 100 percent." and not w3.active(),
           "a condition already true is answered now, not stored", r)
+    r = w3.handle("let me know when the battery hits 80")
+    check(r and "drops to 80" in r and len(w3.active()) == 1,
+          "'hits 80' from 100 means falling to 80 (direction from the reading)", r)
+    r = w3.handle("let me know when the battery hits 80")
+    check(r and r.startswith("I'm already watching") and len(w3.active()) == 1,
+          "the same watch twice is stored once", r)
+    w3.cancel(None)
     w3.handle("warn me if my cpu goes above 90")
     w3.handle("tell me when memory usage goes over 85")
     r = w3.handle("what are you watching")

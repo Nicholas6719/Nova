@@ -136,6 +136,14 @@ def boot():
         def stop(self, *a, **k): pass
     va.ws = _WS()
     va.set_state = lambda s: None
+    # Turn records go to a throwaway file. They are evidence about HIS use —
+    # night school researches questions from them — and 348 rows of sweep
+    # sentences landed in his real table on the day they were added (audit,
+    # 2026-11-19). The sweep reads his memory for real; it must not write
+    # its own turns into his history.
+    import tempfile as _tf
+    from turnstats import TurnStats as _TS
+    va.turnstats = _TS(Path(_tf.mkdtemp(prefix="nova-sweep-")) / "turns.db")
     # The product's own startup guard, run against the harness's object: if an
     # engine the router dereferences is missing, fail HERE with a clear message
     # instead of as an AttributeError on every single phrase.
@@ -625,31 +633,39 @@ _finder_before = set()
 _ok, _ids = osa('tell application "Finder" to return id of every window')
 if _ok:
     _finder_before = {w.strip() for w in _ids.split(",") if w.strip()}
-_textedit_before = osa('tell application "System Events" to '
-                       '(name of processes) contains "TextEdit"')[1]
+_calc_before = osa('tell application "System Events" to '
+                   '(name of processes) contains "Calculator"')[1]
 
 out = say("open my downloads folder")
 check("download" in out.lower(), "Finder folder opens", out)
 time.sleep(1)
 
 # Guarantee a COLD launch so we test the real path, not "already open".
-osa('quit app "TextEdit"'); time.sleep(2)
-out = say("open textedit")
-check("opening" in out.lower(), "cold launch reports opening (not 'already open')", out)
-# It must not claim success unless a window is really on screen.
-time.sleep(1)
-from tools import NovaTools as _NT
-_w = _NT._on_screen_windows("TextEdit")
-check(_w is None or _w > 0, "launch produced a REAL on-screen window", f"windows={_w} | {out}")
-out2 = say("open textedit")
-check("already open" in out2.lower(), "re-opening a running app says so honestly", out2)
-time.sleep(2)
-running = osa('tell application "System Events" to (name of processes) contains "TextEdit"')[1]
-check(running == "true", "TextEdit ACTUALLY launched", f"running={running}")
-out = say("quit textedit")
-time.sleep(2)
-running = osa('tell application "System Events" to (name of processes) contains "TextEdit"')[1]
-check(running == "false", "TextEdit ACTUALLY quit", f"running={running}")
+# CALCULATOR, not TextEdit: TextEdit RESTORES his documents on launch (an
+# untitled one he once had Nova type into reappears every time), so its quit
+# stalled on his document, the check failed, and TextEdit was left open —
+# found in the 2026-11-19 audit. Calculator has no documents to restore. And
+# if Calculator is already his, the launch/quit checks are skipped, never
+# forced: quitting an app he is using is not a test step.
+if _calc_before == "false":
+    out = say("open calculator")
+    check("opening" in out.lower(), "cold launch reports opening (not 'already open')", out)
+    # It must not claim success unless a window is really on screen.
+    time.sleep(1)
+    from tools import NovaTools as _NT
+    _w = _NT._on_screen_windows("Calculator")
+    check(_w is None or _w > 0, "launch produced a REAL on-screen window", f"windows={_w} | {out}")
+    out2 = say("open calculator")
+    check("already open" in out2.lower(), "re-opening a running app says so honestly", out2)
+    time.sleep(2)
+    running = osa('tell application "System Events" to (name of processes) contains "Calculator"')[1]
+    check(running == "true", "Calculator ACTUALLY launched", f"running={running}")
+    out = say("quit calculator")
+    time.sleep(2)
+    running = osa('tell application "System Events" to (name of processes) contains "Calculator"')[1]
+    check(running == "false", "Calculator ACTUALLY quit", f"running={running}")
+else:
+    print("  SKIP  app launch/quit: Calculator was already open (his)")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -732,7 +748,7 @@ def _mem_would_fire(text):
 
 _apps_before_matrix = {
     app: osa(f'tell application "System Events" to (name of processes) contains "{app}"')[1]
-    for app in ("Spotify", "TextEdit", "Music", "Brave Browser")
+    for app in ("Spotify", "Calculator", "Music", "Brave Browser")
 }
 
 with _NoSideEffects():
@@ -943,13 +959,13 @@ if _ours:
     check(not _left, f"Finder windows we opened are closed ({len(_ours)})",
           f"still open: {_left}")
 
-# TextEdit — the cold-launch test starts it. Quit it ONLY if it was not his.
-if _textedit_before == "false":
-    osa('quit app "TextEdit"', timeout=20)
+# Calculator — the cold-launch test starts it. Quit it ONLY if it was not his.
+if _calc_before == "false":
+    osa('quit app "Calculator"', timeout=20)
     time.sleep(1)
     _te = osa('tell application "System Events" to '
-              '(name of processes) contains "TextEdit"')[1]
-    check(_te == "false", "TextEdit quit (it was not running before)",
+              '(name of processes) contains "Calculator"')[1]
+    check(_te == "false", "Calculator quit (it was not running before)",
           f"running={_te}")
 
 # Browser — close ONLY our window, BY ID.

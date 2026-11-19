@@ -48,14 +48,18 @@ CREATE TABLE IF NOT EXISTS turn_stats (
 CREATE INDEX IF NOT EXISTS turn_stats_ts ON turn_stats(ts);
 """
 
+# Anchored at BOTH ends: these run ahead of every command stage, and "why that
+# restaurant closed down" or "what have you learned about me" are real
+# questions for someone else (audit, 2026-11-19).
+_END = r"\s*(?:nova)?[\s.!?]*$"
 _WHY_RE = re.compile(
     r"^\s*(?:nova[,\s]+)?(?:why\s+did\s+you\s+(?:do|say|pick|choose)\s+(?:that|this)|"
     r"why\s+(?:that|would\s+you\s+do\s+that)|how\s+did\s+you\s+(?:decide|know|get)\s+that|"
-    r"what\s+made\s+you\s+(?:do|say)\s+that|what\s+did\s+you\s+just\s+do)\b", re.I)
+    r"what\s+made\s+you\s+(?:do|say)\s+that|what\s+did\s+you\s+just\s+do)" + _END, re.I)
 _REPORT_RE = re.compile(
     r"^\s*(?:nova[,\s]+)?(?:how\s+(?:often|much)\s+do\s+you\s+(?:answer|handle)\s+(?:things\s+)?"
     r"(?:by\s+)?yourself|how\s+(?:is|are)\s+(?:your\s+brain|you\s+learning)|"
-    r"what\s+have\s+you\s+learned(?:\s+(?:lately|recently|this\s+week))?|brain\s+report)\b", re.I)
+    r"what\s+have\s+you\s+learned(?:\s+(?:lately|recently|this\s+week))?|brain\s+report)" + _END, re.I)
 
 _STAGE_WORDS = {
     "calendar": "your calendar", "files": "files", "weather": "the weather",

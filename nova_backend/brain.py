@@ -231,6 +231,14 @@ class Brain:
         self._cmd_steps: list[list[dict]] = []
         self._cmd_matrix: Optional[np.ndarray] = None
         self.ready = False
+        # Per-turn verdicts (last_match / unsure / conversation) are THREAD-
+        # LOCAL. Turns run on nova-llm, but the confidence gate asks tier_for()
+        # from the voice loop and night school asks decide() from its own
+        # thread; with one shared slot a probe could overwrite what a running
+        # turn was about to read — a "did you mean" built from a sentence he
+        # never said, a correction un-learning an unrelated example (audit,
+        # 2026-11-19). Each thread now sees only its own decide().
+        self._tl = threading.local()
         self.last_match: Optional[dict] = None
         # The near-miss from the last decide(): the right idea, scored too low
         # to act on alone, kept so the turn can ASK (Stage 2). JARVIS mistake
@@ -246,6 +254,31 @@ class Brain:
         self.conversation = False
         # Shared across Brain instances (tests build several); text -> vector.
         self._shared = embed_cache
+
+    # per-thread verdicts (see __init__)
+    @property
+    def last_match(self) -> Optional[dict]:
+        return getattr(self._tl, "last_match", None)
+
+    @last_match.setter
+    def last_match(self, v) -> None:
+        self._tl.last_match = v
+
+    @property
+    def unsure(self) -> Optional[dict]:
+        return getattr(self._tl, "unsure", None)
+
+    @unsure.setter
+    def unsure(self, v) -> None:
+        self._tl.unsure = v
+
+    @property
+    def conversation(self) -> bool:
+        return getattr(self._tl, "conversation", False)
+
+    @conversation.setter
+    def conversation(self, v) -> None:
+        self._tl.conversation = v
 
     # ── storage ───────────────────────────────────────────────────────────────
     @contextmanager
@@ -332,13 +365,19 @@ class Brain:
                         dropped += 1
                 # Seeds are ground truth: a learned row that contradicts one is
                 # a mislabel; one its skill can no longer execute is useless.
-                for text, skill in db.execute(
-                        "SELECT text, skill FROM brain_examples WHERE source!='seed'").fetchall():
+                for text, skill, source in db.execute(
+                        "SELECT text, skill, source FROM brain_examples "
+                        "WHERE source!='seed'").fetchall():
                     # The executability check needs the live engines; a brain
                     # loaded without them (a test, a bare tool) must not judge
                     # — and so must not delete — what it cannot evaluate.
+                    # A row HE confirmed ("did you mean X?" yes, or a phrase he
+                    # taught) is never re-judged: its stored canonical form
+                    # loses "?" and "can you", and the skill's strict slots
+                    # then refused what he had said yes to — every such lesson
+                    # vanished on the next start (audit, 2026-11-19).
                     if (text in canon and canon[text] != skill) \
-                            or (self.va is not None
+                            or (self.va is not None and source != "user"
                                 and not self._executable(text, skill)):
                         db.execute("DELETE FROM brain_examples WHERE text=?", (text,))
                         dropped += 1
@@ -660,7 +699,9 @@ class Brain:
             return None
         if match.get("skill") == "command":
             return "command" if self.forget_command(match.get("text", "")) else None
-        if match.get("source") not in ("learned", "user"):
+        # Anything not a seed can be un-learned — night school's paraphrases
+        # included; they were stuck forever (audit, 2026-11-19).
+        if match.get("source") in (None, "seed"):
             return None
         with self._lock:
             t = match.get("text")

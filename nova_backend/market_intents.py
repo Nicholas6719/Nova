@@ -81,9 +81,13 @@ _SUBJECT_RE = re.compile(
     # "what's Nvidia trading at" — _STOCK_RE has always accepted this shape,
     # but nothing here could pull the company out, so it was silently dropped.
     # Never a possessive: "what's my battery at" is a system question.
+    # "Trading at" or "stock/shares at" only: a bare "what's X at" sent
+    # "Sarah", "mom" and "dinner" to Finnhub and Yahoo as tickers (audit,
+    # 2026-11-19). The name is ONE or two words and never "trading" itself
+    # ("what's Nvidia trading at" extracted "Nvidia trading").
     r"|\bwhat(?:'?s| is)\s+(?!(?:my|your|our|his|her|the|it|this|that)\b)"
-    r"(?P<w>[\w.&]+(?:\s+[\w.&]+)?)\s+(?:stock\s+|shares?\s+)?"
-    r"(?:trading\s+at|at|worth)\b",
+    r"(?P<w>(?!trading\b)[\w.&]+(?:\s+(?!trading\b|stock\b|shares?\b)[\w.&]+)??)\s+"
+    r"(?:trading\s+at|(?:stock|shares?)\s+(?:trading\s+)?(?:at|worth))\b",
     re.I,
 )
 

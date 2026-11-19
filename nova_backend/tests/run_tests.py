@@ -117,6 +117,8 @@ SUITES = {
     "facts":   ("test_world_facts.py",
                 "world facts: looked up, kept only if timeless, never mis-served, nothing personal sent",
                 False, False),
+    "audit":   ("test_audit_regressions.py",
+                "every defect the 2026-11-19 audit proved stays fixed", False, False),
     "loop":    ("test_conversation_loop.py",
                 "conversation state machine (real loop, scripted mic)", False, False),
     "cache":   ("test_prompt_cache.py",
@@ -198,7 +200,7 @@ def main() -> int:
     if args.all:
         chosen = list(SUITES)
     elif args.quick:
-        chosen = ["env", "routing", "seeds", "brain", "learn", "facts", "honesty", "door", "stats", "loop", "wake", "cache", "rag", "tts",
+        chosen = ["env", "routing", "seeds", "brain", "learn", "facts", "audit", "honesty", "door", "stats", "loop", "wake", "cache", "rag", "tts",
                   "weather", "music", "views", "home", "sounds", "market",
                   "act", "conf", "echo"]
     else:

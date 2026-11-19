@@ -146,9 +146,20 @@ _WORK_WORDS = {"work", "with", "me", "mode", "take", "over", "minimize", "go", "
                "us", "together", "it", "lets", "time", "working", "lets", "now"}
 
 
+_WORK_ANCHOR = {"work", "working", "puck", "together", "mode", "shrink"}
+
+
 def _work_slots(va, text):
+    # Made only of work-mode words AND naming the idea: "minimize it" and "take
+    # it over" passed the first test alone and parked Nova (audit, 2026-11-19).
     w = _light_words(text)
-    return {"intent": "work"} if w and all(x in _WORK_WORDS for x in w) else None
+    if not w or not all(x in _WORK_WORDS for x in w):
+        return None
+    # "take over" and a bare "minimize" are how views.py names work mode too;
+    # with an object ("minimize IT", "take IT over") they are about a window.
+    if _WORK_ANCHOR & set(w) or w in (["take", "over"], ["minimize"]):
+        return {"intent": "work"}
+    return None
 
 
 def _home_surface_slots(intent: str, verbs: set):
@@ -230,12 +241,10 @@ def _act_probe(va, text: str) -> Optional[str]:
     For the brain's load-time "could this skill run this sentence?" question
     (brain._executable) the SENTENCE is what is being judged, so ask the
     detector as if in work mode. decide() still requires work mode via gate."""
-    saved = getattr(va, "work_mode", False)
     try:
-        va.work_mode = True
-        return va.actuation.detect_intent(text)
-    finally:
-        va.work_mode = saved
+        return va.actuation.detect_intent(text, assume_work_mode=True)
+    except TypeError:           # an actuation stand-in without the keyword
+        return None
 
 
 def _run_act(va, t, a):
@@ -400,8 +409,9 @@ SCREEN_SKILLS = [
 @_asking_def
 def _weather_slots(va, text):
     import weather_intents as W
-    if not va.config.get("weather", {}).get("enabled", True):
-        return None
+    # weather.enabled is the skill's GATE, not a slot check: slots are what
+    # load() re-validates learned rows with, and one start with weather off
+    # deleted every learned weather example for good (audit, 2026-11-19).
     # The module's action-verb guard is load-bearing ("play some rain sounds",
     # "put my weather report in Documents"), so it applies here unchanged.
     if W._NOT_WEATHER_RE.search(text or ""):
@@ -425,7 +435,8 @@ WEATHER_SKILLS = [
         "how hot is it outside", "what's the weather this week",
         "what's the weather in New Orleans", "is it raining",
     ], slots=_weather_slots, run=lambda va, t, a: va._run_weather(a["intent"], t),
-        label="check the weather"),
+        label="check the weather",
+        gate=lambda va: va.config.get("weather", {}).get("enabled", True)),
 ]
 
 
@@ -434,8 +445,7 @@ WEATHER_SKILLS = [
 # ═══════════════════════════════════════════════════════════════════════════════
 def _market_slots(default: str):
     def slots(va, text):
-        if not getattr(va.market, "enabled", True):
-            return None
+        # finance.enabled is checked by the GATE (see _weather_slots).
         import market_intents as M
         if M._NOT_MARKET_RE.search(text or ""):
             return None
@@ -452,6 +462,10 @@ def _run_market(va, t, a):
     va._run_market(a["intent"], t)
 
 
+def _market_on(va) -> bool:
+    return bool(getattr(va.market, "enabled", True))
+
+
 MARKET_SKILLS = [
     Skill("market.overview", "market", [
         "how is the market doing", "how's the stock market today",
@@ -459,7 +473,7 @@ MARKET_SKILLS = [
         "are stocks up or down today",
         "how's the stock market looking", "how are stocks doing today",
         "what did the market do", "how are the indexes doing",
-    ], slots=_market_slots("market"), run=_run_market, label="check the market"),
+    ], slots=_market_slots("market"), run=_run_market, label="check the market", gate=_market_on),
     Skill("market.quote", "market", [
         "what is Apple stock trading at", "what's the price of Microsoft stock",
         "how are Apple shares doing", "get me a quote for Netflix",
@@ -467,16 +481,16 @@ MARKET_SKILLS = [
         "how is SpaceX stock doing", "how is the SpaceX stock doing today",
         "what's Tesla stock at", "how's Google stock doing",
         
-    ], slots=_market_slots("quote"), run=_run_market, label="get that quote"),
+    ], slots=_market_slots("quote"), run=_run_market, label="get that quote", gate=_market_on),
     Skill("market.analysts", "market", [
         "what are the analyst ratings for Nvidia", "what do analysts say about Tesla",
         "what's the analyst rating on Apple", "is Microsoft a buy according to analysts",
     ], slots=_market_slots("analysts"), run=_run_market,
-        label="read the analyst ratings"),
+        label="read the analyst ratings", gate=_market_on),
     Skill("market.news", "market", [
         "what's the latest news on Tesla stock", "any news about Apple stock",
         "what's happening with Nvidia stock",
-    ], slots=_market_slots("news"), run=_run_market, label="get the stock news"),
+    ], slots=_market_slots("news"), run=_run_market, label="get the stock news", gate=_market_on),
 ]
 
 
@@ -757,8 +771,14 @@ FAST_SKILLS = [
 # Tools (stage "tools")
 # ═══════════════════════════════════════════════════════════════════════════════
 def _tool_fixed(command: str):
-    """An argument-free tool: run tools.match on the canonical phrase."""
+    """An argument-free tool: run tools.match on the canonical phrase — unless
+    tools itself claimed HIS words (slots set "own"), in which case his words
+    run. The canonical phrase only ever stands in for a sentence tools could
+    not parse; when it can, his sentence carries what the command cannot:
+    "shuffle off" ran "turn on shuffle" (audit, 2026-11-19)."""
     def run(va, t, a):
+        if a.get("own"):
+            return _run_tool_text(va, t, a)
         resp = va.tools.match(command)
         if resp is None:        # the canonical phrase no longer matches: say so
             va._respond("I couldn't do that one.")
@@ -802,8 +822,33 @@ def _run_tool_text(va, t, a):
 # his song, "refresh my memory on that" reloaded his browser. A fixed-command
 # skill therefore acts on a sentence only if tools itself would claim it
 # (dry-run detect) OR the sentence names what the command acts on.
+# Words that ask for the OPPOSITE of a fixed command. The object-named path
+# runs the canonical command, so a sentence naming the object but asking for
+# the reverse must refuse: "skip back a song" skipped FORWARD, "skip ahead in
+# this song" (a seek) skipped the track (audit, 2026-11-19).
+_OPPOSITE = {
+    "up": r"\b(?:down|lower|quieter|softer|dim\w*|less|reduce)\b",
+    "down": r"\b(?:up|louder|raise|bright\w*|more|max\w*|increase)\b",
+    "next": r"\b(?:back|backwards?|previous|rewind|last|ahead\s+in|forward\s+\d|seconds?|minutes?)\b",
+    "previous": r"\b(?:next|forward|ahead|skip\s+this)\b",
+    "on": r"\b(?:off|stop|disable|no\s+more|don'?t|do\s+not|without)\b",
+    "off": r"\b(?:on|enable|start)\b",
+    "play": r"\b(?:pause|stop|don'?t|do\s+not)\b",
+    "pause": r"\b(?:play|resume|unpause|keep\s+playing|don'?t|do\s+not)\b",
+}
+_SKILL_DIRECTION = {
+    "tools.volume_up": "up", "tools.volume_max": "up", "tools.brightness_up": "up",
+    "tools.volume_down": "down", "tools.brightness_down": "down",
+    "tools.music_next": "next", "tools.music_previous": "previous",
+    "tools.shuffle": "on", "tools.repeat": "on", "tools.repeat_off": "off",
+    "tools.music_play": "play", "tools.music_pause": "pause", "tools.mute": "pause",
+}
+
+
 def _names(pattern: str, skill_name: Optional[str] = None):
     rx = re.compile(pattern, re.I)
+    opp = _OPPOSITE.get(_SKILL_DIRECTION.get(skill_name or "", ""))
+    opp_rx = re.compile(opp, re.I) if opp else None
 
     def slots(va, text):
         # computed per call: _TOOL_FAMILY is defined further down this module
@@ -816,7 +861,9 @@ def _names(pattern: str, skill_name: Optional[str] = None):
         if label in _TOOL_FAMILY and label not in mine:
             return None
         if label is not None:
-            return {}
+            return {"own": True}            # tools parses his words: run THOSE
+        if opp_rx is not None and opp_rx.search(text or ""):
+            return None
         if rx.search(text or "") and _asks(text):
             return {}
         return None

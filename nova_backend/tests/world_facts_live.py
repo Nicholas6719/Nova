@@ -45,7 +45,7 @@ EXPECT = {
     "who wrote pride and prejudice": r"austen",
     "who directed jaws": r"spielberg",
     "what year did the titanic sink": r"1912",
-    "how deep is the mariana trench": r"10,?935|10,?9\d\d",
+    "how deep is the mariana trench": r"10,?935|10,?9\d\d|35,?876",   # metres or feet
     "what is the capital of australia": r"canberra",
     "who painted the mona lisa": r"leonardo|da vinci",
     "when did the berlin wall fall": r"1989",

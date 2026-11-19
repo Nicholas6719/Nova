@@ -31,7 +31,11 @@ _SOFT = r"(?:(?:also |just |certainly |definitely |happily |gladly |be sure to |
 WATCHING = re.compile(
     _I_WILL + _SOFT +
     r"(?:keep (?:an eye|watch|you posted|you updated|you informed|track|monitoring|listening)|"
-    r"let you know|notify you|alert you|tell you (?:when|if|as soon|the moment)|inform you|"
+    # "let you know" / "tell you" promise something only with a condition or
+    # a time: "I'll let you know what I think" is an opinion, not a watch.
+    r"let you know(?=\s*(?:[.!?,]|$|when\b|if\b|once\b|as soon|the moment|later|soon|"
+    r"right away|immediately|tomorrow|tonight|by\b))|notify you|alert you|"
+    r"tell you (?:when|as soon|the moment|if (?!I\b))|inform you|"
     r"get back to you|monitor|watch (?:for|out|it|that|this)|update you|report back|"
     r"check back|check in (?:with you|later)|remind you|ping you|follow up|"
     r"flag (?:it|that|anything)|be watching|be listening)\b", re.I)
@@ -49,12 +53,36 @@ DONE = re.compile(
 _DONE_VERBS = re.compile(
     r"^(?:set|added|created|scheduled|opened|launched|saved|sent|booked|"
     r"moved|copied|deleted|renamed|played|paused|muted|turned (?:on|off|up|down)|"
-    r"started|closed|ordered|emailed|texted|messaged|called|put (?:it|that|a reminder))\b",
+    r"closed|ordered|emailed|texted|messaged|taken care of|put (?:it|that|a reminder)|"
+    # "started" and "called" only with an object an action would have:
+    # "I've started to think you're right" is not a claim (audit, 2026-11-19).
+    r"started (?:a|the|your)\s+(?:timer|music|song|playlist|download|recording|app|meeting)|"
+    r"called (?:him|her|them|your|mom|dad))\b",
     re.I)
+
+# Promises of an action in the future. Nova's LLM can do none of them; the
+# handlers can, when he asks directly. Measured missing (audit): "I'll set a
+# reminder for 3pm", "Let me set a timer for you", "I'll play some jazz".
+FUTURE = re.compile(
+    r"\b(?:I(?:'|’)?ll|I will|let me|I(?:'|’)?m going to|I am going to)\s+" + _SOFT +
+    r"(?:go ahead and\s+)?"
+    r"(?:set|add|schedule|create|book|open|launch|send|email|text|message|call|play|"
+    r"pause|mute|close|delete|move|copy|rename|save|order|search for|look (?:it|that) up|"
+    r"put (?:it|that|a reminder|an event|this)\s+(?:on|in|into)|turn (?:on|off|up|down)|"
+    r"write (?:it|that) down|jot (?:it|that) down|start (?:a|the|your)\s+(?:timer|music|playlist))\b|"
+    r"\bI(?:'|’)?m (?:setting|adding|scheduling|creating|booking|opening|sending|playing|"
+    r"saving|calling|texting|emailing) (?:a|an|the|that|it|your|up)\b", re.I)
+# Claims of a finished action that do not start with "I've".
+CLAIMED = re.compile(
+    r"\b(?:reminder|alarm|timer|event|meeting|appointment|message|email|text)\s+"
+    r"(?:is\s+|has been\s+)?(?:set|added|scheduled|created|booked|sent)\b(?!\s+(?:up\s+)?by\s+you)|"
+    r"\bconsider it done\b|\ball set\b(?=.*\b(?:reminder|alarm|timer|calendar)\b)", re.I)
 
 CANT_WATCH = ("I can't keep watch on that by myself. Ask me again whenever you "
               "like, or tell me to set a reminder.")
 CANT_WORK = "That's more than I can do on my own. I can't work on things in the background."
+CANT_DO = ("I can't do that from here. Ask me for it directly and I'll do it if it's "
+           "something I can do.")
 DIDNT = "To be clear, I haven't actually done anything there."
 
 
@@ -66,6 +94,10 @@ def unbacked(sentence: str) -> str | None:
         return CANT_WATCH
     if WORKING.search(s):
         return CANT_WORK
+    if FUTURE.search(s):
+        return CANT_DO
+    if CLAIMED.search(s):
+        return DIDNT
     for m in DONE.finditer(s):
         if _DONE_VERBS.match(s[m.end():]):
             return DIDNT

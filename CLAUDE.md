@@ -291,6 +291,7 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | `test_brain_learning.py` | the brain learns, asks, is taught and corrected — and nothing goes wrong silently | real `_handle_turn_impl`, stage runners recorded |
 | `test_turnstats.py` | every turn records what answered it; "why?" is answered from that | real `_handle_turn_impl`, stage runners recorded |
 | `test_world_facts.py` | facts looked up, kept only if timeless and grounded, never served for another question, nothing personal sent; night school's audit, curiosity, gates | real store/night school/embedder + real pipeline; Wikipedia canned (real captured responses), model scripted |
+| `test_audit_regressions.py` | every defect the 2026-11-19 four-way audit of the brain branch proved (wrong arithmetic, false promises let through, a stale "did you mean" that could lock his Mac, names leaking to Wikipedia in the possessive, "shuffle off" turning shuffle on...) stays fixed — each check confirmed failing on the pre-fix commit | real modules + real pipeline, tools as dry runs, no network, no model |
 | `world_facts_live.py` | the real 3B answers better with the reference; real lookups, intake, audit; the real process looks up, stores, serves, cites | real model + real Wikipedia + real process (NOVA_TEST_LIVE=1, ~8 requests) |
 | `test_honesty.py` | no spoken promise nothing keeps; typed turns stay silent | real `_stream_response`, scripted LLM |
 | `test_unprompted.py` | one door for unprompted speech: never twice, ceilings, watches kept across restarts | real delivery/proactive/standing, throwaway DB |
@@ -359,6 +360,14 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 how I tested it (always naming the fidelity above) / what succeeded and what
 did not / what he needs to do. Plus an explicit "could not verify" line. Never
 lead with a pass count.
+
+10. **An app the sweep launches may bring HIS documents with it.** The
+    launch/quit test used TextEdit, which restores untitled documents on
+    launch — one he once had Nova type into ("Nova wrote this line") came
+    back every run, its quit stalled, the check failed, and TextEdit was left
+    open on his Mac. The test uses Calculator now (nothing to restore) and
+    skips itself if Calculator is already his. Never quit an app holding his
+    content to make a test pass.
 
 **When to run what:** targeted suites for a targeted fix; `--quick` before any
 merge; `--all` before a merge touching shared plumbing. Do NOT full-sweep every

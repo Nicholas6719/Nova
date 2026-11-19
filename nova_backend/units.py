@@ -63,7 +63,6 @@ _ALIASES.update({
     "kb": "kilobyte", "mb": "megabyte", "gb": "gigabyte", "tb": "terabyte", "gigs": "gigabyte",
     "c": "celsius", "centigrade": "celsius", "degrees celsius": "celsius", "degrees c": "celsius",
     "f": "fahrenheit", "degrees fahrenheit": "fahrenheit", "degrees f": "fahrenheit",
-    "k": "kilometer",
 })
 _ALIASES["kelvin"] = "kelvin"
 
@@ -123,6 +122,13 @@ def convert(text: str) -> dict | None:
         n = 1.0 if raw_n in ("a", "an", "one") else float(raw_n)
         frm = _ALIASES.get(m.group("frm").strip())
         to = _ALIASES.get(m.group("to").strip())
+        # A bare "k" is kelvin beside a temperature, kilometers otherwise:
+        # "0 c in k" said Celsius and kilometers measure different things.
+        if frm and to and "temp" in (_UNITS[frm][1], _UNITS[to][1]):
+            if frm == "kilometer" and m.group("frm").strip() == "k":
+                frm = "kelvin"
+            if to == "kilometer" and m.group("to").strip() == "k":
+                to = "kelvin"
         if not frm or not to or frm == to:
             return None
         f_fac, f_kind = _UNITS[frm]

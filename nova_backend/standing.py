@@ -48,33 +48,52 @@ CREATE TABLE IF NOT EXISTS standing_watches (
 
 _ASK = r"^\s*(?:nova[,\s]+)?(?:please\s+)?(?:can\s+you\s+)?(?:tell|let|warn|alert|notify|ping)\s+me\s+(?:know\s+)?" \
        r"(?:when|if|once|as\s+soon\s+as|the\s+moment)\s+"
-_NUM = r"(\d{1,3})\s*(?:%|percent)?"
+# Not a prefix of a bigger number: "above 1000" was read as 100 (audit).
+_NUM = r"(\d{1,3}(?:\.\d+)?)(?![\d.])\s*(?:%|percent)?"
 _PATTERNS: list[tuple[re.Pattern, Callable[[re.Match], tuple]]] = [
     (re.compile(_ASK + r"(?:my\s+|the\s+)?(?:battery|mac|laptop|computer)\s+(?:is\s+)?"
                 r"(?:fully\s+charged|charged|full|done\s+charging|finished\s+charging|at\s+100)",
                 re.I), lambda m: ("battery_full", ">=", 100.0)),
-    (re.compile(_ASK + r"(?:my\s+|the\s+)?battery\s+(?:hits|reaches|gets\s+to|is\s+at|is\s+back\s+to|"
-                r"goes\s+(?:above|over|past)|is\s+(?:above|over))\s+" + _NUM, re.I),
+    # Words that SAY the direction fix it...
+    (re.compile(_ASK + r"(?:my\s+|the\s+)?battery\s+(?:goes\s+(?:above|over|past)|is\s+(?:above|over)|"
+                r"climbs\s+(?:above|over|past|to)|is\s+back\s+(?:up\s+)?to)\s+" + _NUM, re.I),
      lambda m: ("battery", ">=", float(m.group(1)))),
-    (re.compile(_ASK + r"(?:my\s+|the\s+)?battery\s+(?:drops|falls|goes|gets|is)\s+(?:below|under|"
-                r"down\s+to|to)\s+" + _NUM, re.I),
+    (re.compile(_ASK + r"(?:my\s+|the\s+)?battery\s+(?:(?:drops|falls|goes|gets|is)\s+(?:below|under|"
+                r"down\s+to)|(?:drops|falls)\s+to)\s+" + _NUM, re.I),
      lambda m: ("battery", "<=", float(m.group(1)))),
+    # ...and words that do not ("is at", "hits", "reaches", "gets to", "goes
+    # to") take it from where the battery is NOW. They were always read as
+    # rising, so "tell me when my battery is at 20 percent" — the most natural
+    # low-battery warning — answered "it's already at 80" (audit, 2026-11-19).
+    (re.compile(_ASK + r"(?:my\s+|the\s+)?battery\s+(?:hits|reaches|gets\s+to|is\s+at|goes\s+to|"
+                r"gets\s+down\s+to)\s+" + _NUM, re.I),
+     lambda m: ("battery", "auto", float(m.group(1)))),
     (re.compile(_ASK + r"(?:my\s+|the\s+)?battery\s+(?:is\s+|gets\s+|is\s+getting\s+|runs\s+)?low", re.I),
      lambda m: ("battery", "<=", 20.0)),
-    (re.compile(_ASK + r"(?:my\s+|the\s+)?(?:cpu|processor)(?:\s+usage)?\s+(?:goes|gets|is|hits|"
-                r"climbs)\s+(?:above|over|past|to)?\s*" + _NUM, re.I),
-     lambda m: ("cpu", ">=", float(m.group(1)))),
     (re.compile(_ASK + r"(?:my\s+|the\s+)?(?:cpu|processor)(?:\s+usage)?\s+(?:drops|falls|goes|is|gets)\s+"
                 r"(?:below|under|down\s+to)\s+" + _NUM, re.I),
      lambda m: ("cpu", "<=", float(m.group(1)))),
+    (re.compile(_ASK + r"(?:my\s+|the\s+)?(?:cpu|processor)(?:\s+usage)?\s+(?:goes|gets|is|climbs|spikes)\s+"
+                r"(?:above|over|past)\s+" + _NUM, re.I),
+     lambda m: ("cpu", ">=", float(m.group(1)))),
+    (re.compile(_ASK + r"(?:my\s+|the\s+)?(?:cpu|processor)(?:\s+usage)?\s+(?:hits|reaches|gets\s+to|"
+                r"is\s+at|goes\s+to)\s+" + _NUM, re.I),
+     lambda m: ("cpu", "auto", float(m.group(1)))),
     (re.compile(_ASK + r"(?:my\s+|the\s+)?(?:cpu|processor)\s+(?:calms\s+down|settles\s+down|is\s+idle)",
                 re.I), lambda m: ("cpu", "<=", 30.0)),
-    (re.compile(_ASK + r"(?:my\s+|the\s+)?(?:memory|ram)(?:\s+usage)?\s+(?:goes|gets|is|hits)\s+"
-                r"(?:above|over|past|to)?\s*" + _NUM, re.I),
+    (re.compile(_ASK + r"(?:my\s+|the\s+)?(?:memory|ram)(?:\s+usage)?\s+(?:goes|gets|is|climbs)\s+"
+                r"(?:above|over|past)\s+" + _NUM, re.I),
      lambda m: ("memory", ">=", float(m.group(1)))),
+    (re.compile(_ASK + r"(?:my\s+|the\s+)?(?:memory|ram)(?:\s+usage)?\s+(?:drops|falls|goes|gets|is)\s+"
+                r"(?:below|under|down\s+to)\s+" + _NUM, re.I),
+     lambda m: ("memory", "<=", float(m.group(1)))),
+    (re.compile(_ASK + r"(?:my\s+|the\s+)?(?:memory|ram)(?:\s+usage)?\s+(?:hits|reaches|gets\s+to|"
+                r"is\s+at|goes\s+to)\s+" + _NUM, re.I),
+     lambda m: ("memory", "auto", float(m.group(1)))),
 ]
-_LIST_RE = re.compile(r"^\s*(?:nova[,\s]+)?what\s+(?:are\s+you\s+watching|watches\s+(?:do\s+i\s+have|are\s+"
-                      r"(?:set|running|on)))\b", re.I)
+# End-anchored: "what are you watching on netflix" is not about watches.
+_LIST_RE = re.compile(r"^\s*(?:nova[,\s]+)?what\s+(?:are\s+you\s+watching(?:\s+for\s+me)?|watches\s+(?:do\s+i\s+have|"
+                      r"are\s+(?:set|running|on)))(?:\s+(?:right\s+)?now)?\s*(?:nova)?[\s.!?]*$", re.I)
 _CANCEL_RE = re.compile(
     r"^\s*(?:nova[,\s]+)?(?:stop|cancel|forget|delete|remove|clear)\s+(?:watching\s+(?:my\s+|the\s+)?"
     r"(?P<a>battery|cpu|processor|memory|ram)|(?:the\s+|my\s+)?(?P<b>battery|cpu|processor|memory|ram)\s+"
@@ -162,10 +181,15 @@ class StandingWatches:
         if w is None:
             return None
         now = self._reading_for(w)
+        if w["op"] == "auto":
+            w["op"] = self.direction(w, now)
         if now is not None and self._met(w, now):
             if w["metric"] == "battery_full":
                 return "Your battery is already fully charged."
             return f"It's already at {int(now)} percent."
+        if any((x["metric"], x["op"], x["value"]) == (w["metric"], w["op"], w["value"])
+               for x in self.active()):
+            return f"I'm already watching for that. I'll tell you when {describe(w)}."
         self.add(w, text)
         if now is None:
             return (f"I'll tell you when {describe(w)}, though I can't read it right "
@@ -246,6 +270,16 @@ class StandingWatches:
         except Exception as exc:
             log.debug(f"[watch] could not read {metric}: {exc}")
             return None
+
+    @staticmethod
+    def direction(w: dict, now: Optional[float]) -> str:
+        """"Tell me when my battery is at 20": falling from 80, rising from 5.
+        With no reading, the likely meaning for that metric."""
+        if now is not None and now != w["value"]:
+            return ">=" if now < w["value"] else "<="
+        if w["metric"] == "battery":
+            return "<=" if w["value"] <= 50 else ">="
+        return ">=" if w["value"] >= 50 else "<="
 
     @staticmethod
     def _met(w: dict, now: float) -> bool:

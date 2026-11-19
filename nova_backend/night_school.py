@@ -60,7 +60,8 @@ _PARA_PROMPT = 'Give {n} different natural ways a person might say this to a voi
 _REPORT_RE = re.compile(
     r"^\s*(?:nova[,\s]+)?(?:what\s+did\s+you\s+(?:learn|look\s+up|do|study|find\s+out)\s+"
     r"(?:last\s+night|overnight|while\s+i\s+(?:was\s+)?(?:slept|sleeping|asleep))|"
-    r"(?:how\s+did\s+)?night\s+school(?:\s+(?:report|go))?|what\s+did\s+you\s+look\s+up)\b", re.I)
+    r"(?:how\s+did\s+)?night\s+school(?:\s+(?:report|go))?|what\s+did\s+you\s+look\s+up)"
+    r"\s*(?:nova)?[\s.!?]*$", re.I)
 
 
 def wants_report(text: str) -> bool:
@@ -307,6 +308,10 @@ class NightSchool:
         return out
 
     def _curiosity(self, report: dict, back: Callable[[], bool]) -> None:
+        import wiki
+        if self.facts._search is None and wiki.backing_off():
+            report["stopped"] = "wikipedia asked us to slow down"
+            return
         sent = 0
         for q in self.candidates():
             if sent >= self.curiosity_budget:
@@ -317,12 +322,12 @@ class NightSchool:
             if sent:
                 self._sleep(self.spacing_s)
             ref = self.facts.reference(q, origin="night")
+            if ref.get("reason") == "rate limited":
+                report["stopped"] = "wikipedia asked us to slow down"
+                return
             sent += 1
             report["looked_up"].append(q)
             if not ref.get("ok"):
-                if ref.get("reason") == "rate limited":
-                    report["stopped"] = "wikipedia asked us to slow down"
-                    return
                 continue
             if back():
                 report["stopped"] = "he came back"

@@ -296,8 +296,12 @@ class NovaTools:
             return self._request_power(m.group(1))
 
         # ── 2. Lock screen ──────────────────────────────────────────────────
-        if re.search(r"\block\s+(?:the\s+|my\s+)?(?:screen|mac|computer|laptop)\b", low) \
-           or re.search(r"\block\s+it\s+up\b", low):
+        # The request itself, at the head of the sentence: "I forgot to lock
+        # my computer yesterday" and "how do I lock my screen" locked it
+        # (audit, 2026-11-19 — "my" had just been allowed).
+        if re.search(r"^\s*(?:(?:please|can\s+you|could\s+you|go\s+ahead\s+and|now)\s+)*"
+                     r"lock\s+(?:the\s+|my\s+|this\s+)?(?:screen|mac|macbook|computer|laptop)\b", low) \
+           or re.search(r"^\s*(?:please\s+)?lock\s+it\s+up\b", low):
             return self._lock_screen()
 
         # ── 3. Timers / short in-process reminders ──────────────────────────
@@ -1389,12 +1393,16 @@ class NovaTools:
     # from earth") or to something in the sky is a general-knowledge question:
     # it belongs to the world-fact stage, and sending it to MapKit as a search
     # near his location measured nonsense and leaked where he was for nothing.
-    _SKY = re.compile(r"^(?:the\s+)?(?:moon|sun|mars|venus|mercury|jupiter|saturn|uranus|"
-                      r"neptune|pluto|earth|stars?|nearest\s+star|milky\s+way|"
-                      r"andromeda|horizon|space|outer\s+space|iss|international\s+space\s+"
-                      r"station)\b", re.I)
-    _FROM_ELSEWHERE = re.compile(r"\bfrom\s+(?!here\b|my\s+(?:location|place|house|home)\b|"
-                                 r"me\b|where\s+i\s+am\b)\S", re.I)
+    _SKY = re.compile(r"^(?:the\s+)?(?:(?:nearest|closest)\s+)?(?:moon|sun|mars|venus|mercury|jupiter|"
+                      r"saturn|uranus|neptune|pluto|earth|planets?|stars?|galax(?:y|ies)|"
+                      r"black\s+holes?|alpha\s+centauri|proxima(?:\s+centauri)?|asteroids?|"
+                      r"comets?|nebula|constellation|milky\s+way|andromeda|horizon|space|"
+                      r"outer\s+space|universe|iss|international\s+space\s+station)\b", re.I)
+    # "X from Y" / "X to Y" where Y is not him: a distance between two other
+    # things — "chicago from new york", "closest planet to the sun", "closest
+    # country to australia" (audit, 2026-11-19).
+    _FROM_ELSEWHERE = re.compile(r"\b(?:from|to)\s+(?!here\b|my\s+(?:location|place|house|home)\b|"
+                                 r"me\b|us\b|where\s+i\s+am\b)\S", re.I)
 
     def _not_a_trip(self, raw_place: str) -> bool:
         p = (raw_place or "").strip()
@@ -1622,7 +1630,7 @@ class NovaTools:
         # ── what's playing ──────────────────────────────────────────────
         if re.search(r"\bwhat(?:'?s| is)\s+(?:currently\s+)?playing\b", low) \
            or re.search(r"^\s*is\s+(?:there\s+)?(?:any\s+|some\s+)?(?:music|anything|something|a\s+song)"
-                        r"\s+(?:currently\s+)?(?:playing|on)\b", low) \
+                        r"\s+(?:currently\s+)?(?:playing|on)(?:\s+(?:right\s+)?now)?\s*$", low) \
            or re.search(r"\bwhat\s+song\s+is\s+(?:this|playing)\b", low) \
            or re.search(r"\bwho\s+(?:sings|is\s+singing)\s+this\b", low) \
            or re.search(r"\bname\s+of\s+(?:this|the)\s+song\b", low):
@@ -1740,10 +1748,16 @@ class NovaTools:
         # ── music volume (the PLAYER's own volume, not system audio) ─────
         # "turn the music down" never says "volume", and fell through to the
         # LLM. A turn/make verb with a direction is the same request.
+        # The verb must GOVERN the music: "I want to make a song about growing
+        # up" and "bring up the song lyrics" changed his volume (audit).
+        _MV = (r"^\s*(?:(?:please|can\s+you|could\s+you)\s+)?(?:turn|crank|make|bring)\s+"
+               r"(?:(?:up|down)\s+)?(?:the\s+|my\s+|this\s+)?(?:music|spotify|song)\b"
+               r"(?:\s+(?:up|down|louder|quieter|softer|a\s+(?:bit|little)\s+(?:up|down|louder|quieter)))?")
+        mvm = re.search(_MV, low)
+        directed = bool(mvm and re.search(r"\b(?:up|down|louder|quieter|softer)\b", mvm.group(0)))
         if re.search(r"\b(music|spotify|song)\b", low) and (
-                "volume" in low or re.search(
-                    r"\b(?:turn|crank|make|bring)\b.*\b(?:up|down|louder|quieter|softer)\b",
-                    low)):
+                re.search(r"\b(?:music|spotify|song)\s+volume\b|\bvolume\s+(?:of|on)\s+(?:the\s+)?"
+                          r"(?:music|spotify|song)\b", low) or directed):
             app = self._running_player()
             if not app:
                 return self._no_player()

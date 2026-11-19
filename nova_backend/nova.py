@@ -126,6 +126,17 @@ _HYPOTHETICAL_RE = re.compile(
 )
 
 
+# An unmistakable lesson, even when its one step is not yet something Nova can
+# do: "when I say X, do Y" / "... I want you to Y".
+_TEACH_CUE = re.compile(r"(?:,|\s)\s*(?:then\s+|do\s+|you\s+should\s+|i\s+want\s+you\s+to\s+)", re.I)
+
+
+# A step that opens with a pronoun or determiner is a statement, not an
+# instruction: "when I say I'm tired, I MEAN IT" vs "..., JUGGLE three oranges".
+_NOT_AN_INSTRUCTION = re.compile(r"^\s*(?:i|i'm|im|i've|it|it's|its|that|that's|this|you|you're|we|"
+                                 r"he|she|they|there|my|the|a|an|so|and|but)\b", re.I)
+
+
 def _is_unsupported_action(text: str) -> bool:
     """Phrased as an action, and no handler claimed it: Nova must refuse it
     honestly rather than let the LLM say it already did it (stage 8b)."""
@@ -521,17 +532,28 @@ class VoiceAssistant:
                     done.set()
                 self._llm_queue.task_done()
 
-    def _submit_turn(self, text: str, wait: bool) -> None:
+    def _submit_turn(self, text: str, wait: bool, silent: bool = False) -> None:
         """Enqueue a conversation turn for the MLX worker thread. Voice waits for
         completion (so the wake loop doesn't resume mid-response); text input
         returns immediately and receives results over the WebSocket."""
         done = threading.Event() if wait else None
         self._llm_queue.put(
             (_PRIO_TURN, next(self._llm_seq),
-             lambda: self._handle_turn_impl(text), done)
+             lambda: self._run_turn(text, silent), done)
         )
         if done is not None:
             done.wait()
+
+    def _run_turn(self, text: str, silent: bool) -> None:
+        """Typed or spoken travels WITH the turn. It used to be one shared
+        flag set at submit time, so a typed turn queued behind a spoken one
+        silenced the spoken reply, or the voice loop made a typed one speak
+        (audit, 2026-11-19)."""
+        self._silent_turn = silent
+        try:
+            self._handle_turn_impl(text)
+        finally:
+            self._silent_turn = False
 
     def _submit_job(self, fn, wait: bool = False,
                     priority: int = None) -> None:
@@ -1216,11 +1238,10 @@ class VoiceAssistant:
             # He SPOKE this one. Clear any silent flag left by a typed turn, or
             # a single use of the keyboard would mute Nova for the rest of the
             # session.
-            self._silent_turn = False
             self.ws.send_message("user", text)
             # Run on the MLX worker thread and wait: capture must not resume
             # until the response (and its TTS) is done, or it self-captures.
-            self._submit_turn(text, wait=True)
+            self._submit_turn(text, wait=True)        # spoken: silent defaults False
             if self._sleep_after_turn:
                 # The utterance carried both content and a sign-off; the content
                 # has now been answered, so honor the sign-off.
@@ -1319,12 +1340,11 @@ class VoiceAssistant:
         if not text.strip():
             return
         log.info(f"[text-input] {text}{' (silent)' if silent else ''}")
-        self._silent_turn = silent
         self.memory.add_turn("user", text)
         self.ws.send_message("user", text)
         # Submit to the MLX worker and return immediately; the response streams
         # back over the WebSocket. (Never touch MLX from this HTTP/WS thread.)
-        self._submit_turn(text, wait=False)
+        self._submit_turn(text, wait=False, silent=silent)
 
     # ═════════════════════════════════════════════════════════════════════════════
     # Core turn handler
@@ -1376,6 +1396,11 @@ class VoiceAssistant:
         # ANSWER un-learned the safari example.
         if note.get("path") not in ("reflex", "lesson", "explain"):
             self._last_reflex = None
+        # A "did you mean" lives for exactly one answer: the turn after it.
+        # Anything an earlier stage answered (a sleep command, a pending file
+        # question) used to leave it armed for the next yes-shaped sentence.
+        if note.get("path") != "ask":
+            self._brain_offer = None
         self._last_active = time.time()
         try:
             if getattr(self, "turnstats", None) is None:
@@ -1426,6 +1451,7 @@ class VoiceAssistant:
                 self._respond(offer())
                 return
             if re.match(r"^(no|nope|nah|no\s+thanks|that'?s\s+all|i'?m\s+good)\b", low):
+                self._note("pending")
                 self._respond(f"Alright, {self.config['user']['address_as']}.")
                 return
             # Otherwise: not a reply to the offer — fall through to normal routing.
@@ -1450,7 +1476,14 @@ class VoiceAssistant:
         # ("no, I meant ..."), teaching or forgetting a phrase ("when I say
         # lights out, mute the sound and lock my Mac"), and a taught phrase
         # itself. All before routing, so none can be re-read as a new command.
-        if self._brain_lessons(text):
+        try:
+            lesson = self._brain_lessons(text)
+        except Exception as exc:
+            # A failure in the brain's bookkeeping must cost the lesson, never
+            # the turn: it used to propagate and end the turn in silence.
+            log.warning(f"[brain] lessons failed, routing on: {exc}")
+            lesson = False
+        if lesson:
             self._note("lesson")
             return
 
@@ -1547,7 +1580,9 @@ class VoiceAssistant:
         if not self._brain_chat:
             claim = self._regex_intent(text) if self._brain_fell_through else None
             if self._regex_commands(text):
-                self._note(f"regex:{(claim or self._regex_intent(text))[0]}")
+                # Each stage notes itself BEFORE it answers (decide_ms used to
+                # include the whole spoken answer, and re-deriving the stage
+                # after the handler's side effects could name the wrong one).
                 # The brain fell through and a regex stage knew what this
                 # was: that is a lesson (brain.learn applies the bar).
                 if claim is not None:
@@ -1621,7 +1656,8 @@ class VoiceAssistant:
     _RELATION_WORDS = re.compile(
         r"name|sister|brother|mother|father|mom|mum|dad|wife|husband|partner|girlfriend|"
         r"boyfriend|fianc|friend|son|daughter|family|cousin|aunt|uncle|grand|niece|nephew|"
-        r"pet|dog|cat|boss|manager|coworker|colleague|roommate|neighbo", re.I)
+        r"pet|dog|cat|parrot|bird|fish|horse|rabbit|hamster|boss|manager|coworker|colleague|"
+        r"roommate|neighbo|relationship|people|person|contact|kid|child|baby", re.I)
 
     def _private_names(self) -> set:
         """Names that must never be sent to Wikipedia: his own, and anyone or
@@ -1634,9 +1670,19 @@ class VoiceAssistant:
                 names.update(re.findall(r"[A-Za-z']{3,}", v))
         try:
             for f in self.memory.all_facts():
-                if self._RELATION_WORDS.search(f"{f.get('category', '')} {f.get('key', '')}"):
-                    names.update(w for w in re.findall(r"[A-Za-z']{3,}", str(f.get("value", "")))
-                                 if w[0].isupper() or f.get("key", "").endswith("name"))
+                cat, key = str(f.get("category", "")), str(f.get("key", ""))
+                val = str(f.get("value", ""))
+                if cat == "note":
+                    # Free text: only capitalised words that are not the
+                    # sentence's first ("Sarah's birthday is in May").
+                    words = re.findall(r"[A-Za-z][A-Za-z'’]{2,}", val)
+                    names.update(w for w in words[1:] if w[0].isupper())
+                elif self._RELATION_WORDS.search(f"{cat} {key}"):
+                    # EVERY word of the value, in any case: the reconciler
+                    # stores "a parrot named kiwi" as relationship/parrot =
+                    # "Kiwi", and his sister as sister = "sarah" — neither was
+                    # collected (audit, 2026-11-19).
+                    names.update(re.findall(r"[A-Za-z][A-Za-z'’]{2,}", val))
         except Exception as exc:
             log.debug(f"facts: could not read names ({exc})")
         return names
@@ -1899,8 +1945,13 @@ class VoiceAssistant:
         if b is None or not b.ready:
             self._brain_offer = None
             return False
-        # An answer to "did you mean X?" — one shot: anything else drops it.
+        # An answer to "did you mean X?" — one shot: anything else drops it,
+        # and so does time. It used to wait forever: asked "did you mean lock
+        # your Mac?", he said "go to sleep", and hours later "right, what's on
+        # my calendar" matched yes and LOCKED HIS MAC (audit, 2026-11-19).
         offer, self._brain_offer = self._brain_offer, None
+        if offer is not None and time.time() - offer.get("ts", 0) > self.CORRECTION_WINDOW_S:
+            offer = None
         if offer is not None:
             m = self._MEANT_RE.match(text)
             if m:
@@ -1964,8 +2015,13 @@ class VoiceAssistant:
             return True
         m = self._TEACH_RE.match(text)
         if m:
-            self._respond(self._teach_phrase(m.group("rest")))
-            return True
+            said = self._teach_phrase(m.group("rest"))
+            # "when I say I'm tired, I mean it" is conversation, not a lesson:
+            # if nothing in it is something Nova can do, it is not claimed
+            # (it used to answer "I don't know how to I mean it yet").
+            if said is not None:
+                self._respond(said)
+                return True
 
         # A taught phrase.
         hit = b.match_command(text)
@@ -1978,7 +2034,7 @@ class VoiceAssistant:
             return True
         return False
 
-    def _teach_phrase(self, rest: str) -> str:
+    def _teach_phrase(self, rest: str) -> Optional[str]:
         """"lights out, mute the sound and lock my Mac" -> a stored phrase.
 
         Every step must be something Nova can already do (the brain or a regex
@@ -2010,6 +2066,9 @@ class VoiceAssistant:
                 continue
             stage, intent = self._regex_intent(st)
             if stage in ("llm", "unsupported") or stage.startswith("error"):
+                if not steps and len(raw_steps) == 1 and not _TEACH_CUE.search(rest) \
+                        and _NOT_AN_INSTRUCTION.match(st):
+                    return None          # "..., I mean it": not a lesson — route it normally
                 return f"I don't know how to {st} yet, so I didn't save that phrase."
             import confidence as C
             if C.consequence(st) == C.HIGH:
@@ -2039,6 +2098,22 @@ class VoiceAssistant:
         if d is not None:
             d.skill.run(self, text, d.args)
             return
+        # _teach_phrase accepts a step any stage of _regex_intent claims, and
+        # that includes views, arithmetic and watches, which live OUTSIDE
+        # _regex_commands — so "go home" behind a phrase answered "I couldn't
+        # go home" (audit, 2026-11-19). Run the same stages it checked.
+        view_intent = self.views.detect_intent(text)
+        if view_intent is not None:
+            self._run_view(view_intent, text)
+            return
+        if self._run_math(text):
+            return
+        st = getattr(self, "standing", None)
+        if st is not None:
+            resp = st.handle(text)
+            if resp is not None:
+                self._respond(resp)
+                return
         if not self._regex_commands(text):
             self._respond(f"I couldn't {text}.")
 
@@ -2063,7 +2138,8 @@ class VoiceAssistant:
         if sk is None or b.was_rejected(text, sk.name):
             return False
         label = sk.label or sk.name.split(".", 1)[-1].replace("_", " ")
-        self._brain_offer = {"text": text, "skill": sk.name, "args": u["args"]}
+        self._brain_offer = {"text": text, "skill": sk.name, "args": u["args"],
+                             "ts": time.time()}
         self._note("ask", sk.name, u.get("confidence"))
         log.info(f"[brain] asking: did you mean {sk.name}? (top {u['top']}, "
                  f"confidence {u['confidence']})")
@@ -2146,6 +2222,7 @@ class VoiceAssistant:
         # "search X" rules would claim some of this phrasing.
         act_intent = self.actuation.detect_intent(text)
         if act_intent is not None:
+            self._note("regex:actuation")
             self._run_actuation(act_intent, text)
             return True
 
@@ -2157,6 +2234,7 @@ class VoiceAssistant:
         # grabbing calendar phrasing.
         cal_intent = self.calendar.detect_intent(text)
         if cal_intent is not None:
+            self._note("regex:calendar")
             self._run_calendar(cal_intent, text)
             return True
 
@@ -2166,6 +2244,7 @@ class VoiceAssistant:
         # Detection is strict — it needs an explicit screen phrase.
         screen_intent = self.screen.detect_intent(text)
         if screen_intent is not None:
+            self._note("regex:screen")
             self._run_screen(screen_intent, text)
             return True
 
@@ -2176,6 +2255,7 @@ class VoiceAssistant:
         # a weather word must appear, and an action verb rules it out.
         weather_intent = self.weather.detect_intent(text)
         if weather_intent is not None:
+            self._note("regex:weather")
             self._run_weather(weather_intent, text)
             return True
 
@@ -2186,6 +2266,7 @@ class VoiceAssistant:
         # "how are you doing" and "I had apple pie" fall straight through.
         market_intent = self.market.detect_intent(text)
         if market_intent is not None:
+            self._note("regex:market")
             self._run_market(market_intent, text)
             return True
 
@@ -2197,24 +2278,28 @@ class VoiceAssistant:
         # so ordinary conversation still falls straight through.
         file_intent = self.files.detect_intent(text)
         if file_intent is not None:
+            self._note("regex:files")
             self._run_files(file_intent, text)
             return True
 
         # ── 6. Memory intents ────────────────────────────────────────────────
         resp = self._handle_memory_intent(text)
         if resp is not None:
+            self._note("regex:memory")
             self._respond(resp)
             return True
 
         # ── 7. Fast-path intents ─────────────────────────────────────────────
         resp = self._fast_path(text)
         if resp is not None:
+            self._note("regex:fastpath")
             self._respond(resp)
             return True
 
         # ── 8. Tool intents ──────────────────────────────────────────────────
         resp = self.tools.match(text)
         if resp is not None:
+            self._note("regex:tools")
             self._finish_tool(resp)
             return True
 

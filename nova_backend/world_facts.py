@@ -76,6 +76,10 @@ _OPEN = re.compile(r"^(?:what|what's|whats|who|who's|whom|whose|when|when's|wher
 # The first or second person is about HIM or about NOVA: never a lookup, and
 # never sent anywhere. ("what's my sister's name", "how are you", "who made you")
 _PERSONAL = re.compile(r"\b(?:i|i'm|i've|i'd|i'll|me|my|mine|myself|we|we're|us|our|ours|"
+                       # informal kinship is always HIS family ("when is mom's
+                       # birthday" went to Wikipedia — audit, 2026-11-19)
+                       r"mom|moms|mom's|mum|mum's|mommy|mama|dad|dads|dad's|daddy|papa|grandma|"
+                       r"grandma's|grandpa|grandpa's|granny|nana|auntie|hubby|wifey|bestie|bro|sis|"
                        r"you|you're|you've|your|yours|yourself|nova)\b", re.I)
 # Opinion, advice, creative work, recommendations: realm 3, the model's job.
 _OPINION = re.compile(r"\b(?:should|shall|best|worst|favou?rite|recommend|suggest|opinion|"
@@ -100,7 +104,14 @@ REALM2 = re.compile(
     r"subscribers|followers|countries|states|stores)|"
     r"ceo|president|prime\s+minister|leader|owner|coach|manager|champion|champions|"
     r"married|dating|alive|age\s+of|how\s+old\s+is|last|won|win|wins|winner|winners|"
-    r"winning|holds?|ranks?|ranking|ranked|number\s+one|top)\b", re.I)
+    r"winning|holds?|ranks?|ranking|ranked|number\s+one|top|"
+    # superlatives and growing totals that slipped through (audit): "the most
+    # populous country", "highest grossing film", "longest river", GDP...
+    r"most|least|highest|lowest|longest|shortest|deepest|smallest|heaviest|"
+    r"lightest|grossing|populous|gdp|economy|inhabitants|residents|teams|"
+    r"medals|oscars|grammys|awards|titles|trophies|"
+    r"how\s+many\s+\w+(?:\s+\w+)?\s+(?:has|have)\s+\w+(?:\s+\w+)?\s+(?:\w+ed|won|made|"
+    r"written|sold|scored|released))\b", re.I)
 # Present tense about WHO is the classic changeable fact ("who is the CEO",
 # "who holds the record"). Measured: the 3B called those timeless.
 _PRESENT_WHO = re.compile(r"^(?:who|who's)\s+(?:is|are|has|have|holds|leads|runs|owns|plays|"
@@ -121,8 +132,11 @@ _STOP = {
     "which", "how", "hows", "why", "whys", "is", "are", "was", "were", "be", "been",
     "did", "does", "do", "can", "could", "the", "a", "an", "of", "in", "on", "at",
     "to", "for", "by", "with", "and", "or", "it", "its", "s", "that", "this", "there",
-    "many", "much", "year", "date", "day", "century", "decade", "country", "city",
-    "continent", "first", "originally", "actually", "exactly", "really", "about",
+    # NOT stopwords, though they look like scaffolding: "country", "city",
+    # "year", "first"... name WHAT is asked. Dropped, "what city is the eiffel
+    # tower in" was served "...in France" and "who was the wife of henry
+    # viii" his FIRST wife (audit, 2026-11-19).
+    "many", "much", "actually", "exactly", "really", "about",
     "approximately", "roughly", "away", "come", "came", "up", "get", "got",
     "also", "please", "tell", "know", "called", "named", "mean", "means", "meaning",
 }
@@ -214,8 +228,12 @@ def private_reason(text: str, names: set[str]) -> Optional[str]:
         return "personal"
     if re.search(r"[\w.+-]+@[\w-]+\.\w+|https?://|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b", t):
         return "contact detail"
-    words = {w.lower() for w in re.findall(r"[A-Za-z']+", t)}
-    hit = words & {n.lower() for n in names if len(n) >= 3}
+    # Possessives stripped on BOTH sides: "Sarah's" never equalled "sarah",
+    # so a stored name went out the moment he said it possessively (audit).
+    def bare(w: str) -> str:
+        return re.sub(r"(?:'s|s')$", "", w.lower().replace("’", "'"))
+    words = {bare(w) for w in re.findall(r"[A-Za-z][A-Za-z'’]*", t)}
+    hit = words & {bare(n) for n in names if len(n) >= 3}
     if hit:
         return "a name from memory"
     return None
@@ -225,13 +243,32 @@ def private_reason(text: str, names: set[str]) -> Optional[str]:
 _NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _GROUND_STOP = _STOP | {"has", "have", "had", "than", "from", "into", "over", "under",
                         "about", "around", "approximately", "roughly", "some", "made",
-                        "known", "one", "two", "three", "four", "five", "six", "seven",
-                        "eight", "nine", "ten", "his", "her", "their", "they", "he",
+                        "known", "his", "her", "their", "they", "he",
                         "she", "were", "which", "who", "metres", "meters", "feet"}
 
 
+_NUMWORD = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6",
+            "seven": "7", "eight": "8", "nine": "9", "ten": "10", "eleven": "11",
+            "twelve": "12", "twenty": "20", "hundred": "100", "thousand": "1000",
+            "million": "1000000", "billion": "1000000000",
+            "first": "1st", "second": "2nd", "third": "3rd", "fourth": "4th",
+            "fifth": "5th", "sixth": "6th", "seventh": "7th", "eighth": "8th",
+            "ninth": "9th", "tenth": "10th", "once": "1x", "twice": "2x"}
+_ORDINAL_DIGITS = re.compile(r"\b(\d+)(?:st|nd|rd|th)\b")
+
+
 def _numbers(text: str) -> set[str]:
-    return {n.replace(",", "").rstrip(".") for n in _NUM.findall(text or "")}
+    """Every number in the text, however it was written: "three funnels" and
+    "third" count, so "had three funnels" is NOT grounded in "had four
+    funnels" (it was — number words sat in the stop list; audit)."""
+    t = (text or "").lower()
+    out = {n.replace(",", "").rstrip(".") for n in _NUM.findall(t)}
+    out |= {m.group(1) + "th" for m in _ORDINAL_DIGITS.finditer(t)}
+    for w in re.findall(r"[a-z]+", t):
+        if w in _NUMWORD:
+            v = _NUMWORD[w]
+            out.add(re.sub(r"(st|nd|rd)$", "th", v) if v[-2:] in ("st", "nd", "rd", "th") else v)
+    return out
 
 
 def grounded(answer: str, source: str) -> bool:
@@ -406,6 +443,12 @@ class WorldFacts:
             log.info(f"[facts] not looking that up: {why}")
             return {"ok": False, "reason": why}
         q = _clean(text)
+        import wiki as _wiki
+        if self._search is None and _wiki.backing_off():
+            # Nothing is sent while Wikipedia has asked us to wait, so nothing
+            # is logged as looked up either (night school used to record such
+            # a question as done, and never send it).
+            return {"ok": False, "reason": "rate limited"}
         if self._search is None:
             import wiki
             t = self.timeout_asked if origin == "asked" else 6.0
@@ -484,8 +527,8 @@ class WorldFacts:
 
     def looked_up(self, q: str) -> bool:
         with self._db() as db:
-            return db.execute("SELECT 1 FROM world_lookups WHERE question=?",
-                              (_clean(q),)).fetchone() is not None
+            return db.execute("SELECT 1 FROM world_lookups WHERE lower(question)=?",
+                              (_clean(q).lower(),)).fetchone() is not None
 
     def lookups(self, since: float = 0.0, origin: Optional[str] = None) -> list[dict]:
         sql = "SELECT * FROM world_lookups WHERE ts >= ?"
@@ -642,13 +685,16 @@ class WorldFacts:
 
 
 # ── spoken receipts ──────────────────────────────────────────────────────────
+# Anchored at both ends ("are you sure it's going to rain tomorrow" is a
+# weather question, not a request for a receipt — audit, 2026-11-19).
+_END = r"\s*(?:nova)?[\s.!?]*$"
 _HOW_KNOW = re.compile(r"^\s*(?:nova[,\s]+)?(?:how\s+do\s+you\s+know\s+(?:that|this)|"
                        r"where\s+did\s+you\s+(?:get|hear|read|find)\s+(?:that|this)|"
                        r"what(?:'s|\s+is)\s+(?:your|the)\s+source|says\s+who|"
-                       r"are\s+you\s+sure(?:\s+about\s+that)?)\b", re.I)
+                       r"are\s+you\s+sure(?:\s+about\s+that)?)" + _END, re.I)
 _WRONG = re.compile(r"^\s*(?:nova[,\s]+)?(?:no[,\s]+)?(?:that(?:'s|\s+is)\s+(?:wrong|not\s+right|"
-                    r"incorrect|not\s+true|false)|that\s+fact\s+is\s+wrong|you(?:'re|\s+are)\s+wrong)\b",
-                    re.I)
+                    r"incorrect|not\s+true|false)|that\s+fact\s+is\s+wrong|you(?:'re|\s+are)\s+wrong)"
+                    + _END, re.I)
 
 
 def wants_source(text: str) -> bool:
