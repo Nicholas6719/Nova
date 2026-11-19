@@ -25,6 +25,9 @@ Nova has two parts:
   Nova.xcodeproj
   nova_backend/          ← Python backend (the brain)
     nova.py                  entry point + routing pipeline
+    brain.py                 THE BRAIN: learned intent router (see BRAIN.md)
+    skills.py                every skill the brain can run without the LLM
+    BRAIN.md                 the brain: design, stages, numbers, what's next
     config.json              all tuneables
     system_prompt.py         Nova's personality
     stt_engine.py            mic capture, wake dispatch, transcription
@@ -129,6 +132,8 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 
 **`echo_canceller.py`** — Subtracts Nova's own voice from the microphone, so she can be interrupted while speaking. Nova is unusually well placed for this: the hard part of software AEC is a clean reference of what the speaker is playing, and **Nova synthesises her own speech**, so Kokoro hands over that signal before it is ever played. Measured on real Kokoro output against real speech: **27-36 dB of her voice removed, his attenuated only 1.5-3.9 dB, and 0.2 dB when she is silent.** Two traps it exists to handle: the APM works in 10 ms frames (160 samples) while the mic delivers 30 ms (480) and the library does NOT reject a wrong size — it degrades silently; and the reference must be consumed in step with incoming mic frames, because playback runs ahead of capture. **Default OFF** (`stt.echo_cancellation`): enabling it also means keeping mic frames during playback, and Nova listens far more often than she speaks. Nothing raises — a failure returns the raw microphone. `feat/barge-in` is the other half.
 
+**`brain.py`** + **`skills.py`** — **The brain**, ported from JARVIS (MiniPCJarvis `docs/BRAIN.md`); full write-up in `nova_backend/BRAIN.md`. A nearest-neighbour classifier over example sentences: each request type is a SKILL (seeds, a slot function that extracts arguments or refuses, a runner, a consequence tier). A sentence is normalised (lowercase, wake word and politeness stripped, numbers → `N`), embedded with **bge-small via fastembed** (local ONNX, ~4ms; model downloaded once to `nova_backend/models/`, gitignored), and matched against ~675 examples. **JARVIS's rule copied exactly:** `confidence = top if margin >= 0.06 else top - (0.06 - margin) * 3`, act at 0.82, "nearly knew" at 0.66 — same embedder, so the numbers still mean what they were tuned to mean. A confident match whose slots extract is a **reflex**: it runs the SAME `_run_*` stage method the regex chain calls (no LLM, so the MLX prompt cache is untouched), 5-45ms in the live process. A guard refusal hands the turn to the runner-up. Otherwise the old regex stages run unchanged behind it. **Slots are asymmetric on purpose:** reads are lenient; writes with no confirmation step (calendar writes, power, lock, app launch by name, web search) stay strict — the module's own regex must accept the sentence; file moves are lenient because file_intents asks before touching disk. **Shape guards** (each from a measured wrong action): a read must be SHAPED like a request ("my next meeting is at three" read his calendar), navigation like navigation ("we should go home soon" went home), and a transport command must name its object ("what's next" skipped his song). A **confident-conversation veto** (`general` skill ≥ 0.82) skips the regex command stages but never the unsupported-action refusal. `confidence.decide(min_tier=)` takes the skill's tier: the brain can raise the transcript bar, never lower it. Storage: `brain_examples` / `brain_rejections` in nova_memory.db, every write committed on a short-lived connection (JARVIS's 2,600-message night was one uncommitted write). `brain.enabled: false` is an instant rollback.
+
 **`ws_server.py`** — Bridge between Python and Swift. HTTP server on :5001, WebSocket server on :8766. Swift connects here to receive state changes, message content, streaming tokens, and **which screen to show** in real time. The current view and its data are held like the current state, so a client that connects — or reconnects after an app relaunch — is told immediately instead of coming up blank.
 
 **`requirements.txt`** — All Python dependencies. Install with `pip install -r requirements.txt`.
@@ -140,17 +145,23 @@ Home is a GRID of six named slots (L1-L3, R1-R3) plus a status row, and its whol
 1. System commands — sleep / wake / mute (always intercepted first)
 2. Calendar follow-up offer — answers a "want to hear what's coming up?" with yes/no
 2b. Pending file question — "which one?" / "move it to Documents?" answered before routing
-2c. UI navigation — go home / the menu / a named screen / work mode, plus the
-    home surface itself: clear home, restore home, move a card to a slot
-3. Calendar / reminders intents — read / create / complete / delete / update (EventKit)
-4. Screen awareness — what's on my screen / what app am I in
-4b. Weather — now / tomorrow / next few days, here or a named place
-5. File intents — find / read / open / move / copy / rename
-6. Memory intents — remember / recall / update / forget
-7. Fast-path intents — greetings / date / time / repeat last response
-8. Tool intents — open app / volume / battery / search / screenshot
+1b. Destructive-action confirmation — a power command's strict yes/no
+2. Calendar follow-up offer — answers a "want to hear what's coming up?" with yes/no
+2b. Pending file question — "which one?" / "move it to Documents?" answered before routing
+2c. UI navigation (regex, anchored both ends) — go home / the menu / a named screen /
+    work mode, plus the home surface: clear home, restore home, move a card to a slot
+2d. Pending actuation question — "that would send it, want me to?"
+2e. **THE BRAIN** (`_brain_turn`) — a confident skill match runs directly; a confident
+    "this is conversation" skips 2f-8 (never 8b); anything else falls through
+2f-8. **Regex command stages, the fallback** (`_regex_commands`), unchanged in order:
+    actuation (work mode) → calendar → screen → weather → market → files →
+    memory → fast path → tools
+8b. Unsupported action — refused honestly, never left to the LLM to fake
 9. RAG context enrichment — query personal documents for context
 10. LLM fallback — MLX streaming with sentence-chunked TTS overlap
+
+Every regex stage is still there. One is removed only when the brain matches it on
+the corpus AND the `[brain-disagree]` log from real use says it is safe.
 
 ---
 
@@ -240,7 +251,10 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
 | Suite | Proves | Fidelity |
 |---|---|---|
 | `verify_environment.py` | every engine imports, MLX generates | real engines |
-| `test_routing_corpus.py` | every phrase that has broken Nova still routes right | real code, side effects stubbed |
+| `test_routing_corpus.py` | every phrase that has broken Nova still routes right | real code, real memory stage on a throwaway data dir, tools via dry-run `detect()` |
+| `test_brain_seeds.py` | no two skills own a canonical seed; every seed executable by its own skill | real skills + real slot extractors |
+| `test_brain_intent.py` | brain vs regex on corpus, 5-fold held-out, two paraphrase sets, his real turns; no NEW wrong action | real brain + real embedder, throwaway DB |
+| `brain_live_check.py` | the brain inside the REAL process: reflexes, timings, LLM still answers after | real process, read-only sentences, silent turns |
 | `test_conversation_loop.py` | when Nova keeps listening vs returns to wake | real `_main_loop`, scripted mic |
 | `test_prompt_cache.py` | the prompt cache changed speed and NOTHING else | real engine + real model |
 | `test_rag_relevance.py` | Nova only quotes a document when it has one | real rag.py + real on-disk index |
@@ -288,6 +302,18 @@ python nova_backend/tests/run_tests.py --all     # everything (plays audio, ~1 m
    run unless the front window is provably the one the test created. Without
    that guard, "close this tab" and "go back" ran against whatever Nicholas had
    open.
+
+8. **Score a router on sentences it was not built from.** The brain is seeded
+   from the corpus, so the corpus only proves parity. Its real numbers come
+   from 5-fold held-out scoring, paraphrase sets written BEFORE the seeds they
+   test (v2 stayed sealed until the seeds froze), and his real turns minus any
+   that are seeds. And a wrong action is scored apart from a miss: a miss falls
+   to conversation; a wrong action does something on his Mac.
+9. **A harness that approximates a stage is not testing it.** The corpus
+   harness guessed at the memory stage with two regexes and reported 257/257
+   while "what's my memory usage" answered "I don't have your memory usage
+   stored yet". Run the real stage against a throwaway data dir; probe tools
+   with `detect()` (match() in dry mode), never a stubbed match().
 
 **Reporting to Nicholas** — every test report is four sections: what I tested /
 how I tested it (always naming the fidelity above) / what succeeded and what
@@ -361,4 +387,8 @@ The MLX model (~2GB) downloads automatically on first run.
    Remaining: the other tabs (finance, calendar, files, memory, conversations
    all still render generically), and a health screen that needs the phone.
 5. iOS app — far back burner, separate on-device architecture
+6. The brain, Stages 2-5 (see `nova_backend/BRAIN.md`): learning from LLM turns,
+   "did you mean...?", taught phrases and corrections; the fact store and night
+   school (needs a privacy decision from him); one door for anything unprompted,
+   honesty filter, standing watches, arithmetic in code; then evidence-driven work.
 

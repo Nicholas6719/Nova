@@ -13,6 +13,8 @@ No user data ever leaves the machine.
 ```
 nova_backend/
   nova.py           — VoiceAssistant orchestrator (main entry point)
+  brain.py          — the brain: learned intent router (BRAIN.md)
+  skills.py         — every skill the brain runs without the LLM
   config.json       — All tuneable parameters
   system_prompt.py  — Nova's personality, identity, memory injection
   requirements.txt  — Python dependencies
@@ -33,19 +35,29 @@ nova_backend/
 ## Pipeline (routing order — first match wins)
 
 ```
-Wake word
-  → STT (faster-whisper + webrtcvad VAD)
-  → [1] System commands      (sleep / wake / mute)
-  → [2] Calendar follow-up    (answers "want to hear what's coming up?")
-  → [2b] Pending file question ("which one?" / "move it to Documents?")
-  → [3] Calendar intents      (read / create / complete / delete / update)
-  → [4] File intents          (find / read / open / move / copy / rename)
-  → [5] Memory intents        (remember / recall / update / forget)
-  → [6] Fast-path intents     (greeting / date / time / repeat)
-  → [7] Tool intents          (open app / volume / battery / search / screenshot)
-  → [8] RAG context enrichment
-  → [9] LLM (MLX streaming) → sentence chunking → TTS (Kokoro ONNX)
+Wake word ("Nova", openWakeWord)
+  → STT (faster-whisper, beam 5) → confidence gate (confidence.py; the brain's
+    skill tier can raise its bar, never lower it)
+  → [1]  System commands            sleep / wake / mute
+  → [1b] Power confirmation         strict yes/no
+  → [2]  Calendar follow-up         "want to hear what's coming up?"
+  → [2b] Pending file question      "which one?" / "move it to Documents?"
+  → [2c] UI navigation (regex)      home / menu / screens / home surface
+  → [2d] Pending actuation question "that would send it, want me to?"
+  → [2e] THE BRAIN                  brain.py + skills.py: a confident skill runs
+                                    directly (no LLM); "surely conversation"
+                                    skips 2f-8; otherwise fall through
+  → [2f-8] Regex command stages     the fallback, unchanged: actuation →
+                                    calendar → screen → weather → market →
+                                    files → memory → fast path → tools
+  → [8b] Unsupported action         refused honestly, never faked
+  → [9]  RAG context enrichment
+  → [10] LLM (MLX streaming, carried prompt cache) → sentence chunks → Kokoro TTS
 ```
+
+A reflex (2e) and a regex match (2f-8) end in the SAME `_run_*` stage method in
+nova.py, so what happens after a decision cannot differ by who made it. See
+BRAIN.md for the brain itself.
 
 ---
 
@@ -70,43 +82,12 @@ Wake word
 
 ---
 
-## Swift Changes Required (Nova.xcodeproj)
+## Swift side
 
-The Swift UI layer (ContentView.swift, ChatViewModel.swift) is kept.
-The Core/ backend (NovaEngineCore, LLMClient, etc.) is removed.
-A new BackendManager is added.
-
-### Files to add to Nova.xcodeproj
-
-**SwiftBackend/BackendManager.swift**
-- Finds the Python executable and nova_backend/nova.py
-- Launches `python nova.py` as a subprocess
-- Sets NOVA_DATA_DIR environment variable
-- Polls /api/status to confirm startup
-- Restarts on crash
-
-**SwiftBackend/NovaAPIClient.swift**
-- HTTP client: GET /api/status, GET /api/messages, POST /api/message
-- WebSocket client connecting to :8766
-- Publishes state changes and messages via Combine / @Published
-
-### Files to strip from Nova.xcodeproj
-
-Remove or gut (replace with HTTP/WS calls):
-- Core/NovaEngineCore.swift
-- Core/LLMClient.swift
-- Core/IntentDetector.swift
-- Core/MathRouter.swift
-- Core/NovaPersonality.swift
-- Memory/ (replaced by Python memory.py)
-- Tools/ (replaced by Python tools.py)
-
-Keep (adapt to receive data from BackendManager):
-- ContentView.swift
-- Features/Chat/ChatViewModel.swift  (adapt to use NovaAPIClient)
-- Features/Chat/Message.swift
-- Voice/SpeechManager.swift         (TTS now handled by Python — may simplify)
-- Voice/SpeechRecognizer.swift      (STT now handled by Python — may simplify)
+The migration plan that used to sit here (which Swift files to add, gut or keep)
+was completed and then superseded by the UI overhaul: ContentView, ChatViewModel,
+SpeechManager and SpeechRecognizer no longer exist. CLAUDE.md, "Swift Side —
+Current State", is the current description.
 
 ---
 
@@ -140,11 +121,8 @@ The MLX model (~2GB) downloads automatically on first run.
 
 ---
 
-## What's Next (Phase 2+)
+## What's Next
 
-- Calendar integration (EventKit, same approach as Jarvis)
-- Reminder / timer support
-- Proactive notifications (upcoming events, due reminders)
-- Deeper memory: infer preferences from conversation patterns
-- LLM-powered memory summarization (replace naive concatenation)
-- iOS: independent on-device app (separate architecture — no Python)
+Calendar, reminders, timers and passive memory learning are built (CLAUDE.md
+has the current state). The active roadmap is the brain's Stages 2-5 in
+BRAIN.md, then CLAUDE.md "Not Built Yet".
