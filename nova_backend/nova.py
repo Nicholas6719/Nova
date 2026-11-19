@@ -923,8 +923,12 @@ class VoiceAssistant:
                 else:
                     self._show_then_announce(text)
 
+            def _held() -> Optional[bool]:
+                r = self.tools.battery_reading()
+                return None if r is None else bool(r.get("held"))
+
             self.standing = StandingWatches(DATA_DIR / "nova_memory.db", _read, _deliver,
-                                            self.config)
+                                            self.config, held=_held)
             self.standing.start()
         except Exception as exc:
             log.warning(f"standing watches unavailable: {exc}")

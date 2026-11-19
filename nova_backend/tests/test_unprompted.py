@@ -198,6 +198,23 @@ def main() -> int:
           "an unreadable metric is said honestly, and still watched", r)
     check(lock_free(db), "no write lock is left behind")
 
+    print("\n── 'fully charged' when macOS holds the battery at 80")
+    db = tmp / "held.db"
+    d, spoken, _ = door(db)
+    lvl = {"battery": 60.0}
+    hold = {"v": False}
+    w5 = S.StandingWatches(db, lambda m: lvl.get(m), lambda k, t, key: d.deliver(k, t, key=key),
+                           held=lambda: hold["v"])
+    w5.handle("tell me when my battery is fully charged")
+    lvl["battery"] = 80.0
+    check(w5.check_once() == 0, "still charging at 80: not yet")
+    hold["v"] = True
+    check(w5.check_once() == 1 and spoken and "as far as macOS will take it" in spoken[-1]
+          and "80" in spoken[-1], "held at 80 on power: the watch is kept, and says why", f"{spoken}")
+    r = w5.handle("tell me when my battery is fully charged")
+    check(r and "holding it there" in r and not w5.active(),
+          "asked while held: answered now, not stored as a promise that never comes", r)
+
     print(f"\n  {PASS}/{PASS + FAIL}")
     if FAILURES:
         for f in FAILURES:

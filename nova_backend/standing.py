@@ -134,13 +134,18 @@ def describe(w: dict, future: bool = True) -> str:
 class StandingWatches:
     def __init__(self, db_path: Path, read: Callable[[str], Optional[float]],
                  deliver: Callable[[str, str, str], object],
-                 config: Optional[dict] = None) -> None:
+                 config: Optional[dict] = None,
+                 held: Optional[Callable[[], Optional[bool]]] = None) -> None:
         cfg = (config or {}).get("standing", {})
         self.enabled = bool(cfg.get("enabled", True))
         self.poll_s = float(cfg.get("poll_seconds", 30))
         self.db_path = Path(db_path)
         self._read = read            # metric -> current value (0-100) or None
         self._deliver = deliver      # (kind, text, key)
+        # On power but deliberately NOT charging (Optimized Battery Charging
+        # holding at 80): as charged as it will get, so a "fully charged"
+        # watch is kept instead of waiting forever for 100 (audit, 2026-11-19).
+        self._held = held or (lambda: None)
         self._thread: Optional[threading.Thread] = None
         with self._db() as db:
             db.executescript(_SCHEMA)
@@ -187,6 +192,9 @@ class StandingWatches:
             if w["metric"] == "battery_full":
                 return "Your battery is already fully charged."
             return f"It's already at {int(now)} percent."
+        if w["metric"] == "battery_full" and now is not None and self._is_held():
+            return (f"It's at {int(now)} percent and macOS is holding it there to "
+                    "protect the battery, so it won't charge further right now.")
         if any((x["metric"], x["op"], x["value"]) == (w["metric"], w["op"], w["value"])
                for x in self.active()):
             return f"I'm already watching for that. I'll tell you when {describe(w)}."
@@ -233,7 +241,8 @@ class StandingWatches:
             if w["metric"] not in cache:
                 cache[w["metric"]] = self._reading_for(w)
             now = cache[w["metric"]]
-            if now is None or not self._met(w, now):
+            held = w["metric"] == "battery_full" and now is not None and self._is_held()
+            if now is None or not (self._met(w, now) or held):
                 continue
             # Marked fired BEFORE it is said (claim before speaking): a crash
             # between the two costs one message, never a repeat.
@@ -243,6 +252,9 @@ class StandingWatches:
                 if cur.rowcount != 1:
                     continue
             line = self._fired_line(w, now)
+            if held and now < 100:
+                line = (f"Your battery is charged as far as macOS will take it for now, at "
+                        f"{int(now)} percent.")
             self._deliver("watch", line, f"watch:{w['id']}")
             fired += 1
         return fired
@@ -270,6 +282,12 @@ class StandingWatches:
         except Exception as exc:
             log.debug(f"[watch] could not read {metric}: {exc}")
             return None
+
+    def _is_held(self) -> bool:
+        try:
+            return bool(self._held())
+        except Exception:
+            return False
 
     @staticmethod
     def direction(w: dict, now: Optional[float]) -> str:

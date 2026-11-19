@@ -784,7 +784,17 @@ class NovaTools:
                 return None
             level = int(m.group(1))
             ac = "AC Power" in out
-            return {"level": level, "ac": ac, "charging": ac and level < 100}
+            st = re.search(r"\d+%;\s*([^;]+);", out)
+            state = (st.group(1).strip().lower() if st else "")
+            # "AC attached; not charging" is macOS Optimized Battery Charging
+            # (or a battery-health limit) HOLDING the level — often at 80 —
+            # on purpose. A "tell me when it's fully charged" watch must know,
+            # or it waits for a 100 that never comes.
+            held = ac and ("not charging" in out.lower() or state in ("ac attached",)) \
+                and level < 100
+            charging = state in ("charging", "finishing charge") or (ac and level < 100 and not held)
+            return {"level": level, "ac": ac, "charging": charging, "held": held,
+                    "state": state}
         except Exception as e:
             log.warning(f"battery read failed: {e}")
             return None
@@ -906,7 +916,13 @@ class NovaTools:
             return "I couldn't read the battery level."
         level = b["level"]
         if b["ac"]:
-            status = "and charging" if level < 100 else "and fully charged"
+            if level >= 100:
+                status = "and fully charged"
+            elif b.get("held"):
+                # Not "charging": Optimized Battery Charging is holding it.
+                status = "plugged in, and macOS is holding it there to protect the battery"
+            else:
+                status = "and charging"
         elif level > 20:
             status = "on battery"
         else:
